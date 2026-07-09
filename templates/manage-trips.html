@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trip Management — Fleet</title>
+    <meta name="description" content="Create and manage vehicle trips, assign routes, and monitor active trips.">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+    <link rel="stylesheet" href="/static/css/style.css?v=2">
+    <style>
+        body { overflow-y: auto; }
+
+        /* Table inside content card */
+        .trip-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .trip-table th,
+        .trip-table td {
+            padding: 11px 14px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+            font-size: 13.5px;
+        }
+
+        .trip-table thead {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .trip-table th {
+            background: var(--surface-2);
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.07em;
+            color: var(--text-muted);
+        }
+
+        .trip-table td { color: var(--text-secondary); }
+        .trip-table tbody tr:hover { background: rgba(255,255,255,0.025); }
+        .trip-table tbody tr:last-child td { border-bottom: none; }
+
+        /* Pickup / Dropoff suggestion dropdowns */
+        #pickup-suggestions,
+        #dropoff-suggestions {
+            border: 1px solid var(--border-hover);
+            border-radius: var(--radius);
+            background: var(--surface-3);
+            max-height: 200px;
+            overflow-y: auto;
+            display: none;
+            margin-top: 6px;
+            box-shadow: var(--shadow-lg);
+        }
+
+        .geocode-suggestion-item {
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+            color: var(--text-primary);
+            font-size: 13px;
+            transition: background var(--transition), color var(--transition);
+        }
+
+        .geocode-suggestion-item:last-child {
+            border-bottom: none;
+        }
+
+        .geocode-suggestion-item:hover {
+            background: rgba(47, 140, 235, 0.25);
+            color: #fff;
+        }
+
+        .geocode-no-results {
+            color: var(--text-muted);
+            cursor: default;
+        }
+    </style>
+</head>
+<body>
+    <div class="content-shell">
+        <!-- Header -->
+        <header class="top-header">
+            <div class="header-left">
+                <a href="/" class="btn-nav">Back to Map</a>
+                <h1>Trip Management</h1>
+            </div>
+            <nav class="header-nav">
+                <a href="/locations" class="btn-nav">Locations</a>
+                <a href="/trip-history" class="btn-nav">History</a>
+                <a href="/oil-change" class="btn-nav">Oil Change</a>
+            </nav>
+        </header>
+
+        <main class="content-main">
+
+            <!-- Create Trip Card -->
+            <div class="content-card">
+                <h2 id="form-card-title">Create New Trip</h2>
+
+                <div class="card-map">
+                    <div id="map" style="width: 100%; height: 100%;"></div>
+                </div>
+
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label for="pickup-select">Pickup Location</label>
+                        <select id="pickup-select">
+                            <option value="">-- Select Saved Location --</option>
+                        </select>
+                        <div style="display: flex; gap: 8px; margin-top: 6px;">
+                            <input type="text" id="pickup-search" placeholder="Or search custom address..." style="flex: 1; height: 34px; padding: 0 10px; background: rgba(255,255,255,0.06); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-primary); font-size: 13px; font-family: inherit;">
+                            <button id="pickup-pin-btn" class="btn-pin">Pin on Map</button>
+                        </div>
+                        <div id="pickup-suggestions"></div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="dropoff-select">Drop-off Location</label>
+                        <select id="dropoff-select">
+                            <option value="">-- Select Saved Location --</option>
+                        </select>
+                        <div style="display: flex; gap: 8px; margin-top: 6px;">
+                            <input type="text" id="dropoff-search" placeholder="Or search custom address..." style="flex: 1; height: 34px; padding: 0 10px; background: rgba(255,255,255,0.06); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-primary); font-size: 13px; font-family: inherit;">
+                            <button id="dropoff-pin-btn" class="btn-pin">Pin on Map</button>
+                        </div>
+                        <div id="dropoff-suggestions"></div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="customer-name">Customer Name</label>
+                        <input type="text" id="customer-name" placeholder="Enter customer name">
+                    </div>
+
+                    <div class="form-group" id="phase-form-group" style="display: none;">
+                        <label for="trip-phase">Trip Phase</label>
+                        <select id="trip-phase">
+                            <option value="1">Phase 1: To Pickup / Destination</option>
+                            <option value="2">Phase 2: To Destination</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="trip-vehicle-search">Search Vehicles</label>
+                    <input type="text" id="trip-vehicle-search" placeholder="Search by plate number, device name, or ID...">
+                </div>
+
+                <div class="form-group">
+                    <label for="max-distance-filter">Max Distance to Pickup (km)</label>
+                    <input type="number" id="max-distance-filter" step="0.1" placeholder="Leave empty to show all vehicles">
+                </div>
+
+                <div class="suggestions-container">
+                    <div class="suggestions-title">Suggested Vehicles — sorted by distance to pickup</div>
+                    <div class="suggestions-list" id="vehicle-suggestions"></div>
+                </div>
+
+                <div style="margin-top: 20px; display: flex; gap: 10px; align-items: center;">
+                    <button id="create-trip-btn" class="btn-primary" disabled style="height: 38px; padding: 0 22px;">
+                        Assign Trip to Selected Vehicle
+                    </button>
+                    <button id="cancel-edit-btn" class="btn-secondary" style="display: none; height: 38px; padding: 0 22px;">
+                        Cancel Edit
+                    </button>
+                </div>
+            </div>
+
+            <!-- Active Trips Card -->
+            <div class="content-card">
+                <h2>Active Trips</h2>
+                <input type="text" id="active-trips-search" placeholder="Search by vehicle plate or ID...">
+                <div style="overflow-x: auto;">
+                    <table class="trip-table">
+                        <thead>
+                            <tr>
+                                <th>Vehicle</th>
+                                <th>Driver</th>
+                                <th>Customer</th>
+                                <th>Pickup</th>
+                                <th>Drop-off</th>
+                                <th>Phase</th>
+                                <th>Distance (km)</th>
+                                <th>ETA</th>
+                                <th>Trip Time</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trips-table-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="/static/js/utils.js?v=2"></script>
+    <script src="/static/js/manage-trips.js?v=2"></script>
+</body>
+</html>
