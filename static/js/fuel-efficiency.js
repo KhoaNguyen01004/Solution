@@ -9,7 +9,9 @@ let sortKey = 'log_date';
 let sortDir = -1;
 let editingId = null;
 let selectedVehicleId = null;
+let selectedVehicleType = '';
 let chartInstance = null;
+const PAGE_MODE = (document.getElementById('page-mode')?.value || 'regular');
 let selectedChartVehicleId = null;
 let allVehicles = [];
 
@@ -41,28 +43,22 @@ async function populateMonthSelect() {
     sel.innerHTML = '';
     let months = [];
     try {
-        const data = await apiFetch('/api/fuel-log/months');
+        const data = await apiFetch(`/api/fuel-log/months?mode=${PAGE_MODE}`);
         months = data.data || [];
     } catch (_) {}
-    if (months.length === 0) {
-        const now = new Date();
-        for (let i = -6; i <= 1; i++) {
-            const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
-            months.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
-        }
-    }
-    const now = new Date();
-    const current = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+    const allOpt = document.createElement('option');
+    allOpt.value = '';
+    allOpt.textContent = 'All time';
+    sel.appendChild(allOpt);
+
+    sel.selectedIndex = 0;
     for (const ym of months) {
         const d = new Date(ym + '-01');
         const opt = document.createElement('option');
         opt.value = ym;
         opt.textContent = d.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
-        if (ym === current) opt.selected = true;
         sel.appendChild(opt);
     }
-    // If current month not in list, select the first
-    if (!months.includes(current) && sel.options.length > 0) sel.options[0].selected = true;
 }
 
 function getSelectedMonth() {
@@ -80,7 +76,7 @@ async function populateDaySelect() {
     if (!month) { sel.disabled = true; return; }
     sel.disabled = false;
     try {
-        const data = await apiFetch(`/api/fuel-log/days?month=${month}`);
+        const data = await apiFetch(`/api/fuel-log/days?month=${month}&mode=${PAGE_MODE}`);
         availableDays = data.data || [];
     } catch (_) {}
     for (const day of availableDays) {
@@ -145,10 +141,13 @@ async function loadDashboard() {
     const month = getSelectedMonth();
     try {
         const [listData, summaryData] = await Promise.all([
-            apiFetch(`/api/fuel-log?month=${month}`),
+            apiFetch(`/api/fuel-log?month=${month}&mode=${PAGE_MODE}`),
             apiFetch(`/api/fuel-log/summary?month=${month}`),
         ]);
-        allEntries = listData.data || [];
+        allEntries = (listData.data || []).filter(e => {
+            const isContainer = (e.vehicle_type || '').toLowerCase().includes('container');
+            return PAGE_MODE === 'container' ? isContainer : !isContainer;
+        });
         applyFilters();
         recomputeStats();
         renderChart(allEntries);
@@ -192,7 +191,7 @@ function renderStats(stats) {
     const flags = [];
     if (stats.anomaly_count > 0) flags.push(`${stats.anomaly_count} spike`);
     if (stats.no_km_count > 0) flags.push(`${stats.no_km_count} no KM`);
-    document.getElementById('kpi-fuel-sub').textContent = flags.length > 0 ? flags.join(', ') : '0 flagged';
+    document.getElementById('kpi-fuel-sub').textContent = flags.length > 0 ? flags.join(', ') : 'No issues';
     document.getElementById('kpi-cost').innerHTML = `${Number(stats.total_cost || 0).toLocaleString('en-US')} <span style="font-size:1rem;font-weight:400;color:#94a3b8;">VND</span>`;
     document.getElementById('kpi-avg').innerHTML = `${Number(stats.avg_l_per_100km).toFixed(2)} <span style="font-size:1rem;font-weight:400;color:#94a3b8;">L/100km</span>`;
     document.getElementById('kpi-avg-sub').textContent = stats.entry_count > 0 ? `${Number(stats.avg_l_per_100km).toFixed(2)} L/100km avg` : 'No data';
@@ -201,8 +200,14 @@ function renderStats(stats) {
 // ── Filtering (search only) ────────────────────────────────────
 function applyFilters() {
     const q = document.getElementById('table-search').value.trim().toLowerCase();
+    const issueFilter = document.getElementById('issue-filter')?.value || '';
     filteredEntries = allEntries.filter(e => {
         if (selectedDay && e.log_date !== selectedDay) return false;
+        if (selectedChartVehicleId && e.vehicle_id !== selectedChartVehicleId) return false;
+        if (issueFilter === 'issues') {
+            const isIssue = e.is_anomaly || e.distance_km === 0 || (PAGE_MODE === 'container' && !e.is_full_tank);
+            if (!isIssue) return false;
+        }
         if (!q) return true;
         return e.license_plate.toLowerCase().includes(q)
             || (e.driver_name || '').toLowerCase().includes(q)
@@ -215,6 +220,14 @@ function applyFilters() {
             return ((va ?? 0) - (vb ?? 0)) * sortDir;
         });
     }
+}
+
+function onFilterChange() {
+    applyFilters();
+    renderTable();
+    recomputeStats();
+    renderChart(allEntries);
+    document.getElementById('entry-count').textContent = filteredEntries.length;
 }
 
 function filterTable(q) {
@@ -238,13 +251,19 @@ function renderTable() {
     tbody.innerHTML = filteredEntries.map(e => {
         const anomaly = e.is_anomaly;
         const noKm = e.distance_km === 0;
+        const partial = PAGE_MODE === 'container' && !e.is_full_tank;
         const dist = e.distance_km > 0 ? fmtNum(e.distance_km) : '—';
         const l100 = e.l_per_100km > 0 ? e.l_per_100km.toFixed(2) : '—';
-        const anomalyBadge = noKm
-            ? '<span style="color:#f59e0b;font-size:11px;">⚠ No KM</span>'
-            : anomaly
-                ? '<span class="anomaly-badge">⚠ Spike</span>'
-                : '<span style="color:#4ade80;font-size:11px;">✓ Normal</span>';
+        let anomalyBadge = '';
+        if (partial) {
+            anomalyBadge = '<span style="color:#f59e0b;font-size:11px;">⛽ Partial</span>';
+        } else if (noKm) {
+            anomalyBadge = '<span style="color:#f59e0b;font-size:11px;">⚠ No KM</span>';
+        } else if (anomaly) {
+            anomalyBadge = '<span class="anomaly-badge">⚠ Spike</span>';
+        } else {
+            anomalyBadge = '<span style="color:#4ade80;font-size:11px;">✓ Normal</span>';
+        }
         const rowClass = anomaly ? 'anomaly-row' : noKm ? 'no-km-row' : '';
         return `<tr class="${rowClass}">
             <td>${formatDate(e.log_date)}</td>
@@ -255,6 +274,7 @@ function renderTable() {
             <td><span class="fuel-value">${e.liters.toFixed(1)}</span> <span class="fuel-muted">L</span></td>
             <td><span class="fuel-value">${l100}</span></td>
             <td>${escHtml(e.driver_name || '—')}</td>
+            <td>${PAGE_MODE === 'container' ? (e.is_full_tank ? '<span style="color:#4ade80;font-size:11px;">Full</span>' : '<span style="color:#f59e0b;font-size:11px;">Partial</span>') : ''}</td>
             <td>${anomalyBadge}</td>
             <td>
                 <div style="display:flex;gap:6px;">
@@ -280,7 +300,7 @@ function renderChart(entries) {
 
     if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
 
-    const data = entries.filter(e => e.distance_km > 0 && e.liters > 0);
+    const data = entries.filter(e => e.distance_km > 0 && e.liters > 0 && e.l_per_100km > 0);
     const filtered = selectedChartVehicleId
         ? data.filter(e => e.vehicle_id === selectedChartVehicleId)
         : data;
@@ -324,7 +344,33 @@ function renderChart(entries) {
     const anomalies = sorted.map(e => e.is_anomaly);
     const anomalyValues = sorted.map((e, i) => e.is_anomaly ? e.l_per_100km : null);
 
+    const dataLabelPlugin = {
+        id: 'dataLabels',
+        afterDraw(chart) {
+            const ctx = chart.ctx;
+            chart.data.datasets.forEach((dataset, i) => {
+                const meta = chart.getDatasetMeta(i);
+                if (meta.hidden) return;
+                meta.data.forEach((element, index) => {
+                    const value = dataset.data[index];
+                    if (value == null || value <= 0) return;
+                    ctx.save();
+                    ctx.font = 'bold 10px Inter, sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'bottom';
+                    const label = value.toFixed(1);
+                    ctx.fillStyle = 'rgba(13,17,23,0.8)';
+                    ctx.fillRect(element.x - 14, element.y - 20, 28, 14);
+                    ctx.fillStyle = '#f8fafc';
+                    ctx.fillText(label, element.x, element.y - 9);
+                    ctx.restore();
+                });
+            });
+        }
+    };
+
     const ctx = canvas.getContext('2d');
+    Chart.register(dataLabelPlugin);
     chartInstance = new Chart(ctx, {
         type: 'line',
         data: {
@@ -424,78 +470,116 @@ document.addEventListener('click', (e) => {
     }
 });
 
-// ── Vehicle Selector (Dropdown Combobox) for Chart ────────────
+// ── Combined Search & Vehicle Selector ───────────────────────
+function isContainerV(vt) {
+    return (vt || '').toLowerCase().includes('container');
+}
+
 async function loadVehicles() {
     try {
         const data = await apiFetch('/api/fleet/vehicles');
         allVehicles = data.data || [];
-        refreshVehicleDropdown();
+        updateFilterLabel();
     } catch (_) {}
 }
 
-function refreshVehicleDropdown() {
-    const input = document.getElementById('vehicle-selector');
-    if (!input) return;
-    // Keep current selection if still valid
-    const plate = input.value.trim().toUpperCase();
-    if (plate) {
-        const match = allVehicles.find(v => v.plate_number.toUpperCase() === plate);
-        if (!match) {
-            selectedChartVehicleId = null;
-            input.value = '';
-        }
+function renderSearchDropdown(q) {
+    const dropdown = document.getElementById('search-dropdown');
+    const trimmed = q.trim();
+    const modeVehicles = allVehicles.filter(v =>
+        PAGE_MODE === 'container' ? isContainerV(v.vehicle_type) : !isContainerV(v.vehicle_type)
+    );
+    let matches;
+    if (!trimmed) {
+        matches = modeVehicles;
+    } else {
+        matches = modeVehicles.filter(v =>
+            v.plate_number.toLowerCase().includes(trimmed.toLowerCase())
+        );
     }
-    showVehicleDropdown();
-}
+    const limited = matches.slice(0, 10);
 
-function showVehicleDropdown() {
-    const dropdown = document.getElementById('vehicle-dropdown-chart');
-    const input = document.getElementById('vehicle-selector');
-    if (!dropdown || !input) return;
-    const q = input.value.trim().toLowerCase();
-    const matches = q
-        ? allVehicles.filter(v => v.plate_number.toLowerCase().includes(q))
-        : allVehicles;
-    dropdown.innerHTML = `
-        <div class="autocomplete-item ${!selectedChartVehicleId ? 'selected' : ''}" onclick="selectChartVehicle(null)">All Vehicles</div>
-        ${matches.map(v => `
-            <div class="autocomplete-item ${selectedChartVehicleId === v.id ? 'selected' : ''}" onclick="selectChartVehicle(${v.id}, '${escHtml(v.plate_number)}')">
-                ${escHtml(v.plate_number)}
-                <span class="sub">${v.vehicle_type || ''}${v.current_driver ? ' — ' + escHtml(v.current_driver) : ''}</span>
-            </div>
-        `).join('')}
-    `;
+    if (limited.length === 0) {
+        dropdown.innerHTML = `<div class="autocomplete-item" style="color:#f87171;cursor:default;">No vehicle found for "${escHtml(trimmed)}"</div>`;
+    } else {
+        dropdown.innerHTML = `
+            <div class="autocomplete-item ${!selectedChartVehicleId ? 'selected' : ''}" onclick="selectSearchVehicle(null, '')">All vehicles (${modeVehicles.length})</div>
+            ${limited.map(v => `
+                <div class="autocomplete-item ${selectedChartVehicleId === v.id ? 'selected' : ''}" onclick="selectSearchVehicle(${v.id}, '${escHtml(v.plate_number)}')">
+                    ${escHtml(v.plate_number)}
+                    <span class="sub">${v.vehicle_type || ''}${v.current_driver ? ' — ' + escHtml(v.current_driver) : ''}</span>
+                </div>
+            `).join('')}
+        `;
+    }
     dropdown.classList.add('open');
 }
 
-function hideVehicleDropdown() {
-    document.getElementById('vehicle-dropdown-chart')?.classList.remove('open');
-}
-
-function onVehicleSelectorInput(q) {
-    if (!q.trim()) {
+function onSearchInput(q) {
+    const trimmed = q.trim();
+    if (!trimmed) {
+        // Clear vehicle selection, show all
         selectedChartVehicleId = null;
+        applyFilters();
+        renderTable();
         recomputeStats();
         renderChart(allEntries);
+        document.getElementById('entry-count').textContent = filteredEntries.length;
+        updateFilterLabel();
+    } else {
+        // Filter table by text, keep chart on all vehicles unless one is selected
+        applyFilters();
+        renderTable();
+        recomputeStats();
+        renderChart(allEntries);
+        document.getElementById('entry-count').textContent = filteredEntries.length;
+        updateFilterLabel();
     }
-    showVehicleDropdown();
+    renderSearchDropdown(q);
 }
 
-function selectChartVehicle(id, plate) {
+function showSearchDropdown() {
+    const input = document.getElementById('table-search');
+    renderSearchDropdown(input.value);
+}
+
+function hideSearchDropdown() {
+    document.getElementById('search-dropdown')?.classList.remove('open');
+}
+
+function selectSearchVehicle(id, plate) {
     selectedChartVehicleId = id;
-    const input = document.getElementById('vehicle-selector');
-    if (input) input.value = id ? plate : '';
-    hideVehicleDropdown();
+    const input = document.getElementById('table-search');
+    input.value = plate;
+    hideSearchDropdown();
+    // Filter table to this vehicle
+    applyFilters();
+    renderTable();
     recomputeStats();
     renderChart(allEntries);
+    document.getElementById('entry-count').textContent = filteredEntries.length;
+    updateFilterLabel();
+}
+
+function updateFilterLabel() {
+    const label = document.getElementById('chart-filter-label');
+    if (!label) return;
+    if (selectedChartVehicleId) {
+        const v = allVehicles.find(x => x.id === selectedChartVehicleId);
+        label.textContent = v ? v.plate_number : 'All vehicles';
+    } else {
+        label.textContent = 'All vehicles';
+    }
 }
 
 // ── Vehicle Autocomplete in Modal ──────────────────────────────
 function onVehicleInput(q) {
     const dropdown = document.getElementById('vehicle-dropdown');
     if (!q.trim()) { dropdown.classList.remove('open'); selectedVehicleId = null; return; }
+    const isContainer = (vt) => (vt || '').toLowerCase().includes('container');
     const matches = allVehicles.filter(v =>
-        v.plate_number.toLowerCase().includes(q.toLowerCase())
+        v.plate_number.toLowerCase().includes(q.toLowerCase()) &&
+        (PAGE_MODE === 'container' ? isContainer(v.vehicle_type) : !isContainer(v.vehicle_type))
     ).slice(0, 8);
     if (matches.length === 0) { dropdown.classList.remove('open'); return; }
     dropdown.innerHTML = matches.map(v =>
@@ -507,12 +591,19 @@ function onVehicleInput(q) {
     dropdown.classList.add('open');
 }
 
-function selectVehicle(id, plate, vtype, driver) {
+async function selectVehicle(id, plate, vtype, driver) {
     selectedVehicleId = id;
+    selectedVehicleType = vtype;
     document.getElementById('field-plate').value = plate;
     document.getElementById('field-vtype').value = vtype;
     document.getElementById('field-driver').value = driver;
     document.getElementById('vehicle-dropdown').classList.remove('open');
+    if (editingId) return; // don't auto-fill on edit
+    try {
+        const data = await apiFetch(`/api/fuel-log/last-km?plate=${encodeURIComponent(plate)}`);
+        const km = data.new_km || 0;
+        document.getElementById('field-old-km').value = km > 0 ? km : '';
+    } catch (_) {}
 }
 
 // ── Modal ──────────────────────────────────────────────────────
@@ -522,6 +613,9 @@ function openModal(id = null) {
     const title = document.getElementById('modal-title');
     const btnSave = document.getElementById('btn-save');
     selectedVehicleId = null;
+    selectedVehicleType = '';
+    document.getElementById('field-time-group').style.display = PAGE_MODE === 'container' ? 'none' : '';
+    document.getElementById('field-store-group').style.display = PAGE_MODE === 'container' ? 'none' : '';
 
     if (id) {
         const e = allEntries.find(x => x.id === id);
@@ -539,6 +633,8 @@ function openModal(id = null) {
         document.getElementById('field-liters').value = e ? e.liters : '';
         document.getElementById('field-price').value = e ? (e.unit_price || '') : '';
         document.getElementById('field-notes').value = e ? (e.notes || '') : '';
+        const ft = document.getElementById('field-fulltank');
+        if (ft) ft.checked = e ? (e.is_full_tank !== false) : true;
     } else {
         title.textContent = 'Add Refuel Entry';
         btnSave.textContent = 'Save Entry';
@@ -561,6 +657,7 @@ function closeModal() {
     document.getElementById('modal-overlay').classList.remove('open');
     editingId = null;
     selectedVehicleId = null;
+    selectedVehicleType = '';
 }
 
 function handleOverlayClick(e) {
@@ -587,17 +684,19 @@ async function saveEntry() {
 
     if (!plate) return showToast('warning', 'Select a vehicle.');
     if (!date) return showToast('warning', 'Date is required.');
-    if (!time) return showToast('warning', 'Time is required.');
+    if (!time && PAGE_MODE !== 'container') return showToast('warning', 'Time is required.');
     if (isNaN(liters) || liters <= 0) return showToast('warning', 'Liters must be > 0.');
     if (newKm > 0 && oldKm > 0 && newKm < oldKm) return showToast('warning', 'New KM must be >= Old KM.');
     if (newKm - oldKm > 2000 && !confirm('Distance exceeds 2000 km — are you sure?')) return;
 
+    const isFullTank = document.getElementById('field-fulltank')?.checked !== false;
     const payload = {
         license_plate: plate,
         log_date: date, log_time: time, gas_store: store,
         old_km: oldKm, new_km: newKm, liters,
         driver_name: driver, notes,
-        vehicle_id: selectedVehicleId
+        vehicle_id: selectedVehicleId,
+        is_full_tank: isFullTank
     };
     if (price) payload.unit_price = parseFloat(price);
 
@@ -645,7 +744,7 @@ async function deleteEntry(id) {
 function exportCsv() {
     const month = getSelectedMonth();
     const a = document.createElement('a');
-    a.href = `/api/fuel-log/export?month=${month}`;
+    a.href = `/api/fuel-log/export?month=${month}&mode=${PAGE_MODE}`;
     a.download = 'fuel_efficiency_report.csv';
     document.body.appendChild(a);
     a.click();
@@ -663,31 +762,42 @@ async function loadProfiles() {
 function renderProfiles(profiles) {
     const tbody = document.getElementById('profile-body');
     const empty = document.getElementById('profile-empty');
-    document.getElementById('profile-count').textContent = profiles.length;
+    const isContainer = (vt) => (vt || '').toLowerCase().includes('container');
+    const filtered = profiles.filter(p => {
+        const vt = (allVehicles.find(v => v.plate_number === p.license_plate) || {}).vehicle_type || '';
+        return PAGE_MODE === 'container' ? isContainer(vt) : !isContainer(vt);
+    });
+    document.getElementById('profile-count').textContent = filtered.length;
 
-    if (!profiles.length) {
+    if (!filtered.length) {
         tbody.innerHTML = '';
         empty.style.display = 'block';
         return;
     }
     empty.style.display = 'none';
 
-    const sorted = [...profiles].sort((a, b) => a.license_plate.localeCompare(b.license_plate));
+    const sorted = [...filtered].sort((a, b) => a.license_plate.localeCompare(b.license_plate));
     tbody.innerHTML = sorted.map(p => {
+        const pid = escHtml(p.license_plate);
         const normal = p.normal_l_per_100km || 0;
+        const mult = p.anomaly_multiplier || (PAGE_MODE === 'container' ? 1.5 : 1.2);
         const updated = p.updated_at ? formatDateTime(p.updated_at) : '—';
         return `<tr>
-            <td><span class="plate-badge">${escHtml(p.license_plate)}</span></td>
+            <td><span class="plate-badge">${pid}</span></td>
             <td>
-                <span class="fuel-value" id="nd-${escHtml(p.license_plate)}">${normal > 0 ? normal.toFixed(2) : '—'} <span class="fuel-muted">L/100km</span></span>
-                <input type="number" step="0.1" min="1" max="99" class="field-input" style="width:90px;display:none;padding:5px 8px;" id="ni-${escHtml(p.license_plate)}" value="${normal > 0 ? normal : ''}">
+                <span class="fuel-value" id="nd-${pid}">${normal > 0 ? normal.toFixed(2) : '—'} <span class="fuel-muted">L/100km</span></span>
+                <input type="number" step="0.1" min="1" max="99" class="field-input" style="width:90px;display:none;padding:5px 8px;" id="ni-${pid}" value="${normal > 0 ? normal : ''}">
+            </td>
+            <td>
+                <span class="fuel-value" id="md-${pid}">${mult.toFixed(2)} <span class="fuel-muted">x</span></span>
+                <input type="number" step="0.05" min="1.0" max="5.0" class="field-input" style="width:75px;display:none;padding:5px 8px;" id="mi-${pid}" value="${mult}">
             </td>
             <td style="color:#94a3b8;font-size:12px;">${updated}</td>
             <td>
                 <div style="display:flex;gap:6px;">
-                    <button class="btn-action btn-edit" id="neb-${escHtml(p.license_plate)}" onclick="editNormal('${escHtml(p.license_plate)}')">✏️</button>
-                    <button class="btn-action btn-edit" style="display:none;background:rgba(16,185,129,0.15);color:#34d399;border:1px solid rgba(16,185,129,0.25);" id="nsb-${escHtml(p.license_plate)}" onclick="saveNormal('${escHtml(p.license_plate)}')">💾</button>
-                    <button class="btn-action btn-delete" id="ncb-${escHtml(p.license_plate)}" ${normal > 0 ? '' : 'style="display:none;"'} onclick="clearNormal('${escHtml(p.license_plate)}')">🗑</button>
+                    <button class="btn-action btn-edit" id="neb-${pid}" onclick="editNormal('${pid}')">✏️</button>
+                    <button class="btn-action btn-edit" style="display:none;background:rgba(16,185,129,0.15);color:#34d399;border:1px solid rgba(16,185,129,0.25);" id="nsb-${pid}" onclick="saveNormal('${pid}')">💾</button>
+                    <button class="btn-action btn-delete" id="ncb-${pid}" ${normal > 0 || mult ? '' : 'style="display:none;"'} onclick="clearNormal('${pid}')">🗑</button>
                 </div>
             </td>
         </tr>`;
@@ -697,20 +807,29 @@ function renderProfiles(profiles) {
 function editNormal(plate) {
     const sid = escHtml(plate);
     document.getElementById(`nd-${sid}`).style.display = 'none';
-    const inp = document.getElementById(`ni-${sid}`);
-    inp.style.display = 'inline-block'; inp.focus();
+    document.getElementById(`ni-${sid}`).style.display = 'inline-block';
+    document.getElementById(`md-${sid}`).style.display = 'none';
+    document.getElementById(`mi-${sid}`).style.display = 'inline-block';
+    document.getElementById(`ni-${sid}`).focus();
     document.getElementById(`neb-${sid}`).style.display = 'none';
     document.getElementById(`nsb-${sid}`).style.display = 'inline-flex';
 }
 
 async function saveNormal(plate) {
-    const val = parseFloat(document.getElementById(`ni-${escHtml(plate)}`).value);
-    if (isNaN(val) || val <= 0) return showToast('warning', 'Enter a valid L/100km > 0.');
+    const pid = escHtml(plate);
+    const normalVal = parseFloat(document.getElementById(`ni-${pid}`)?.value);
+    const multVal = parseFloat(document.getElementById(`mi-${pid}`)?.value);
+    const body = {};
+    if (!isNaN(normalVal) && normalVal > 0) body.normal_l_per_100km = normalVal;
+    if (isNaN(normalVal) || normalVal <= 0) return showToast('warning', 'Enter a valid L/100km > 0.');
+    if (!isNaN(multVal) && multVal >= 1.0) body.anomaly_multiplier = multVal;
     try {
         await apiFetch(`/api/fuel-log/profiles/${encodeURIComponent(plate)}`, {
-            method: 'PUT', body: JSON.stringify({ normal_l_per_100km: val })
+            method: 'PUT', body: JSON.stringify(body)
         });
-        showToast('success', `Normal for ${plate}: ${val.toFixed(2)} L/100km`);
+        const parts = [`Normal: ${normalVal.toFixed(2)} L/100km`];
+        if (body.anomaly_multiplier) parts.push(`Multiplier: ${multVal.toFixed(2)}x`);
+        showToast('success', `${plate} — ${parts.join(', ')}`);
         await loadProfiles();
         await loadDashboard();
     } catch (err) {

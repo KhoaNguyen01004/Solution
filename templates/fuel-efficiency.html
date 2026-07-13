@@ -34,6 +34,8 @@
         .month-select option { background: #161b22; color: #e6edf3; }
         .month-nav-btn { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: #e6edf3; width: 34px; height: 34px; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 16px; }
         .month-nav-btn:hover { background: rgba(255,255,255,0.12); }
+        .issue-filter { display:flex;align-items:center;gap:10px; }
+        .issue-filter label { font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:#b0bec9; }
 
         .search-bar { display: flex; align-items: center; gap: 10px; flex: 1; max-width: 400px; }
         .search-bar input { flex: 1; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: #e6edf3; padding: 8px 14px; border-radius: 8px; font-size: 13px; font-family: inherit; }
@@ -73,9 +75,15 @@
         .table-title { font-size: 1rem; font-weight: 700; color: #f8fafc; display: flex; align-items: center; gap: 8px; }
         .table-count { background: rgba(47,140,235,0.2); color: #60a5fa; font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 99px; }
 
-        .fe-table-wrapper { overflow-x: auto; }
+        .fe-table-wrapper { overflow-x: auto; overflow-y: auto; max-height: 600px; }
+        .fe-table-wrapper::-webkit-scrollbar { width: 6px; height: 6px; }
+        .fe-table-wrapper::-webkit-scrollbar-track { background: transparent; }
+        .fe-table-wrapper::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+        .fe-table-wrapper::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+        .fe-table-wrapper { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.1) transparent; }
         .fe-table { width: 100%; border-collapse: collapse; font-size: 13px; }
         .fe-table thead tr { background: rgba(255,255,255,0.04); }
+        .fe-table th { position: sticky; top: 0; z-index: 5; background: #1c2333; }
         .fe-table th { padding: 11px 14px; text-align: left; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #b0bec9; white-space: nowrap; border-bottom: 1px solid rgba(255,255,255,0.06); cursor: pointer; user-select: none; }
         .fe-table th:hover { color: #f8fafc; }
         .fe-table td { padding: 12px 14px; color: #cbd5e1; border-bottom: 1px solid rgba(255,255,255,0.04); vertical-align: middle; }
@@ -145,14 +153,25 @@
 </head>
 <body>
 
+    <input type="hidden" id="page-mode" value="{{ mode }}">
     <header class="fe-header">
         <div class="fe-header-left">
-            <div class="fe-logo"><div class="fe-logo-icon"></div><h1>Fuel Efficiency</h1></div>
+            <div class="fe-logo"><div class="fe-logo-icon"></div><h1>{% if mode == 'container' %}Container Fuel{% else %}Fuel Efficiency{% endif %}</h1></div>
         </div>
         <nav class="fe-nav">
             <a href="/" class="btn-nav" style="height:34px;padding:0 14px;font-size:13px;display:inline-flex;align-items:center;border-radius:8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.07);color:#e6edf3;text-decoration:none;font-weight:500;">Map</a>
-            <a href="/vehicle-management" class="btn-nav" style="height:34px;padding:0 14px;font-size:13px;display:inline-flex;align-items:center;border-radius:8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.07);color:#e6edf3;text-decoration:none;font-weight:500;">Vehicles</a>
-            <a href="/oil-change" class="btn-nav" style="height:34px;padding:0 14px;font-size:13px;display:inline-flex;align-items:center;border-radius:8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.07);color:#e6edf3;text-decoration:none;font-weight:500;">Oil Change</a>
+            <div class="nav-dropdown" style="position:relative;">
+                <button class="btn-nav" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='block'?'none':'block'" style="cursor:pointer;background:none;border:none;font-family:inherit;font-size:13px;color:#e6edf3;font-weight:500;padding:0 14px;height:34px;display:inline-flex;align-items:center;gap:4px;border-radius:8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.07);">Fleet &#9662;</button>
+                <div style="display:none;position:absolute;top:100%;right:0;background:#161b22;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:6px;min-width:170px;box-shadow:0 12px 40px rgba(0,0,0,0.5);z-index:200;" class="fleet-dropdown">
+                    <a href="/vehicle-management" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Vehicles</a>
+                    <a href="/oil-change" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Oil Change</a>
+                </div>
+            </div>
+            {% if mode == 'container' %}
+            <a href="/fuel-efficiency" class="btn-nav" style="height:34px;padding:0 14px;font-size:13px;display:inline-flex;align-items:center;border-radius:8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.07);color:#e6edf3;text-decoration:none;font-weight:500;">Regular</a>
+            {% else %}
+            <a href="/fuel-container" class="btn-nav" style="height:34px;padding:0 14px;font-size:13px;display:inline-flex;align-items:center;border-radius:8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.07);color:#e6edf3;text-decoration:none;font-weight:500;">Container</a>
+            {% endif %}
             <button class="btn-export" onclick="exportCsv()" title="Export CSV"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export</button>
             <button class="btn-add" onclick="openModal()">+ Add Entry</button>
         </nav>
@@ -175,8 +194,18 @@
                 </select>
                 <button class="month-nav-btn" onclick="changeDay(1)">&#8594;</button>
             </div>
-            <div class="search-bar">
-                <input id="table-search" type="text" placeholder="Search plate, driver, store…" oninput="filterTable(this.value)">
+            <div class="issue-filter">
+                <label>Filter</label>
+                <select id="issue-filter" class="month-select" onchange="onFilterChange()">
+                    <option value="">All entries</option>
+                    <option value="issues">Issues only ⚠</option>
+                </select>
+            </div>
+            <div class="search-bar" style="margin-left:auto;flex:0 0 auto;width:420px;max-width:100%;">
+                <div class="field-autocomplete" style="width:100%;">
+                    <input id="table-search" type="text" placeholder="Plate number, driver, store…" autocomplete="off" oninput="onSearchInput(this.value)" onfocus="showSearchDropdown()" onblur="setTimeout(hideSearchDropdown,200)" style="width:100%;">
+                    <div class="autocomplete-dropdown" id="search-dropdown" style="width:100%;"></div>
+                </div>
             </div>
         </div>
 
@@ -214,11 +243,7 @@
         <div class="chart-section">
             <div class="chart-header">
                 <div class="chart-title">Fuel Efficiency Over Time</div>
-                <div class="chart-vehicle-selector">
-                    <span style="font-size:12px;color:#94a3b8;">Vehicle:</span>
-                    <input id="vehicle-selector" type="text" placeholder="All vehicles — type or select…" autocomplete="off" oninput="onVehicleSelectorInput(this.value)" onfocus="showVehicleDropdown()" onblur="setTimeout(hideVehicleDropdown,200)">
-                    <div id="vehicle-dropdown-chart" class="autocomplete-dropdown"></div>
-                </div>
+                <div style="font-size:12px;color:#94a3b8;" id="chart-filter-label">All vehicles</div>
             </div>
             <div class="chart-wrapper">
                 <canvas id="efficiency-chart"></canvas>
@@ -247,6 +272,7 @@
                             <th onclick="sortTable('liters')">Fuel</th>
                             <th onclick="sortTable('l_per_100km')">L/100km</th>
                             <th onclick="sortTable('driver_name')">Driver</th>
+                            <th>Tank</th>
                             <th>Anomaly</th>
                             <th>Actions</th>
                         </tr>
@@ -263,12 +289,12 @@
         <div class="table-section" style="margin-top:20px;">
             <div class="table-header">
                 <div class="table-title">Vehicle Baselines <span class="table-count" id="profile-count">0</span></div>
-                <span class="fuel-muted">Set expected normal L/100km per vehicle. Anomalies flagged when actual &gt; normal &times; 1.20.</span>
+                <span class="fuel-muted">Set normal L/100km and anomaly threshold multiplier per vehicle. Anomalies flagged when actual &gt; normal &times; multiplier.</span>
             </div>
             <div class="fe-table-wrapper">
                 <table class="fe-table">
                     <thead><tr>
-                        <th>Plate</th><th>Normal L/100km</th><th>Updated</th><th>Actions</th>
+                        <th>Plate</th><th>Normal L/100km</th><th>Multiplier</th><th>Updated</th><th>Actions</th>
                     </tr></thead>
                     <tbody id="profile-body"></tbody>
                 </table>
@@ -309,12 +335,12 @@
                         <label class="field-label">Date</label>
                         <input id="field-date" class="field-input" type="date">
                     </div>
-                    <div class="field-group">
+                    <div class="field-group" id="field-time-group">
                         <label class="field-label">Time</label>
                         <input id="field-time" class="field-input" type="time">
                     </div>
                 </div>
-                <div class="field-group">
+                <div class="field-group" id="field-store-group">
                     <label class="field-label">Gas Store</label>
                     <input id="field-store" class="field-input" type="text" placeholder="Gas station name">
                 </div>
@@ -338,6 +364,11 @@
                         <input id="field-price" class="field-input" type="number" min="0" step="100" placeholder="e.g. 23500">
                     </div>
                 </div>
+                <div id="field-fulltank-group" class="field-group" style="flex-direction:row;align-items:center;gap:10px;{% if mode != 'container' %}display:none;{% endif %}">
+                    <label class="field-label" style="margin:0;">Full Tank</label>
+                    <input id="field-fulltank" type="checkbox" checked style="width:18px;height:18px;accent-color:#10b981;cursor:pointer;">
+                    <span style="font-size:12px;color:#94a3b8;">Uncheck for partial fill (efficiency skipped until next full tank)</span>
+                </div>
                 <div class="field-group">
                     <label class="field-label">Notes (optional)</label>
                     <input id="field-notes" class="field-input" type="text" placeholder="Any notes">
@@ -353,5 +384,6 @@
     <div id="toast-container"></div>
 
     <script src="/static/js/fuel-efficiency.js"></script>
+    <script>document.addEventListener('click',e=>{if(!e.target.closest('.nav-dropdown'))document.querySelectorAll('.fleet-dropdown').forEach(d=>d.style.display='none')});</script>
 </body>
 </html>

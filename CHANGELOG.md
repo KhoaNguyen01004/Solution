@@ -1,5 +1,51 @@
 # Changelog
 
+## 2026-07-13 — Container Fuel, Partial Tank, Search & UI Overhaul
+
+### Added
+
+- **Container Fuel page** (`/fuel-container`) — separate dashboard for container vehicles
+  - Full Tank ✅ checkbox in modal (hidden on regular page)
+  - Partial fills excluded from efficiency/chart; accumulated efficiency computed at next full tank
+  - Table shows Full/Partial Tank column
+- **Accumulated efficiency** for container vehicles
+  - When `is_full_tank=1`, `l_per_100km` = total liters ÷ total distance since last full tank
+  - Individual `distance_km`/`liters` preserved per-entry (no double-counting in KPIs)
+  - Baseline computation filters to full-tank entries only (falls back to all entries)
+- **Adjustable anomaly multiplier** per vehicle
+  - Default: 1.50× for container, 1.20× for regular
+  - Editable in Vehicle Baselines table alongside normal L/100km
+- **All time month filter** — "All time" option in month selector (default), shows entire history
+- **Combined search bar** — single input handles both table text search and vehicle selection
+  - Click to show all available vehicles; type to filter; "No vehicle found" message on mismatch
+  - Container page shows only container vehicles; regular page shows only regular vehicles
+- **Issue filter** — dropdown to show only flagged entries (spikes, no-KM, partial fills)
+- **Chart data labels** — numeric L/100km value displayed above each chart point
+- **Fleet navigation dropdown** — secondary pages (Oil Change, Vehicles, Fuel, Container) grouped under "Fleet ▾" on all pages
+- **Sticky table headers** — column titles stay visible when scrolling long tables
+- **Styled scrollbar** — thin, semi-transparent scrollbar for refuel log table
+
+### Changed
+
+- **`fuel_log` table** — added `is_full_tank INTEGER NOT NULL DEFAULT 1`
+- **`fuel_vehicle_profile` table** — added `anomaly_multiplier REAL DEFAULT NULL`
+- **`_compute_fuel_entry()`** — skips efficiency for partial fills; computes accumulated efficiency for full fills
+- **`_apply_anomaly_flag()`** — uses per-vehicle multiplier instead of hardcoded 1.20
+- **`GET /api/fuel-log/months`** — accepts `?mode=` to filter months by vehicle type
+- **`GET /api/fuel-log/days`** — accepts `?mode=` to filter days by vehicle type
+- **`GET /api/fuel-log/profiles`** — returns `anomaly_multiplier` per vehicle
+- **`PUT /api/fuel-log/profiles/:plate`** — accepts `anomaly_multiplier` in addition to `normal_l_per_100km`
+- **CSV export** — added Full Tank, Accum Distance KM, Accum Liters columns
+- **Navigation** — consolidated into Fleet dropdown on all pages (index, oil-change, trip-history, locations, manage-trips, fuel-efficiency, vehicle-management)
+- **Month selector** defaults to "All time" instead of current month
+
+### Fixed
+
+- **Vehicle Baselines** table now filters by mode (container/regular)
+- **Day/month selectors** now respect mode filter when querying available days/months
+- **Chart no longer dips to 0** from partial-fill entries (explicitly excluded via `l_per_100km > 0` filter)
+- **Dropdown toggle** uses direct `style.display` swap instead of `classList.toggle` (which didn't work with inline styles)
+
 ## 2026-07-11 — Fuel Efficiency, Refuel Log & Vehicle Management
 
 ### Added

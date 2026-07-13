@@ -211,7 +211,15 @@
             <nav class="header-nav">
                 <a href="/manage-trips" class="btn-nav">Trips</a>
                 <a href="/trip-history" class="btn-nav">History</a>
-                <a href="/oil-change" class="btn-nav">Oil Change</a>
+                <div class="nav-dropdown" style="position:relative;">
+                    <button class="btn-nav" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='block'?'none':'block'" style="cursor:pointer;background:none;border:none;font-family:inherit;font-size:13px;color:#c9d1d9;font-weight:500;padding:0 14px;height:34px;display:inline-flex;align-items:center;gap:4px;">Fleet &#9662;</button>
+                    <div style="display:none;position:absolute;top:100%;right:0;background:#161b22;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:6px;min-width:170px;box-shadow:0 12px 40px rgba(0,0,0,0.5);z-index:200;" class="fleet-dropdown">
+                        <a href="/oil-change" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Oil Change</a>
+                        <a href="/vehicle-management" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Vehicles</a>
+                        <a href="/fuel-efficiency" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Fuel</a>
+                        <a href="/fuel-container" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Container</a>
+                    </div>
+                </div>
                 <button id="clear-all-locations-btn" class="btn-danger">Clear All Locations</button>
             </nav>
         </header>
@@ -257,5 +265,6 @@
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <script src="/static/js/utils.js"></script>
     <script src="/static/js/locations.js"></script>
+    <script>document.addEventListener('click',e=>{if(!e.target.closest('.nav-dropdown'))document.querySelectorAll('.fleet-dropdown').forEach(d=>d.style.display='none')});</script>
 </body>
 </html>

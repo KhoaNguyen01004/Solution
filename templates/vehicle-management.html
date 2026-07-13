@@ -115,7 +115,14 @@
             <h1>Vehicle Management</h1>
         </div>
         <div class="header-actions">
-            <a href="/fuel-efficiency" class="btn-nav" style="height:34px;padding:0 14px;font-size:13px;display:inline-flex;align-items:center;border-radius:8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.07);color:#e6edf3;text-decoration:none;font-weight:500;">Fuel Dashboard</a>
+            <div class="nav-dropdown" style="position:relative;">
+                <button class="btn-nav" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='block'?'none':'block'" style="cursor:pointer;background:none;border:none;font-family:inherit;font-size:13px;color:#e6edf3;font-weight:500;padding:0 14px;height:34px;display:inline-flex;align-items:center;gap:4px;border-radius:8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.07);">Fleet &#9662;</button>
+                <div style="display:none;position:absolute;top:100%;right:0;background:#161b22;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:6px;min-width:170px;box-shadow:0 12px 40px rgba(0,0,0,0.5);z-index:200;" class="fleet-dropdown">
+                    <a href="/fuel-efficiency" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Fuel</a>
+                    <a href="/fuel-container" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Container</a>
+                    <a href="/oil-change" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Oil Change</a>
+                </div>
+            </div>
             <button class="btn-add" onclick="openModal()">+ Add Vehicle</button>
         </div>
     </div>
@@ -207,5 +214,6 @@
 <div id="toast-container"></div>
 
 <script src="/static/js/vehicle-management.js"></script>
+<script>document.addEventListener('click',e=>{if(!e.target.closest('.nav-dropdown'))document.querySelectorAll('.fleet-dropdown').forEach(d=>d.style.display='none')});</script>
 </body>
 </html>
