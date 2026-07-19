@@ -7,6 +7,8 @@ import threading
 from flask import Flask, jsonify, render_template, request, Response
 import requests
 from dotenv import load_dotenv
+from truck_load_planner.db import init_tlp_tables
+import truck_load_planner.routes as tlp_routes
 
 # --------------------------
 # Load Configuration
@@ -488,6 +490,75 @@ def init_db():
         )
     conn.commit()
     conn.close()
+
+    # ----- TLP: container link + migration -----
+    init_tlp_tables(DB_PATH)
+
+    conn2 = sqlite3.connect(DB_PATH)
+    conn2.row_factory = sqlite3.Row
+    c2 = conn2.cursor()
+
+    # Add container_config_id to vehicles if missing
+    c2.execute("PRAGMA table_info(vehicles)")
+    vcols = {col[1] for col in c2.fetchall()}
+    if 'container_config_id' not in vcols:
+        c2.execute("ALTER TABLE vehicles ADD COLUMN container_config_id INTEGER DEFAULT NULL")
+
+    # Add vehicle_id to tlp_load_plans if missing (migration from truck_id)
+    c2.execute("PRAGMA table_info(tlp_load_plans)")
+    lpcols = {col[1] for col in c2.fetchall()}
+    if 'vehicle_id' not in lpcols:
+        c2.execute("ALTER TABLE tlp_load_plans ADD COLUMN vehicle_id INTEGER DEFAULT NULL")
+
+    # Migrate tlp_trucks → container_configs + features (one-time)
+    try:
+        existing = c2.execute("SELECT id FROM container_configs LIMIT 1").fetchone()
+        if not existing:
+            trucks = c2.execute("SELECT * FROM tlp_trucks").fetchall()
+            for t in trucks:
+                c2.execute("""
+                    INSERT INTO container_configs (name, cargo_length_mm, cargo_width_mm, cargo_height_mm, payload_kg)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (t["name"], t["cargo_length"], t["cargo_width"], t["cargo_height"], t["payload_kg"]))
+                cc_id = c2.lastrowid
+
+                if t.get("rear_door_width") and t.get("rear_door_height"):
+                    c2.execute("""
+                        INSERT INTO container_features (container_config_id, feature_type, label, geometry_json)
+                        VALUES (?, 'rear_door', 'Rear Door', ?)
+                    """, (cc_id, json.dumps({"width_mm": t["rear_door_width"], "height_mm": t["rear_door_height"]})))
+
+                if t.get("has_side_door") and t.get("side_door_width") and t.get("side_door_height"):
+                    c2.execute("""
+                        INSERT INTO container_features (container_config_id, feature_type, label, geometry_json)
+                        VALUES (?, 'side_door', 'Side Door', ?)
+                    """, (cc_id, json.dumps({
+                        "width_mm": t["side_door_width"],
+                        "height_mm": t["side_door_height"],
+                        "position_from_front_mm": 0,
+                    })))
+
+                c2.execute(
+                    "UPDATE vehicles SET container_config_id = ? WHERE plate_number = ?",
+                    (cc_id, t["plate_number"])
+                )
+
+            # Migrate load plans: truck_id → vehicle_id
+            plans = c2.execute("SELECT id, truck_id FROM tlp_load_plans WHERE vehicle_id IS NULL").fetchall()
+            for pl in plans:
+                truck_row = c2.execute("SELECT plate_number FROM tlp_trucks WHERE id = ?",
+                                       (pl["truck_id"],)).fetchone()
+                if truck_row:
+                    vrow = c2.execute("SELECT id FROM vehicles WHERE plate_number = ?",
+                                     (truck_row["plate_number"],)).fetchone()
+                    if vrow:
+                        c2.execute("UPDATE tlp_load_plans SET vehicle_id = ? WHERE id = ?",
+                                  (vrow["id"], pl["id"]))
+    except Exception as e:
+        print(f"TLP migration note: {e}")
+
+    conn2.commit()
+    conn2.close()
 
 # --------------------------
 # Location Management Functions
@@ -1080,6 +1151,12 @@ def start_route_refresh_thread():
 app = Flask(__name__, static_folder='static', template_folder='templates')
 KNOWN_LOCATIONS = load_known_locations()
 fleet_session = create_fleet_session()
+
+# Inject DB path into TLP routes module
+tlp_routes.DB_PATH = DB_PATH
+
+# Register TLP Blueprint
+app.register_blueprint(tlp_routes.tlp_bp)
 
 
 @app.route("/")
@@ -2274,6 +2351,11 @@ def vehicle_management_page():
     return render_template("vehicle-management.html")
 
 
+@app.route("/truck-load-planner")
+def truck_load_planner():
+    return render_template("truck-load-planner.html")
+
+
 @app.route("/api/fleet/vehicles", methods=["GET"])
 def api_vehicles_list():
     try:
@@ -2283,11 +2365,17 @@ def api_vehicles_list():
         q = request.args.get("q", "").strip()
         if q:
             c.execute(
-                "SELECT * FROM vehicles WHERE plate_number LIKE ? ORDER BY plate_number",
+                "SELECT v.*, cc.name AS container_name, cc.cargo_length_mm, cc.cargo_width_mm, cc.cargo_height_mm, cc.payload_kg "
+                "FROM vehicles v LEFT JOIN container_configs cc ON cc.id = v.container_config_id "
+                "WHERE v.plate_number LIKE ? ORDER BY v.plate_number",
                 (f"%{q}%",)
             )
         else:
-            c.execute("SELECT * FROM vehicles ORDER BY plate_number")
+            c.execute(
+                "SELECT v.*, cc.name AS container_name, cc.cargo_length_mm, cc.cargo_width_mm, cc.cargo_height_mm, cc.payload_kg "
+                "FROM vehicles v LEFT JOIN container_configs cc ON cc.id = v.container_config_id "
+                "ORDER BY v.plate_number"
+            )
         rows = [dict(r) for r in c.fetchall()]
         conn.close()
         return jsonify({"success": True, "data": rows})
@@ -2310,14 +2398,56 @@ def api_vehicles_create():
             "INSERT INTO vehicles (plate_number, vehicle_type, current_driver) VALUES (?, ?, ?)",
             (plate, vtype, driver)
         )
-        conn.commit()
         vehicle_id = c.lastrowid
+        # Create container config if dimensions provided
+        cargo_len = data.get("cargo_length_mm")
+        if cargo_len:
+            cargo_wid = data.get("cargo_width_mm", 0)
+            cargo_hei = data.get("cargo_height_mm", 0)
+            payload = data.get("payload_kg", 0)
+            c.execute(
+                "INSERT INTO container_configs (name, cargo_length_mm, cargo_width_mm, cargo_height_mm, payload_kg) VALUES (?, ?, ?, ?, ?)",
+                (f"{plate} container", cargo_len, cargo_wid, cargo_hei, payload)
+            )
+            cc_id = c.lastrowid
+            for feat in data.get("features", []):
+                geo = feat.get("geometry", {})
+                c.execute(
+                    "INSERT INTO container_features (container_config_id, feature_type, label, geometry_json) VALUES (?, ?, ?, ?)",
+                    (cc_id, feat["feature_type"], feat.get("label", ""), json.dumps(geo))
+                )
+            c.execute("UPDATE vehicles SET container_config_id = ? WHERE id = ?", (cc_id, vehicle_id))
+        conn.commit()
         conn.close()
         return jsonify({"success": True, "message": "Vehicle created", "vehicle": {
             "id": vehicle_id, "plate_number": plate, "vehicle_type": vtype, "current_driver": driver
         }})
     except sqlite3.IntegrityError:
         return jsonify({"success": False, "message": "Vehicle with that plate number already exists"}), 409
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/api/fleet/vehicles/<int:vehicle_id>/container", methods=["PUT"])
+def api_vehicle_set_container(vehicle_id):
+    """Link a vehicle to a container config, or remove the link."""
+    try:
+        data = request.json or {}
+        cc_id = data.get("container_config_id")
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        if cc_id:
+            c.execute("UPDATE vehicles SET container_config_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                      (cc_id, vehicle_id))
+        else:
+            c.execute("UPDATE vehicles SET container_config_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                      (vehicle_id,))
+        conn.commit()
+        affected = c.rowcount
+        conn.close()
+        if affected == 0:
+            return jsonify({"success": False, "message": "Vehicle not found"}), 404
+        return jsonify({"success": True, "message": "Container config updated"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
@@ -2340,6 +2470,41 @@ def api_vehicles_update(vehicle_id):
         if c.rowcount == 0:
             conn.close()
             return jsonify({"success": False, "message": "Vehicle not found"}), 404
+        # Handle container config
+        cargo_len = data.get("cargo_length_mm")
+        if cargo_len:
+            cargo_wid = data.get("cargo_width_mm", 0)
+            cargo_hei = data.get("cargo_height_mm", 0)
+            payload = data.get("payload_kg", 0)
+            c.execute("SELECT container_config_id FROM vehicles WHERE id = ?", (vehicle_id,))
+            row = c.fetchone()
+            existing_cc_id = row[0] if row else None
+            if existing_cc_id:
+                c.execute(
+                    "UPDATE container_configs SET name=?, cargo_length_mm=?, cargo_width_mm=?, cargo_height_mm=?, payload_kg=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (f"{plate} container", cargo_len, cargo_wid, cargo_hei, payload, existing_cc_id)
+                )
+                if "features" in data:
+                    c.execute("DELETE FROM container_features WHERE container_config_id = ?", (existing_cc_id,))
+                    for feat in data.get("features", []):
+                        geo = feat.get("geometry", {})
+                        c.execute(
+                            "INSERT INTO container_features (container_config_id, feature_type, label, geometry_json) VALUES (?, ?, ?, ?)",
+                            (existing_cc_id, feat["feature_type"], feat.get("label", ""), json.dumps(geo))
+                        )
+            else:
+                c.execute(
+                    "INSERT INTO container_configs (name, cargo_length_mm, cargo_width_mm, cargo_height_mm, payload_kg) VALUES (?, ?, ?, ?, ?)",
+                    (f"{plate} container", cargo_len, cargo_wid, cargo_hei, payload)
+                )
+                cc_id = c.lastrowid
+                for feat in data.get("features", []):
+                    geo = feat.get("geometry", {})
+                    c.execute(
+                        "INSERT INTO container_features (container_config_id, feature_type, label, geometry_json) VALUES (?, ?, ?, ?)",
+                        (cc_id, feat["feature_type"], feat.get("label", ""), json.dumps(geo))
+                    )
+                c.execute("UPDATE vehicles SET container_config_id = ? WHERE id = ?", (cc_id, vehicle_id))
         conn.commit()
         conn.close()
         return jsonify({"success": True, "message": "Vehicle updated"})
@@ -2354,11 +2519,16 @@ def api_vehicles_delete(vehicle_id):
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
+        # Delete container config and features if present
+        c.execute("SELECT container_config_id FROM vehicles WHERE id=?", (vehicle_id,))
+        row = c.fetchone()
+        if row and row[0]:
+            c.execute("DELETE FROM container_features WHERE container_config_id = ?", (row[0],))
+            c.execute("DELETE FROM container_configs WHERE id = ?", (row[0],))
         c.execute("DELETE FROM vehicles WHERE id=?", (vehicle_id,))
         if c.rowcount == 0:
             conn.close()
             return jsonify({"success": False, "message": "Vehicle not found"}), 404
-        # Unlink fuel_log entries referencing this vehicle
         c.execute("UPDATE fuel_log SET vehicle_id = NULL WHERE vehicle_id = ?", (vehicle_id,))
         conn.commit()
         conn.close()
