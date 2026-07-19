@@ -210,7 +210,7 @@ This helps in tight packs where nominal extreme points are blocked but a slight 
 
 **Source**: `engine/scorer.py` → `score_placement()`
 
-### Weight Distribution (Total: 120, clamped to 100)
+### Weight Distribution (Total: 130, clamped to 100)
 
 | Category | Weight | Behaviour | Why |
 |----------|--------|-----------|-----|
@@ -222,6 +222,7 @@ This helps in tight packs where nominal extreme points are blocked but a slight 
 | Vertical Stability | 10 | Inverse of mid-z/height | Lower COG = more stable |
 | Z Preference | 10 | Inverse of zmin/height | Low packages leave room for stacking |
 | Rear Proximity | 10 | Linear ramp near rear door | Avoid door; door packages belong in last vehicle |
+| Dead Space Quality | 10 | Future-packability gap estimation | Preserve usable space for hardest remaining packages |
 | Compactness | 5 | Inverse of nearest distance | Grouped loads are denser |
 | Stack Quality | 5 | Support ratio | Well-supported stacks are stable |
 | X Preference | 5 | Inverse of xmin/length | Push deep into container |
@@ -359,7 +360,7 @@ For each package:
     │   4. Weight vs payload
     │   5. Support (actual AABB, combined-support model)
     │
-    ├─► Score valid candidates (11 factors, clamped 0–100)
+    ├─► Score valid candidates (12 factors, clamped 0–100)
     │
     ├─► If found: place, continue
     │
@@ -389,6 +390,9 @@ Placement committed → load_sequence assigned
 | `support_threshold` | `engine/support.py:22` | 0.90 | Minimum fraction of footprint that must be covered by combined support |
 | `_GRID_SAMPLES` | `engine/support.py:14` | 20 | Grid resolution for union coverage estimation |
 | `_FACE_TOLERANCE` | `engine/scorer.py:20` | 1.0 | Tolerance for face-coincidence detection (mm) |
+| `DEAD_SPACE_WEIGHT` | `engine/dead_space.py` | 10 | Scoring weight for dead-space quality category |
+| `MIN_GAP_MM` | `engine/dead_space.py` | 10.0 | Gaps ≤ this value are considered flush and skipped |
+| `REFERENCE_SET_SIZE` | `engine/dead_space.py` | 3 | Number of hardest remaining packages in reference set |
 | Slide step | `engine/candidate_points.py` | 100mm | Y-slide increment |
 | Max slide steps | `engine/candidate_points.py` | 3 | Max slides per direction |
 | `REAR_DOOR_THRESHOLD` | `routes.py` (Phase 3) | 0mm | Only redirect when package touches rear wall |

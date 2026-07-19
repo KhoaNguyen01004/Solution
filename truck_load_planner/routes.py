@@ -914,7 +914,7 @@ def _distribute_across_vehicles(packages, vehicle_sessions, debug=False):
     placed_vehicle_map = {vinfo["vehicle_id"]: [] for vinfo, _ in vehicle_sessions}
     active_indices: list[int] = []  # indices of vehicle_sessions that already have packages
 
-    def _find_best_for_pkg(pkg, vinfo, session):
+    def _find_best_for_pkg(pkg, vinfo, session, remaining_pkgs=None):
         """Return (best_score, best_pos) or (None, None) if no valid position."""
         best_score = -1.0
         best_pos = None
@@ -946,6 +946,7 @@ def _distribute_across_vehicles(packages, vehicle_sessions, debug=False):
                 continue
             score = planner.evaluate_position(
                 pkg, pos["x"], pos["y"], pos["z"], pos["rotation"],
+                remaining_packages=remaining_pkgs,
             )
             if score.total > best_score:
                 best_score = score.total
@@ -965,6 +966,7 @@ def _distribute_across_vehicles(packages, vehicle_sessions, debug=False):
                     continue
                 score = planner.evaluate_position(
                     pkg, pos["x"], pos["y"], pos["z"], pos["rotation"],
+                    remaining_packages=remaining_pkgs,
                 )
                 if score.total > best_score:
                     best_score = score.total
@@ -1006,7 +1008,8 @@ def _distribute_across_vehicles(packages, vehicle_sessions, debug=False):
                        if container.payload_kg > 0 else 0.0)
         return vol_pct, floor_pct, payload_pct
 
-    for pkg in sorted_pkgs:
+    for i, pkg in enumerate(sorted_pkgs):
+        remaining_pkgs = sorted_pkgs[i + 1:]
         best_waste = float("inf")
         best_score = -1.0
         best_session = None
@@ -1023,7 +1026,7 @@ def _distribute_across_vehicles(packages, vehicle_sessions, debug=False):
         # Phase 1: try active (already-used) vehicles first
         for idx in active_indices:
             vinfo, session = vehicle_sessions[idx]
-            score, pos = _find_best_for_pkg(pkg, vinfo, session)
+            score, pos = _find_best_for_pkg(pkg, vinfo, session, remaining_pkgs)
             if pos is not None:
                 rv, rf, rp = _estimate_remaining_after(pkg, pos, session)
                 waste = rv + rf + rp
@@ -1042,7 +1045,7 @@ def _distribute_across_vehicles(packages, vehicle_sessions, debug=False):
             for idx, (vinfo, session) in enumerate(vehicle_sessions):
                 if idx in active_indices:
                     continue
-                score, pos = _find_best_for_pkg(pkg, vinfo, session)
+                score, pos = _find_best_for_pkg(pkg, vinfo, session, remaining_pkgs)
                 if pos is not None:
                     rv, rf, rp = _estimate_remaining_after(pkg, pos, session)
                     waste = rv + rf + rp
@@ -1069,7 +1072,7 @@ def _distribute_across_vehicles(packages, vehicle_sessions, debug=False):
                 dx = pkg.length_mm if best_pos["rotation"] == 0 else pkg.width_mm
                 gap = container.length - (best_pos["x"] + dx)
                 if gap <= 0:  # touches rear wall
-                    last_score, last_pos = _find_best_for_pkg(pkg, last_vinfo, last_session)
+                    last_score, last_pos = _find_best_for_pkg(pkg, last_vinfo, last_session, remaining_pkgs)
                     if last_pos is not None:
                         rv, rf, rp = _estimate_remaining_after(pkg, last_pos, last_session)
                         last_waste = rv + rf + rp

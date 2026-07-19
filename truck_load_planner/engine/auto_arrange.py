@@ -63,6 +63,8 @@ class LargestFirstStrategy:
                 result.warnings.append("Auto Arrange cancelled by user")
                 break
 
+            remaining_pkgs = sorted_packages[i + 1:]
+
             # Get candidate positions from the planner
             base_candidates = planner.get_candidate_points()
 
@@ -96,6 +98,7 @@ class LargestFirstStrategy:
                 score = planner.evaluate_position(
                     pkg, candidate["x"], candidate["y"], candidate["z"],
                     candidate["rotation"], debug=False,
+                    remaining_packages=remaining_pkgs,
                 )
 
                 if score.total > best_score:
@@ -140,6 +143,7 @@ class LargestFirstStrategy:
                     score = planner.evaluate_position(
                         pkg, candidate["x"], candidate["y"], candidate["z"],
                         candidate["rotation"], debug=False,
+                        remaining_packages=remaining_pkgs,
                     )
                     if score.total > best_score:
                         best_score = score.total

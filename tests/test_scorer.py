@@ -299,6 +299,7 @@ def test_score_placement_returns_placementscore():
     assert "compactness" in result.breakdown
     assert "stack_quality" in result.breakdown
     assert "vertical_stability" in result.breakdown
+    assert "dead_space_quality" in result.breakdown
 
 
 def test_score_placement_corner_best():
@@ -356,7 +357,8 @@ def test_weights_are_configurable():
     assert "vertical_stability" in SCORING_WEIGHTS
     assert "x_preference" in SCORING_WEIGHTS
     assert "rear_proximity" in SCORING_WEIGHTS
-    assert sum(SCORING_WEIGHTS.values()) == 120
+    assert "dead_space_quality" in SCORING_WEIGHTS
+    assert sum(SCORING_WEIGHTS.values()) == 130
 
 
 # ── Edge Cases ────────────────────────────────────────────────────────

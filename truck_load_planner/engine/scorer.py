@@ -17,6 +17,7 @@ SCORING_WEIGHTS = {
     "x_preference": 5,
     "rear_proximity": 10,
     "y_balance": 15,
+    "dead_space_quality": 10,
 }
 
 _FACE_TOLERANCE = 1.0
@@ -318,7 +319,25 @@ def _score_y_balance(aabb: AABB, package: Package, placements: list,
     return max(0.0, 1.0 - dist / max_dist)
 
 
-# ── Main entry point ──────────────────────────────────────────────────
+def _score_dead_space_quality(
+    aabb: AABB,
+    container: Container,
+    placements: list,
+    remaining_packages: Optional[list] = None,
+) -> float:
+    """Score 0-1: how usable is the remaining free space for future packages.
+
+    Delegates to the dead_space module. Returns 1.0 (no penalty) when
+    there are no remaining packages or the module estimate is unavailable.
+    """
+    if remaining_packages is None:
+        return 1.0
+    if not remaining_packages:
+        return 1.0
+    from .dead_space import compute_dead_space_quality
+    return compute_dead_space_quality(
+        aabb, container, placements, remaining_packages,
+    )
 
 
 def score_placement(
@@ -330,6 +349,7 @@ def score_placement(
     placements: list,
     container: Container,
     debug: bool = False,
+    remaining_packages: Optional[list] = None,
 ) -> PlacementScore:
     aabb = _make_aabb(package, x, y, z, rotation)
     others = _build_others(placements)
@@ -348,6 +368,9 @@ def score_placement(
         "x_preference": _score_x_preference(aabb, container),
         "rear_proximity": _score_rear_proximity(aabb, container),
         "y_balance": _score_y_balance(aabb, package, placements, container),
+        "dead_space_quality": _score_dead_space_quality(
+            aabb, container, placements, remaining_packages,
+        ),
     }
 
     breakdown = {}

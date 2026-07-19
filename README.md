@@ -81,8 +81,9 @@ Every valid candidate position receives a 0–100 quality score. The scorer neve
 | X Preference | 5 | max(0, 1 − xmin ÷ container_length) — rewards deep (front-wall) placement |
 | Rear Proximity | 10 | min(1, gap ÷ threshold) where gap = rear-wall distance, threshold = max(8% length, 300mm) |
 | Y Balance | 15 | rewards Y-center-of-gravity close to container midpoint for even left-right weight distribution |
+| Dead Space Quality | 10 | 0–1 estimate of how usable remaining free space is for future packages (see `engine/dead_space.py`) |
 
-Weights are configurable via `SCORING_WEIGHTS` at module top.
+Weights are configurable via `SCORING_WEIGHTS` at module top (total 130, clamped to 100).
 
 ### Stacking Rules (`engine/support.py`)
 
@@ -181,6 +182,7 @@ The canvas provides three views, each mapping different container axes:
 | `collision.py` | AABB collision detection |
 | `boundary.py` | Container boundary containment |
 | `candidate_points.py` | Candidate position generator + Y-slide candidate generator |
+| `dead_space.py` | Future-packability estimation — gap distance to nearest obstacle, difficulty-weighted reference set, continuous face scoring |
 | `statistics.py` | Utilization, weight, and package counts |
 | `weight.py` | Total weight vs payload calculation |
 | `container.py` | Container dataclass (dimensions, features, payload) |

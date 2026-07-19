@@ -135,6 +135,7 @@ Every valid candidate position receives a 0–100 score. The scorer never valida
 | `x_preference` | 5 | max(0, 1 − xmin / container_length) — rewards deep placement near front wall |
 | `rear_proximity` | 10 | min(1, gap / max(8% length, 300mm)) — rewards distance from rear door |
 | `y_balance` | 15 | Y-centre-of-gravity of all packages (existing + candidate); maximum when COG is at container.width/2 |
+| `dead_space_quality` | 10 | See [Dead Space Quality](#dead-space-quality-estimation) below |
 
 ### Design Principles
 - Every category has an isolated function (can be tuned independently)
@@ -163,6 +164,55 @@ score = min(1.0, gap / threshold)
 ```
 
 A package with its rear edge more than `threshold` from the rear wall gets full score (1.0). As the gap shrinks below threshold, the score drops linearly to 0.0 at the rear wall. Weight 10 makes this a meaningful deterrent while still allowing rear-wall placement when the container is full.
+
+### Dead Space Quality Estimation
+
+**File**: `engine/dead_space.py` → `compute_dead_space_quality()`
+
+New in this phase. Estimates how usable the remaining free space will be after placing a package. The score is 0.0–1.0 and is integrated as a normal scoring category with weight 10.
+
+#### Algorithm
+```
+For the candidate AABB, examine each of the 6 faces:
+
+1. Compute the gap distance to the nearest obstacle (package or
+   container wall) in the outward direction. Only obstacles that
+   overlap the face's projection on both perpendicular axes are
+   considered (conservative O(n) ray).
+
+2. If the gap is ≤ MIN_GAP_MM (10mm), the face is considered flush
+   and is skipped — a flush face cannot create dead space.
+
+3. The gap box dimensions are (gap_depth × face_width × face_height).
+
+4. Score the gap against a reference set of the hardest remaining
+   packages (composite difficulty = volume × aspect ratio). Uses a
+   continuous product of clamped sorted-dimension ratios:
+
+       score = ∏ min(1.0, gap_dim_i / pkg_dim_i)
+
+   This gives smooth 0–1 degradation — no binary fit/no-fit.
+
+5. Per-face score is a difficulty-weighted average across the
+   reference set (harder packages dominate).
+
+6. Final quality = area-weighted average of all exposed faces.
+```
+
+#### Configuration
+
+| Constant | Location | Default | Description |
+|----------|----------|---------|-------------|
+| `DEAD_SPACE_WEIGHT` | `dead_space.py` | 10 | Scoring weight applied by the scorer |
+| `MIN_GAP_MM` | `dead_space.py` | 10.0 | Faces with smaller gaps are considered flush and skipped |
+| `REFERENCE_SET_SIZE` | `dead_space.py` | 3 | Number of hardest remaining packages to use as reference |
+
+#### Key Design Points
+
+- **Spatial index**: uses the planner's `query_aabb_fn` when available to limit the search to nearby packages instead of scanning all placements.
+- **Flush-face exclusion**: faces touching a wall or another package (gap ≤ 10mm) are skipped entirely — they cannot contribute to dead space.
+- **Difficulty-weighted reference**: larger, more awkward packages dominate the per-face score so the heuristic preserves space for the hardest remaining items.
+- **Lightweight**: O(faces × reference_size) ≈ O(1) per candidate.
 
 ---
 

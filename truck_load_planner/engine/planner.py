@@ -162,11 +162,13 @@ class Planner:
         z: float,
         rotation: int,
         debug: bool = False,
+        remaining_packages: Optional[list] = None,
     ) -> PlacementScore:
         return score_placement(
             package, x, y, z, rotation,
             self.state.placements, self.state.container,
             debug=debug,
+            remaining_packages=remaining_packages,
         )
 
     def evaluate_position(
@@ -177,13 +179,18 @@ class Planner:
         z: float,
         rotation: int = 0,
         debug: bool = False,
+        remaining_packages: Optional[list] = None,
     ) -> PlacementScore:
         """Score a single placement position.
 
         This is the preferred API for external callers (Auto Arrange, solvers).
         Delegates to score_placement internally.
         """
-        return self.score_placement(package, x, y, z, rotation, debug=debug)
+        return self.score_placement(
+            package, x, y, z, rotation,
+            debug=debug,
+            remaining_packages=remaining_packages,
+        )
 
     def evaluate_candidates(
         self,

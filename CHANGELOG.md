@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-07-19 — Dead Space Quality (Future-Packability Estimation)
+
+### Added
+
+#### Dead Space Quality Scoring
+- **`engine/dead_space.py`** — new module implementing future-packability estimation:
+  - `compute_dead_space_quality()` — estimates how usable the remaining free space will be after placing a package
+  - **Gap-ray heuristic**: for each of 6 faces, measures distance to nearest obstacle (package or wall) in the outward direction — O(faces × nearby_packages)
+  - **Flush-face exclusion**: faces with gap ≤ 10mm are skipped (cannot create dead space)
+  - **Difficulty-weighted reference set**: selects the 3 hardest remaining packages (by volume × aspect ratio); harder packages dominate the per-face score
+  - **Continuous scoring**: product of clamped sorted-dimension ratios — smooth 0–1, no binary fit/no-fit
+  - **Area-weighted**: larger faces contribute more to the final quality score
+  - **Spatial index support**: uses `query_aabb_fn` when available for O(nearby) instead of O(all_placements)
+- **`dead_space_quality: 10`** added to `SCORING_WEIGHTS` in `engine/scorer.py` (total now 130, clamped to 100)
+- `remaining_packages` parameter threaded through `Planner.score_placement()` → `Planner.evaluate_position()` → `scorer.score_placement()`
+- `LargestFirstStrategy.arrange()` in `auto_arrange.py` now passes `sorted_packages[i+1:]` as remaining packages at both main-candidate and Y-slide evaluation sites
+- `_find_best_for_pkg()` in `routes.py` now accepts and forwards `remaining_pkgs` for all 3 phases
+
+### Changed
+- `SCORING_WEIGHTS` total increased from 120 to 130 to accommodate `dead_space_quality: 10`
+- `score_placement()` and `Planner.score_placement()` accept optional `remaining_packages` parameter (defaults to None → no dead-space penalty)
+- `test_weights_are_configurable` updated for new weight key and sum (120→130)
+- `test_score_placement_returns_placementscore` updated to assert `dead_space_quality` in breakdown
+
+---
+
 ## 2026-07-19 — Y-Balance, X-Preference, Rear-Proximity Scoring; Combined-Support Stacking; Rear-Door Routing; Y-Slide Fallback
 
 ### Added
