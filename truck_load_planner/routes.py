@@ -865,7 +865,7 @@ def auto_arrange():
     """
     data = request.json or {}
     vehicle_id = data.get("vehicle_id")
-    strategy = data.get("strategy", "column")
+    strategy = data.get("strategy", "largest_first")
     debug = bool(data.get("debug", False))
 
     from truck_load_planner.engine.profile import PROFILES
@@ -957,52 +957,7 @@ def auto_arrange():
     dist_time_ms = int((time.time() - dist_start) * 1000)
 
     # ── Repair phase: fleet-level Destroy-and-Repair ──────────────
-    placed_ids = set()
-    for _, session in vehicle_sessions:
-        for pl in session._planner.placements:
-            if pl.package is not None:
-                placed_ids.add(id(pl.package))
-    unplaced_pkg_objects = [p for p in packages if id(p) not in placed_ids]
-
-    from truck_load_planner.engine.repair import optimize_layout
-    repair_start = time.time()
-    vehicle_sessions, repair_improved, repair_stats = optimize_layout(
-        vehicle_sessions, packages,
-        unplaced_packages=unplaced_pkg_objects,
-        max_passes=3,
-        debug=debug,
-        profile=profile,
-    )
-    repair_time_ms = int((time.time() - repair_start) * 1000)
-
-    # ── Consolidation phase: eliminate near-empty vehicles ────────
-    from truck_load_planner.engine.consolidation import consolidate_fleet
-    consol_start = time.time()
-    vehicle_sessions, eliminated_count = consolidate_fleet(
-        vehicle_sessions, packages, max_iterations=10,
-    )
-    consol_time_ms = int((time.time() - consol_start) * 1000)
-
-    # ── Fleet balance pass: even out load profiles ──────────────
-    from truck_load_planner.engine.distribution import balance_fleet_profiles
-    balance_start = time.time()
-    vehicle_sessions, balance_moves = balance_fleet_profiles(
-        vehicle_sessions, max_moves=10,
-    )
-    balance_time_ms = int((time.time() - balance_start) * 1000)
-
-    # ── Final deepen pass: push every package as deep as possible ────
-    from truck_load_planner.engine.distribution import compact_placements, compact_stacks
-    deepen_start = time.time()
-    cmp_passes = profile.compact_passes if profile else 2
-    cmp_step = profile.compact_step_mm if profile else 50.0
-    for _, session in vehicle_sessions:
-        compact_placements(session._planner, passes=cmp_passes, step=cmp_step)
-        if profile.enable_stack_compaction:
-            compact_stacks(session._planner, step=cmp_step)
-    deepen_time_ms = int((time.time() - deepen_start) * 1000)
-
-    # Recompute counts after repair
+    # Recompute counts after distribution
     placed = sum(len(s._planner.placements) for _, s in vehicle_sessions)
 
     placed_vehicle_map = {vinfo["vehicle_id"]: [] for vinfo, _ in vehicle_sessions}
@@ -1036,7 +991,6 @@ def auto_arrange():
     failed = len(packages) - placed
     fleet_cost = round(compute_fleet_cost(vehicle_sessions), 1)
 
-    total_time_ms = dist_time_ms + repair_time_ms + consol_time_ms + balance_time_ms
     response_data = {
         "multi_vehicle": True,
         "profile": profile_name,
@@ -1055,14 +1009,7 @@ def auto_arrange():
         "profile_stats": {
             "profile": profile_name,
             "distribution_time_ms": dist_time_ms,
-            "repair_time_ms": repair_time_ms,
-            "consolidation_time_ms": consol_time_ms,
-            "balance_time_ms": balance_time_ms,
-            "total_time_ms": total_time_ms,
-            "repair_passes": repair_stats.get("repair_passes", 0),
-            "repair_improved": repair_improved,
-            "rearrangement_attempts": dist_stats.get("rearrangement_attempts", 0),
-            "balance_moves": balance_moves,
+            "total_time_ms": dist_time_ms,
         },
     }
 

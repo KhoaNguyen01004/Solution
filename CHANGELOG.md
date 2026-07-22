@@ -1,5 +1,65 @@
 # Changelog
 
+## 2026-07-22 — Algorithm Simplification Refactoring + Test Consolidation
+
+### Changed
+
+#### Simplified Scoring (`engine/scorer.py`)
+- Reduced from 14 scoring categories to 4: `package_contact` (1000), `x_preference` (200), `floor_contact` (100), `y_balance` (50)
+- Removed: wall_contact, face_contact, compactness, stack_quality, vertical_stability, z_preference, rear_proximity, cluster_cohesion, dead_space_quality, load_profile_stability
+
+#### Simplified Candidate Generation (`engine/candidate_points.py`)
+- Removed: `settle_package()`, `generate_slide_candidates()`, `generate_floor_anchors()`
+- Candidates now come only from origin + right/front/top faces of placed boxes
+- `tighten_position()` simplified — no longer needed as a separate pass
+
+#### Simplified Placement Pipeline (`engine/auto_arrange.py`)
+- Removed `ColumnStrategy` (only `LargestFirstStrategy` remains)
+- Removed: frontier gap penalty, stack ceiling penalty, Y-slide fallback, gap-filling pass, post-placement compaction pipeline, debug instrumentation
+
+#### Simplified Distribution (`engine/distribution.py`)
+- Removed: `compact_placements()`, `compact_stacks()`, `fill_frontier_gaps()`, `fill_interior_gaps()`, `_try_local_rearrangement()`, `balance_fleet_profiles()`
+- Only `distribute_across_vehicles()` and `reassign_load_sequences()` remain
+
+#### Simplified Profiles (`engine/profile.py`)
+- Removed repair/compaction-related fields; only name, candidate_limit, tighten_step_mm remain
+
+#### Simplified Routes (`routes.py`)
+- Default strategy changed from `"column"` to `"largest_first"`
+- Removed all repair, consolidation, balance, compaction pipeline calls and imports
+
+#### Simplified Internal Engine (`engines/internal/engine.py`)
+- Removed `optimize_layout()`, `consolidate_fleet()` calls
+- Only `distribute_across_vehicles()` remains
+
+#### Package Sort Order
+- Changed from `volume DESC, weight DESC, footprint DESC` to `(non-stackable first), volume DESC, weight DESC, footprint DESC`
+- Non-stackable packages now always sort before stackable ones
+
+### Removed
+- `engine/repair.py` (386 lines) — destroy-and-repair optimizer
+- `engine/consolidation.py` (197 lines) — near-empty vehicle elimination
+- `engine/dead_space.py` (319 lines) — future-packability estimation
+- `engine/frontier.py` (106 lines) — 1D Y-strip frontier tracker
+- Total: 1,008 lines removed from engine; engine package reduced 51% (5,958 → 2,922 lines)
+
+### Consolidated Test Files
+- **Unified 19 script files** into `tests/test_all.py` with 5 subcommands and 16 modes:
+  - `benchmark`: distribution, floor_contact, real_data
+  - `diagnose`: general, kbf_lc900, candidates, stacking
+  - `debug`: py3dbp, stats, validation, vehicles
+  - `query`: vehicles, tables, db, shipments
+  - `instrument`: trace, bug-trace
+- Deleted 17 files from `scripts/`; moved `debug_arrange.py` and `merge_duplicate_vehicles.py` to `tests/`
+- All output now saves to `reports/{cmd}_{mode}_{timestamp}.txt`
+
+### Removed Modules (Deleted)
+- `engine/repair.py` — destroy-and-repair LNS optimizer
+- `engine/consolidation.py` — near-empty vehicle elimination
+- `engine/dead_space.py` — future-packability estimation
+- `engine/frontier.py` — 1D Y-strip frontier tracker
+- `scripts/` directory (17 files unified into `tests/test_all.py`)
+
 ## 2026-07-22 — Frontier-Based Gap Prevention, Gap-Filling Pass, Debug Instrumentation
 
 ### Added

@@ -1,36 +1,26 @@
-"""Comprehensive step-by-step debugger for auto-arrange.
-
-Logs EVERY decision for every package: all candidate positions evaluated,
-scores, penalties, tightening results, frontier state, compaction steps.
+"""Debug auto-arrange placement (simplified — frontier/compaction removed).
 
 Usage:
     python scripts/debug_arrange.py <scenario> [--full]
 
 Scenarios:
-    kbf_lc900     KBF 280R + 3x LC 900 (gap regression scenario)
+    kbf_lc900     KBF 280R + 3x LC 900
     mixed         3x PKG_A + 3x PKG_B + 2x PKG_C
     column-test   Same packages, column strategy
     real          Full 46-package real shipment (from manual_test.py)
-
-Use --full for per-strip frontier breakdown and settle/tighten per package.
 """
 
 import sys, os, json, math
 from datetime import datetime
 from typing import Optional
 
-sys.path.insert(0, r'D:\ChiTuyen\Solution')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from truck_load_planner.engine.package import Package
 from truck_load_planner.engine.container import Container
 from truck_load_planner.engine.planner import Planner
-from truck_load_planner.engine.frontier import FrontierTracker
-from truck_load_planner.engine.distribution import (
-    fill_frontier_gaps, compact_placements, compact_stacks,
-    reassign_load_sequences,
-)
 from truck_load_planner.engine.candidate_points import (
-    settle_package, tighten_position,
+    tighten_position,
 )
 
 # ── log capture ────────────────────────────────────────────────────
@@ -157,16 +147,6 @@ def pl_dim(pl):
 def fmt_pos(x, y, z, rot, name="", w=15):
     xmax = 0
     return f"{name:{w}}  @ ({x:7.0f}, {y:7.0f}, {z:3.0f})  rot={rot:3d}"
-
-
-def fmt_frontier(frontier, cw: float) -> str:
-    lines = []
-    for idx, f in enumerate(frontier._frontier):
-        y_start = idx * frontier.strip_width
-        y_end = min((idx + 1) * frontier.strip_width, cw)
-        active = ">" if f > 0.001 else " "
-        lines.append(f"    [{active}] y=[{y_start:5.0f},{y_end:5.0f})  fr={f:8.0f}mm")
-    return "\n".join(lines)
 
 
 def fmt_breakdown(bd: dict) -> str:
@@ -317,42 +297,7 @@ def run(planner: Planner,
                 log(f"  Score breakdown (chosen):")
                 log(fmt_breakdown(bd))
 
-    # ── 5. Frontier state ──
-    log()
-    hr(" FRONTIER STATE (after all placements) ")
-    frontier = FrontierTracker(container.width, strip_width_mm=200)
-    for pl in planner.placements:
-        frontier.update_from_placement(pl)
-    log(fmt_frontier(frontier, container.width))
-
-    # ── 6. Frontier breakdown (full only) ──
-    if full:
-        log()
-        hr(" FRONTIER PER-STRIP CONTRIBUTIONS ", "-")
-        contrib = {i: [] for i in range(frontier.num_strips)}
-        for pl in planner.placements:
-            pkg = pl.package
-            if pkg is None or pl.z > 0.001:
-                continue
-            h_clr = getattr(pkg, 'horizontal_clearance_mm', 10.0)
-            if pl.rotation in (0, 180):
-                dx, dy = pkg.length_mm, pkg.width_mm
-            else:
-                dx, dy = pkg.width_mm, pkg.length_mm
-            new_x = pl.x + dx + h_clr
-            for idx in frontier._covered_strips(pl.y, dy):
-                contrib[idx].append((pkg.name[:14], new_x))
-        for idx, fr in enumerate(frontier._frontier):
-            y_start = idx * frontier.strip_width
-            y_end = min((idx + 1) * frontier.strip_width, container.width)
-            src = contrib[idx]
-            if src:
-                cs = "; ".join(f"{n}->{x:.0f}" for n, x in src)
-            else:
-                cs = "(none)"
-            log(f"  y=[{y_start:5.0f},{y_end:5.0f}): fr={fr:8.0f}  | {cs}")
-
-    # ── 7. Gap check ──
+    # ── 5. Gap check ──
     log()
     hr(" GAP CHECK (adjacent, sorted by X) ")
     placements_sorted = sorted(planner.placements, key=lambda p: p.x)
@@ -375,115 +320,19 @@ def run(planner: Planner,
                 f"gap_from_prev={gap:+6.0f}  y_overlap={y_overlap:4.0f}  "
                 f"{'SIDE_BY_SIDE' if side else 'IN_LINE'}")
 
-    # ── 8. Per-package frontier gap analysis (full only) ──
+    # ── 6. Tighten test (full only) ──
     if full:
         log()
-        hr(" PER-PACKAGE FRONTIER GAP ANALYSIS ")
-        for pl in sorted(planner.placements, key=lambda p: p.x):
-            if pl.z > 0.001:
-                log(f"  [{pl.package.name}]  z={pl.z:.0f} > 0 (stacked, skip)")
-                continue
-            pkg = pl.package
-            dx, dy, dz = pl_dim(pl)
-            gap = frontier.gap_distance(pl.x, pl.y, dy)
-            log(f"  [{pkg.name:20s}]  @ ({pl.x:.0f},{pl.y:.0f})  "
-                f"gap_distance={gap:.0f}mm")
-            for idx in frontier._covered_strips(pl.y, dy):
-                y_start = idx * frontier.strip_width
-                y_end = min((idx + 1) * frontier.strip_width, container.width)
-                fr = frontier._frontier[idx]
-                deficit = max(0, fr - pl.x)
-                log(f"    strip y=[{y_start:5.0f},{y_end:5.0f}):  "
-                    f"fr={fr:8.0f}  deficit={deficit:6.0f}")
-
-    # ── 9. Settle / tighten test (full only) ──
-    if full:
-        log()
-        hr(" SETTLE / TIGHTEN TEST PER PACKAGE ")
+        hr(" TIGHTEN TEST PER PACKAGE ")
         for pl in sorted(planner.placements, key=lambda p: p.x):
             pkg = pl.package
-            tx, ty, tz, trot = settle_package(planner, pkg, pl.x, pl.y, pl.z, pl.rotation)
+            tx, ty, tz, trot = tighten_position(
+                planner, pkg, pl.x, pl.y, pl.z, pl.rotation, step=50.0)
             imp = abs(tx - pl.x) > 1.0
-            log(f"  [{pkg.name}]  settle:  ({pl.x:.0f},{pl.y:.0f},{pl.z:.0f}) -> "
+            log(f"  [{pkg.name}]  tighten: ({pl.x:.0f},{pl.y:.0f},{pl.z:.0f}) -> "
                 f"({tx:.0f},{ty:.0f},{tz:.0f})  improved={imp}")
-            if not imp:
-                tx2, ty2, tz2, trot2 = tighten_position(
-                    planner, pkg, pl.x, pl.y, pl.z, pl.rotation, step=50.0)
-                imp2 = abs(tx2 - pl.x) > 1.0
-                log(f"             tighten: ({pl.x:.0f}...) -> "
-                    f"({tx2:.0f},{ty2:.0f},{tz2:.0f})  improved={imp2}")
 
-    # ── 10. Post-processing compaction ──
-    log()
-    hr(" POST-PROCESSING COMPACTION ")
-
-    # Save state before compaction
-    placements_before = list(planner.placements)
-
-    # Run compaction steps one by one with logging
-    log("  Step 1: fill_frontier_gaps()...")
-    f1 = FrontierTracker(container.width, strip_width_mm=200)
-    for pl in planner.placements:
-        f1.update_from_placement(pl)
-    m1 = fill_frontier_gaps(planner, f1)
-    log(f"    -> moved {m1} packages")
-
-    if m1 > 0 and full:
-        log("    Positions after gap-fill:")
-        for pl in sorted(planner.placements, key=lambda p: p.x):
-            dx, dy, dz = pl_dim(pl)
-            log(f"      {pl.package.name:20s}  @ ({pl.x:7.0f}, {pl.y:7.0f}, {pl.z:3.0f})  "
-                f"xmax={pl.x+dx:7.0f}")
-
-    log("  Step 2: compact_placements(passes=3, step=5.0)...")
-    m2 = compact_placements(planner, passes=3, step=5.0)
-    log(f"    -> moved {m2} packages")
-
-    if m2 > 0 and full:
-        log("    Positions after compaction:")
-        for pl in sorted(planner.placements, key=lambda p: p.x):
-            dx, dy, dz = pl_dim(pl)
-            log(f"      {pl.package.name:20s}  @ ({pl.x:7.0f}, {pl.y:7.0f}, {pl.z:3.0f})  "
-                f"xmax={pl.x+dx:7.0f}")
-
-    log("  Step 3: compact_stacks(step=5.0)...")
-    m3 = compact_stacks(planner, step=5.0)
-    log(f"    -> moved {m3} packages")
-
-    log("  Step 4: fill_frontier_gaps() (final)...")
-    f2 = FrontierTracker(container.width, strip_width_mm=200)
-    for pl in planner.placements:
-        f2.update_from_placement(pl)
-    m4 = fill_frontier_gaps(planner, f2)
-    log(f"    -> moved {m4} packages")
-
-    reassign_load_sequences(planner.placements)
-    log(f"  Total moved: {m1 + m2 + m3 + m4} packages across all steps")
-
-    # ── 11. Final positions vs initial ──
-    log()
-    hr(" POSITION CHANGES AFTER COMPACTION ")
-    changed = 0
-    for pl_before in placements_before:
-        pl_after = next(
-            (p for p in planner.placements if p.package_id == pl_before.package_id
-             and abs(p.z - pl_before.z) < 0.001 and abs(p.y - pl_before.y) < 0.001),
-            None
-        )
-        if pl_after:
-            dx = pl_after.x - pl_before.x
-            dy = pl_after.y - pl_before.y
-            dz = pl_after.z - pl_before.z
-            if abs(dx) > 0.1 or abs(dy) > 0.1 or abs(dz) > 0.1:
-                changed += 1
-                log(f"  {pl_before.package.name:20s}: "
-                    f"({pl_before.x:.0f},{pl_before.y:.0f},{pl_before.z:.0f}) -> "
-                    f"({pl_after.x:.0f},{pl_after.y:.0f},{pl_after.z:.0f})  "
-                    f"delta=({dx:.0f},{dy:.0f},{dz:.0f})")
-    if changed == 0:
-        log("  (no changes — all packages already optimal)")
-
-    # ── 12. Final positions ──
+    # ── 7. Final positions ──
     log()
     hr(" FINAL POSITIONS (after all processing) ")
     log(f"  {'Package':20s}  {'Position':42s}  {'xmax':>7s}  {'Dimensions':>16s}")
@@ -510,7 +359,7 @@ def run(planner: Planner,
     hr(" DEBUG COMPLETE ")
 
     # ── Save to file ──
-    out_dir = os.path.join(os.path.dirname(__file__), "..", "reports")
+    out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "reports")
     os.makedirs(out_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = os.path.join(out_dir, f"debug_{label}_{ts}.txt")

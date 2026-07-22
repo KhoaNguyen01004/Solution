@@ -4,8 +4,6 @@ from typing import Optional
 from truck_load_planner.engine.package import Package
 from truck_load_planner.engine.container import Container
 from truck_load_planner.engine.distribution import distribute_across_vehicles
-from truck_load_planner.engine.repair import optimize_layout
-from truck_load_planner.engine.consolidation import consolidate_fleet
 from truck_load_planner.engine.statistics import compute_statistics
 from truck_load_planner.session import LoadPlanningSession
 from truck_load_planner.models import ContainerConfig
@@ -29,21 +27,6 @@ class InternalPackingEngine(PackingEngine):
         placed, failed, unplaced, _, _ = distribute_across_vehicles(
             packages, vehicle_sessions, debug=debug,
         )
-
-        placed_ids = set()
-        for _, session in vehicle_sessions:
-            for pl in session._planner.placements:
-                if pl.package is not None:
-                    placed_ids.add(id(pl.package))
-        unplaced_pkg_objects = [p for p in packages if id(p) not in placed_ids]
-
-        vehicle_sessions, _ = optimize_layout(
-            vehicle_sessions, packages,
-            unplaced_packages=unplaced_pkg_objects,
-            max_passes=3, debug=debug,
-        )
-
-        vehicle_sessions, _ = consolidate_fleet(vehicle_sessions, packages)
 
         elapsed = (time.perf_counter() - start) * 1000
 

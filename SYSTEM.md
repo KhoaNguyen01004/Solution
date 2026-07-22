@@ -12,37 +12,28 @@ Flask-based fleet management with GPS tracking, fuel monitoring, oil changes, an
 
 **File**: `engine/distribution.py` → `distribute_across_vehicles()`
 
-When auto-arrange is called without specifying a single vehicle, the backend distributes all packages across every vehicle that has a container config. Uses **Largest-Vehicle-First**: biggest vehicles are loaded first, smaller ones only receive leftovers.
+When auto-arrange is called without specifying a single vehicle, the backend distributes all packages across every vehicle using **Largest-Vehicle-First**: biggest vehicles are loaded first, smaller ones only receive leftovers.
 
 ```
-Input:  [Package A, Package B, ..., Package N], [Vehicle 1, Vehicle 2, ..., Vehicle M]
+Input:  [Package A, ..., Package N], [Vehicle 1, ..., Vehicle M]
 Output: { placed_packages, failed_packages, per_vehicle: [{ vehicle_id, plate_number, package_count }] }
 
 Algorithm:
-1. Sort packages by volume DESC (biggest first)
-2. Sort vehicles by combined capacity (volume_mm³ × payload_kg) DESC
-3. For each vehicle (biggest → smallest):
+1. Sort vehicles by combined capacity (volume_mm³ × payload_kg) DESC
+2. For each vehicle (biggest → smallest):
       For each remaining package (biggest → smallest):
-        a. Generate candidate points (extreme points + right-wall + floor anchors)
+        a. Generate candidate points (origin + corners of placed boxes)
         b. Expand with 0° / 90° rotations
-        c. Score all candidates (13-factor placement score, 0–100)
-        d. Tighten top 5 candidates via tighten_position() (snap to nearest extreme point)
-        e. Re-score tightened candidates
-        f. Pick best; if stack (z>0) and n_floor ≤ 10, try _try_local_rearrangement():
-           - Identify blocking floor packages (clearance-aware AABB overlap)
-           - Remove ≤ 3 blockers, place package on floor, re-place blockers
-           - Accept only if floor score > stack score
-        g. If position found: place_package() → door_used stored
-        h. If not found: Y-slide fallback (100mm steps, ±3 per axis)
-        i. If still not found: keep for next vehicle
-4. Return { placed, failed, unplaced, vehicle_map }
+        c. Score candidates (4-term: contact, x-preference, floor, y-balance)
+        d. Validate (boundary, weight, collision, support, door access)
+        e. If valid: place_package() → door_used stored
+        f. If not: keep for next vehicle
+3. Return { placed, failed, unplaced, vehicle_map }
 ```
 
 **Why Largest-Vehicle-First?**
-- The biggest vehicles have the most capacity — fully utilising them first reduces the number of vehicles needed
-- No waste estimation or per-package cross-vehicle comparisons needed
+- Biggest vehicles have the most capacity — fully utilising them first reduces the number of vehicles needed
 - Smaller vehicles naturally receive only what big ones cannot accommodate
-- Works well with fleet consolidation post-pass
 
 ### Single-Vehicle Placement: `LargestFirstStrategy`
 
@@ -51,53 +42,16 @@ Algorithm:
 Once a vehicle is selected, the strategy places packages one-by-one:
 
 ```
-For each package (sorted by volume DESC):
+For each package (sorted: non-stackable first, volume DESC, weight DESC, footprint DESC):
   1. Generate candidate points = {(0,0,0)} ∪ {right-corner, front-corner, top-corner of each placed package}
-  2. Add right-wall candidate (0, container.width - pkg.width - clearance, 0)
-  3. Add floor anchor candidates via generate_floor_anchors() (largest empty floor rectangles, Y-boundary sweep, top 2 regions × 3 positions)
-  4. For each (x,y,z), try rotation=0 and (if allow_rotation) rotation=90
-  5. Score all candidates (13-factor, 0–100), tighten top 5, re-score
-  6. Validate: check_boundary(), check_weight(), check_door_fit(), check_collision(), check_support(), check_door_sweep()
-  7. Pick the highest-scoring position; if score ≥ 99.99, stop scanning
-  8. place_package(x, y, z, rotation) → door_used stored on Placement
-  9. If no position found → Y-slide fallback
+  2. For each (x,y,z), try rotation=0 and (if allow_rotation) rotation=90
+  3. Score all candidates (4-term: package_contact, x_preference, floor_contact, y_balance)
+  4. Validate: check_boundary(), check_weight(), check_collision(), check_support(), check_door_access()
+  5. Pick the highest-scoring valid position → place_package()
+  6. If none found → mark as unplaced
 ```
 
-### Frontier-Based Gap Prevention
-
-**File**: `engine/auto_arrange.py` (integration), `engine/frontier.py` (`FrontierTracker`)
-
-During the greedy scoring pass, each candidate receives a **frontier gap penalty** to prevent placement behind the current packed front:
-
-```
-gap_distance = frontier(Y_strip) − candidate.x     # negative = in a gap
-gap_ratio = gap_distance / container.length
-penalty = −min(gap_distance × (0.5 + gap_ratio × 0.5), 500)
-```
-
-The `FrontierTracker` maintains a 1D Y-strip frontier (default strip_width_mm = 200–250 mm). For each Y strip, it records the maximum X (depth) of the packed front. After each placement, the frontier is updated via `update_from_placement()`.
-
-### Frontier Gap-Filling Pass
-
-**File**: `engine/distribution.py` → `fill_frontier_gaps()`
-
-After the initial greedy sweep, a post-processing pass detects and resettles gapped packages:
-
-1. Scan all placed packages sorted by X
-2. For each, compute `frontier.get_frontier_at(package.y_center + package.width/2)`
-3. If `package.xmin > frontier`, flag as gapped
-4. Call `settle_package()` — analytically snaps package to the nearest extreme point that closes the gap
-5. If settle gives no improvement (same position), fall back to `tighten_position()`
-6. Only re-place if `tx >= pl.x - 1.0` (≥1 mm forward improvement)
-7. Update frontier immediately after each re-placement
-
-Replaces older `fill_interior_gaps` calls in compaction pipelines. The guard against sub‑mm improvement prevents jitter.
-
-### Y-Slide Fallback
-
-**File**: `engine/candidate_points.py` → `generate_slide_candidates()`
-
-When a package fails all standard extreme-point candidates, additional positions are generated by sliding each base candidate left/right in Y by steps of 100mm (up to 3 steps each direction). This helps squeeze in more packages per vehicle and improves overall utilization.
+No frontier penalty, no Y-slide, no gap-filling, no repair, no compaction passes.
 
 ### Candidate Point Generation
 
@@ -108,36 +62,16 @@ Points are derived from the current state of placed packages:
 ```
 Start with: {(0, 0, 0)}
 For each placed package (x, y, z) with dimensions (l, w, h):
-  Add (x + l + 2*clearance, y, z)     // right face (inflated)
-  Add (x, y + w + 2*clearance, z)     // front face (inflated)
-  Add (x, y, z + h + 2*clearance)     // top face (inflated)
-Filter: keep points where x ≤ container.length, y ≤ container.width, z ≤ container.height
+  Add (x + l + 2*clearance, y, z)     // right face
+  Add (x, y + w + 2*clearance, z)     // front face
+  Add (x, y, z + h + 2*clearance)     // top face
+Filter: keep points within container bounds
 Sort by: (z, x, y)
 ```
 
 Extreme points are offset by `+2*clearance` (10mm default) to prevent adjacent package AABBs from overlapping after inflation.
 
-**Floor Anchors**: `generate_floor_anchors()` adds additional candidates from the largest empty floor rectangles. It sweeps Y-boundaries of placed packages, identifies the top 2 empty regions (by area), and generates front/center/rear positions for each. This helps fill large open floor areas that extreme points might miss. O(N²) with N = number of floor packages; only called when there are packages on the floor.
-
-**Tighten Position**: `tighten_position()` snaps a candidate (x, y, z, rotation) back to the nearest valid extreme point. This corrects drift introduced by floor anchor positions or custom candidates that don't align with package corners. Called on the top 5 candidates after initial scoring, before re-scoring.
-
-### Candidate Priority (Pre-Validation Ranking)
-
-**File**: `routes.py` → `_candidate_priority()` (module-level function)
-
-Before the expensive validation loop, every candidate position (extreme point + rotation) is ranked by priority (0–100). This tests high-potential positions first, enabling early-exit once a near-perfect candidate is confirmed.
-
-| Factor | Weight | Formula |
-|--------|--------|---------|
-| Touching Surfaces | 0–60 | `walls_touched × 15` — counts rear (x=len), left (y=0), right (y=wid), floor (z=0) |
-| Z-Height | 0–15 | `(1 − z / container_height) × 15` — lower is better |
-| Wall-Contact Area | 0–15 | `touching_edge_length / max_possible × 15` — rewards edge-alignment |
-| Back-to-Front Loading | 0–20 | `(1 − x / container_length) × 20` — prefers rear wall (low X) |
-| Front-Center Proximity | 0–10 | `(1 − dist / diagonal) × 10` where dist = sqrt(x² + (y−half_width)² + z²) — prefers front-center with no Y-wall bias |
-
-**Usage**: `_find_best_for_pkg()` expands candidates with both rotations, sorts by priority descending, then validates in that order. If a candidate scores ≥ 99.99, the loop breaks immediately.
-
-**Benefit**: Over 2× reduction in validation calls compared to brute-force order.
+**Tighten Position**: `tighten_position()` snaps a candidate (x, y, z, rotation) back to the nearest valid extreme point. Called after initial candidate generation.
 
 ---
 
@@ -145,131 +79,31 @@ Before the expensive validation loop, every candidate position (extreme point + 
 
 **File**: `engine/scorer.py` → `score_placement()`
 
-Every valid candidate position receives a 0–200 score. The scorer never validates — invalid positions are filtered before scoring.
+Every valid candidate position receives a score. The scorer never validates — invalid positions are filtered before scoring.
 
-### Scoring Categories
+### Scoring Categories (4 terms)
 
 | Category | Weight | Calculation |
 |----------|--------|-------------|
-| `floor_contact` | 40 | 1.0 if `aabb.zmin == 0`, else 0.0 |
-| `wall_contact` | 2 | (walls_touched) / 4 — counts front(x=0), rear(x=len), left(y=0), right(y=wid) |
-| `package_contact` | 8 | contact_area / max_possible — sum of coincident-face overlap area vs total surface area |
-| `face_contact` | 2 | faces_touched / 6 — counts each of 6 faces touching another package or container wall |
-| `compactness` | 15 | max(0, 1 − nearest_centroid_dist / 2000) — distance to closest package centroid |
-| `stack_quality` | 0 | support_area / footprint_area — XY overlap with packages directly below |
-| `vertical_stability` | 5 | max(0, 1 − mid_z / container_height) — lower is better |
-| `z_preference` | 50 | max(0, 1 − zmin / container_height) — prefers floor-level placement |
-| `x_preference` | 120 | max(0, 1 − xmin / container_length) — rewards deep placement near front wall |
-| `rear_proximity` | 200 | min(1, gap / max(8% length, 300mm)) — rewards distance from rear door |
-| `y_balance` | 3 | Y-centre-of-gravity of all packages (existing + candidate); maximum when COG is at container.width/2 |
-| `cluster_cohesion` | 10 | rewards positions near centroid of all placed packages (small+deep+compact bonus) |
-| `dead_space_quality` | 3 | See [Dead Space Quality](#dead-space-quality-estimation) below |
-| `load_profile_stability` | 3 | 1 − `max_step / container_height` — penalises tall vertical steps; see [Load Profile Stability](#load-profile-stability) below |
-
-### Frontier Gap Penalty (Runtime Modifier)
-
-In addition to the 14 scoring categories, a **frontier gap penalty** is applied during the greedy placement pass (in `auto_arrange.py`, not in `scorer.py` itself):
-
-```
-gap_distance = frontier(Y_strip) − candidate.x
-gap_ratio = gap_distance / container.length
-penalty = −min(gap_distance × (0.5 + gap_ratio × 0.5), 500)
-adjusted_score = raw_score + penalty   # penalty ≤ 0
-```
-
-This is not a scoring category — it's a runtime modifier that prevents placement behind the current packed front. The penalty caps at −500 to avoid completely dominating the score.
+| `package_contact` | 1000 | Sum of coincident-face overlap areas (mm²) across all neighboring packages |
+| `x_preference` | 200 | `max(0, container.length − xmin)` — push deep into container |
+| `floor_contact` | 100 | `container.width × container.length` if `z==0`, else 0 — prefer floor |
+| `y_balance` | 50 | Y-COG proximity to `container.width/2` — even weight distribution |
 
 ### Design Principles
-- Every category has an isolated function (can be tuned independently)
+- No clamping — raw contact area and length values compete naturally
 - `SCORING_WEIGHTS` dict at module top for global rebalancing
 - `debug=True` prints per-category breakdown for analysis
-- The scorer has no side effects — purely functional
 
 ### Y-Balance Details
 
-The `_score_y_balance` function computes the Y-centre-of-gravity (Y-COG) of all packages in the container (existing placements + the candidate), using actual `weight_kg` values. It returns:
+Computes Y-centre-of-gravity of all packages (existing + candidate) using actual `weight_kg`:
 
 ```
 score = max(0, 1 − |y_cog − container.width/2| / (container.width/2))
 ```
 
-This gives 1.0 when the COG is perfectly centred and 0.0 when it's at either wall. Combined weight 3, it provides gentle nudging toward centre without dominating the score.
-
-### Rear-Proximity Details
-
-The `_score_rear_proximity` function penalizes packages whose rear edge is close to the container rear door:
-
-```
-gap = container.length − aabb.xmax
-threshold = max(container.length × 0.08, 300 mm)
-score = min(1.0, gap / threshold)
-```
-
-A package with its rear edge more than `threshold` from the rear wall gets full score (1.0). As the gap shrinks below threshold, the score drops linearly to 0.0 at the rear wall. Weight 200 makes rear proximity the dominant factor, strongly pushing packages toward the front wall.
-
-### Dead Space Quality Estimation
-
-**File**: `engine/dead_space.py` → `compute_dead_space_quality()`
-
-New in this phase. Estimates how usable the remaining free space will be after placing a package. The score is 0.0–1.0 and is integrated as a normal scoring category with weight 10.
-
-#### Algorithm
-```
-For the candidate AABB, examine each of the 6 faces:
-
-1. Compute the gap distance to the nearest obstacle (package or
-   container wall) in the outward direction. Only obstacles that
-   overlap the face's projection on both perpendicular axes are
-   considered (conservative O(n) ray).
-
-2. If the gap is ≤ MIN_GAP_MM (10mm), the face is considered flush
-   and is skipped — a flush face cannot create dead space.
-
-3. The gap box dimensions are (gap_depth × face_width × face_height).
-
-4. Score the gap against a reference set of the hardest remaining
-   packages (composite difficulty = volume × aspect ratio). Uses a
-   continuous product of clamped sorted-dimension ratios:
-
-       score = ∏ min(1.0, gap_dim_i / pkg_dim_i)
-
-   This gives smooth 0–1 degradation — no binary fit/no-fit.
-
-5. Per-face score is a difficulty-weighted average across the
-   reference set (harder packages dominate).
-
-6. Final quality = area-weighted average of all exposed faces.
-```
-
-#### Configuration
-
-| Constant | Location | Default | Description |
-|----------|----------|---------|-------------|
-| `DEAD_SPACE_WEIGHT` | `dead_space.py` | 10 | Scoring weight applied by the scorer |
-| `MIN_GAP_MM` | `dead_space.py` | 10.0 | Faces with smaller gaps are considered flush and skipped |
-| `REFERENCE_SET_SIZE` | `dead_space.py` | 3 | Number of hardest remaining packages to use as reference |
-
-#### Key Design Points
-
-- **Spatial index**: uses the planner's `query_aabb_fn` when available to limit the search to nearby packages instead of scanning all placements.
-- **Flush-face exclusion**: faces touching a wall or another package (gap ≤ 10mm) are skipped entirely — they cannot contribute to dead space.
-- **Difficulty-weighted reference**: larger, more awkward packages dominate the per-face score so the heuristic preserves space for the hardest remaining items.
-- **Lightweight**: O(faces × reference_size) ≈ O(1) per candidate.
-
----
-
-## Load Profile Stability
-
-**File**: `engine/scorer.py` → `_score_load_profile_stability()`
-
-Evaluates the flatness of the packed cargo profile. The container floor is divided into 10 longitudinal slices (`NUM_PROFILE_SLICES = 10`). For each slice, the maximum occupied height is recorded. The score is:
-
-```
-max_step = max |height[i] − height[i−1]| across all slices
-score = max(0, 1 − max_step / container.height)
-```
-
-This rewards layouts with small vertical steps (flat cargo surfaces) and penalises tall isolated stacks. Weight 8 creates a 4+ point gap between flat and tower-heavy layouts. The metric was changed from `sum_diffs / ((n-1) × H)` (which had a ~0.1 point range and ranked concentrated towers better than staircases) to `max_step / H` for a 59× improvement in discriminative power.
+1.0 when perfectly centred, 0.0 at either wall.
 
 ---
 

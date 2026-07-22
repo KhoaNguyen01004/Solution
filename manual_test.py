@@ -319,26 +319,11 @@ def run_test():
 
     # ── 3. Run distribution ───────────────────────────────────────
     from truck_load_planner.engine.distribution import distribute_across_vehicles
-    from truck_load_planner.engine.repair import optimize_layout
     from truck_load_planner.engine.trace_mutations import M
     M.reset()
 
     placed, failed, unplaced, _, _ = distribute_across_vehicles(
         engine_packages, vehicle_sessions, debug=False,
-    )
-
-    # Repair
-    placed_ids = set()
-    for _, session in vehicle_sessions:
-        for pl in session._planner.placements:
-            if pl.package is not None:
-                placed_ids.add(id(pl.package))
-    unplaced_pkg_objects = [p for p in engine_packages if id(p) not in placed_ids]
-
-    vehicle_sessions, _ = optimize_layout(
-        vehicle_sessions, engine_packages,
-        unplaced_packages=unplaced_pkg_objects,
-        max_passes=3, debug=False,
     )
 
     # ── 4. Log Rep-1: raw engine placements ───────────────────────
