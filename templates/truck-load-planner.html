@@ -361,7 +361,15 @@
             <button class="btn-tb btn-tb-icon" onclick="app.rotateSelected(1)" title="Rotate Clockwise (E)">&#8631;</button>
             <button class="btn-tb btn-tb-icon" onclick="app.deleteSelected()" title="Delete Selected (Del)" style="color:var(--danger);">&times;</button>
             <div class="tlp-toolbar-divider"></div>
-            <button class="btn-tb btn-tb-accent" onclick="app.autoArrange()" title="Auto Arrange all packages">&#10024; Auto Arrange</button>
+            <div class="tlp-profile-selector" style="display:inline-flex;align-items:center;gap:4px;">
+                <button class="btn-tb btn-tb-accent" onclick="app.autoArrange()" title="Auto Arrange all packages">&#10024; Auto Arrange</button>
+                <select id="profile-select" style="font-size:11px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);cursor:pointer;" title="Optimization profile">
+                    <option value="fast">&#9889; Fast</option>
+                    <option value="balanced" selected>&#9878; Balanced</option>
+                    <option value="maximum_quality">&#127919; Maximum Quality</option>
+                </select>
+                <span id="optimization-status" style="display:none;font-size:11px;color:var(--text-secondary);margin-left:4px;"></span>
+            </div>
             <div class="tlp-toolbar-divider"></div>
             <button class="btn-tb" id="btn-step-prev" onclick="app.stepPrev()" title="Previous step" style="display:none">&#9664;</button>
             <span id="step-counter" style="display:none;color:var(--text);font-size:12px;margin:0 4px;min-width:60px;text-align:center">0/0</span>
@@ -450,6 +458,7 @@
                 <div class="tlp-section-title" style="margin-bottom:4px;">
                     <span>Packages</span>
                     <button class="btn-section" onclick="app.openPackageEditor()" style="display:inline;width:auto;padding:0 10px;font-size:10px;height:22px;margin:0;">+ Package</button>
+                    <button class="btn-section" onclick="app.clearAllPackages()" style="display:inline;width:auto;padding:0 10px;font-size:10px;height:22px;margin:0 0 0 4px;color:var(--danger);">Clear All</button>
                 </div>
                 <!-- Inline Package Editor -->
                 <div id="pkg-editor" style="display:none;margin-bottom:6px;padding:6px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:var(--radius-sm);">
@@ -694,6 +703,52 @@
         </div>
     </div>
 </div>
+
+<!-- Arranging Progress Modal -->
+<div class="modal-overlay" id="arrange-progress-modal" onclick="if(event.target===this){}">
+    <div class="modal-box" style="max-width:400px;text-align:center;">
+        <div class="modal-body" style="padding:32px 24px;gap:20px;">
+            <div class="loader" style="margin:0 auto;"></div>
+            <div style="font-size:1rem;font-weight:600;color:var(--text-primary);">Arranging packages...</div>
+            <div style="font-size:0.85rem;color:var(--text-secondary);" id="arrange-progress-mode">Optimizing placement</div>
+            <div style="font-size:0.8rem;color:var(--text-muted);font-variant-numeric:tabular-nums;" id="arrange-progress-time">Elapsed: 0s</div>
+        </div>
+    </div>
+</div>
+<style>
+.loader {
+  width: 90px;
+  height: 14px;
+  box-shadow: 0 3px 0 #fff;
+  position: relative;
+  clip-path: inset(-40px 0 -5px)
+}
+.loader:before {
+  content: "";
+  position: absolute;
+  inset: auto calc(50% - 17px) 0;
+  height: 50px;
+  --g:no-repeat linear-gradient(#ccc 0 0);
+  background: var(--g),var(--g),var(--g),var(--g);
+  background-size: 16px 14px;
+  animation:
+    l7-1 2s infinite linear,
+    l7-2 2s infinite linear;
+}
+@keyframes l7-1 {
+  0%,
+  100%  {background-position: 0 -50px,100% -50px}
+  17.5% {background-position: 0 100%,100% -50px,0 -50px,100% -50px}
+  35%   {background-position: 0 100%,100% 100% ,0 -50px,100% -50px}
+  52.5% {background-position: 0 100%,100% 100% ,0 calc(100% - 16px),100% -50px}
+  70%,
+  98%  {background-position: 0 100%,100% 100% ,0 calc(100% - 16px),100% calc(100% - 16px)}
+}
+@keyframes l7-2 {
+  0%,70% {transform:translate(0)}
+  100%  {transform:translate(200%)}
+}
+</style>
 
 <div id="toast-container"></div>
 

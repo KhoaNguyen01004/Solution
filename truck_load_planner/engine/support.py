@@ -5,11 +5,16 @@ combined-support model.  The union of XY overlap regions from all
 supporting packages must cover a configurable percentage of the
 candidate's footprint, and the candidate's footprint centre must lie
 within the combined support region to prevent unstable bridging.
+
+Stacking decisions use a capacity-based model rather than a simple
+boolean: each base package may specify a maximum top weight, a
+maximum number of stack layers, or a stacking mode (NONE / LIGHT_ONLY
+/ NORMAL) to better reflect real warehouse practice.
 """
 
 from .geometry import AABB
 from .placement import Placement
-from .package import Package
+from .package import Package, StackingMode
 
 
 _GRID_SAMPLES = 20    # samples per axis for union coverage estimation
@@ -19,17 +24,101 @@ def _footprint_centre(aabb: AABB) -> tuple[float, float]:
     return (aabb.xmin + aabb.xmax) / 2, (aabb.ymin + aabb.ymax) / 2
 
 
+def _count_above(placements, base_pl) -> int:
+    """Count how many packages are stacked directly on top of *base_pl*."""
+    base = base_pl.package
+    if base is None:
+        return 0
+    base_top = base_pl.z + (
+        base.height_mm if hasattr(base, 'height_mm')
+        else getattr(base, 'height', 0)
+    )
+    count = 0
+    for pl in placements:
+        if pl is base_pl:
+            continue
+        if abs(pl.z - base_top) < 0.001:
+            count += 1
+    return count
+
+
+def _check_stacking_rules(
+    below_pl,
+    top_package: Package,
+    placements: list,
+) -> tuple[bool, list[str]]:
+    """Check capacity-based stacking rules for one below package.
+
+    Returns (valid, reasons).
+    """
+    pa = below_pl.package
+    if pa is None:
+        return True, []
+
+    reasons = []
+
+    # ── Top package is unstackable: cannot sit on anything ──────────
+    top_mode = getattr(top_package, 'stacking_mode', StackingMode.NORMAL)
+    if top_mode == StackingMode.NONE:
+        return False, [f"'{top_package.name}' is unstackable (cannot be placed on top of other packages)"]
+
+    mode = getattr(pa, 'stacking_mode', StackingMode.NORMAL)
+    max_top = getattr(pa, 'max_top_weight_kg', 0.0)
+    max_layers = getattr(pa, 'max_stack_layers', 0)
+
+    # ── StackingMode.NONE: nothing allowed above ───────────────────
+    if mode == StackingMode.NONE:
+        return False, [f"Cannot stack on '{pa.name}' (stacking mode: NONE)"]
+
+    # ── StackingMode.LIGHT_ONLY: lightweight packages only ──────────
+    if mode == StackingMode.LIGHT_ONLY:
+        if max_top > 0 and top_package.weight_kg > max_top:
+            return False, [
+                f"'{top_package.name}' ({top_package.weight_kg} kg) "
+                f"exceeds '{pa.name}' max_top_weight ({max_top} kg)"
+            ]
+
+    # ── Max stack layers ────────────────────────────────────────────
+    if max_layers > 0:
+        current_above = _count_above(placements, below_pl)
+        if current_above >= max_layers:
+            return False, [
+                f"'{pa.name}' already has {current_above} packages "
+                f"on top (max: {max_layers})"
+            ]
+
+    # ── Weight rule (all modes): top must be lighter than base ──────
+    if top_package.weight_kg is not None and pa.weight_kg is not None:
+        if top_package.weight_kg > pa.weight_kg:
+            return False, [
+                f"'{top_package.name}' ({top_package.weight_kg} kg) heavier "
+                f"than '{pa.name}' ({pa.weight_kg} kg)"
+            ]
+
+    # ── Footprint area rule: top footprint must be ≤ base footprint ──
+    top_fp = top_package.length_mm * top_package.width_mm
+    base_fp = pa.length_mm * pa.width_mm
+    if top_fp > base_fp:
+        return False, [
+            f"'{top_package.name}' footprint ({top_fp:.0f} mm²) larger "
+            f"than '{pa.name}' footprint ({base_fp:.0f} mm²)"
+        ]
+
+    return True, []
+
+
 def check_support(
     placements: list,
     candidate_aabb: AABB,
     package: Package = None,
-    support_threshold: float = 0.90,
+    support_threshold: float = 0.50,
 ) -> dict:
     """Validate that the candidate has adequate support below.
 
     Rules:
       1. If z=0 (floor) → always supported.
-      2. Every package directly below must be stackable.
+      2. Each package directly below is checked against capacity-based
+         stacking rules (stacking mode, max top weight, max layers).
       3. Top package must be lighter than every package directly below.
       4. The union of XY-overlap regions from all below packages must
          cover at least ``support_threshold`` (0-1) of the candidate's
@@ -43,7 +132,7 @@ def check_support(
         package: The package being placed (for weight check).
         support_threshold: Minimum fraction of candidate footprint that
             must be covered by the union of below-package XY overlap
-            (default 0.90 = 90%).
+            (default 0.50 = 50%).
 
     Returns:
         {"valid": True, "reasons": []} or
@@ -75,27 +164,18 @@ def check_support(
     if not below_placements:
         return {"valid": False, "reasons": ["No support below package"]}
 
-    # ── Verify each below package: stackable + weight ─────────────────
+    # ── Verify each below package: stacking rules + weight ────────────
     below_aabbs = []
     for pl in below_placements:
         pa = pl.package
+        if pa is None:
+            continue
 
-        if pa and not pa.stackable:
-            return {
-                "valid": False,
-                "reasons": [f"Cannot stack on '{pa.name}' (not stackable)"],
-            }
-
-        if pa and package is not None and package.weight_kg is not None \
-                and pa.weight_kg is not None:
-            if package.weight_kg > pa.weight_kg:
-                return {
-                    "valid": False,
-                    "reasons": [
-                        f"'{package.name}' ({package.weight_kg} kg) heavier "
-                        f"than '{pa.name}' ({pa.weight_kg} kg)"
-                    ],
-                }
+        # Capacity-based stacking check
+        if package is not None:
+            ok, reasons = _check_stacking_rules(pl, package, placements)
+            if not ok:
+                return {"valid": False, "reasons": reasons}
 
         pkg_len = pa.length_mm if hasattr(pa, 'length_mm') \
                   else getattr(pa, 'length', 0)

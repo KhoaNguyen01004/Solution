@@ -186,11 +186,11 @@ def test_compactness_no_others():
 
 
 def test_compactness_adjacent():
-    aabb = _make_aabb(PACKAGE, 1000, 0, 0, 0)
+    aabb = _make_aabb(PACKAGE, 250, 0, 0, 0)
     other_aabb = _make_aabb(PACKAGE, 0, 0, 0, 0)
     score = _score_compactness(aabb, [other_aabb])
-    # Centroid distance = 1000mm
-    # 1.0 - 1000/2000 = 0.5
+    # Centroid distance = 250mm
+    # 1.0 - 250/500 = 0.5
     assert score == pytest.approx(0.5)
 
 
@@ -291,7 +291,7 @@ def test_score_placement_returns_placementscore():
     )
     assert isinstance(result, PlacementScore)
     assert result.total >= 0.0
-    assert result.total <= 100.0
+    assert result.total <= 200.0
     assert "floor_contact" in result.breakdown
     assert "wall_contact" in result.breakdown
     assert "package_contact" in result.breakdown
@@ -300,6 +300,7 @@ def test_score_placement_returns_placementscore():
     assert "stack_quality" in result.breakdown
     assert "vertical_stability" in result.breakdown
     assert "dead_space_quality" in result.breakdown
+    assert "load_profile_stability" in result.breakdown
 
 
 def test_score_placement_corner_best():
@@ -358,7 +359,8 @@ def test_weights_are_configurable():
     assert "x_preference" in SCORING_WEIGHTS
     assert "rear_proximity" in SCORING_WEIGHTS
     assert "dead_space_quality" in SCORING_WEIGHTS
-    assert sum(SCORING_WEIGHTS.values()) == 130
+    assert "load_profile_stability" in SCORING_WEIGHTS
+    assert sum(SCORING_WEIGHTS.values()) == 461
 
 
 # ── Edge Cases ────────────────────────────────────────────────────────
@@ -369,7 +371,7 @@ def test_zero_sized_package():
                    height_mm=1)
     result = score_placement(tiny, 0, 0, 0, 0, [], CONTAINER)
     assert isinstance(result, PlacementScore)
-    assert 0.0 <= result.total <= 100.0
+    assert 0.0 <= result.total <= 200.0
 
 
 def test_empty_placements_list():

@@ -64,6 +64,7 @@ cache_lock = threading.Lock()
 _last_manual_update = 0.0
 _oil_fetch_progress = {}
 _oil_fetch_lock = threading.Lock()
+_sync_lock = threading.Lock()
 KNOWN_LOCATIONS = {}
 fleet_session = None
 
@@ -472,13 +473,55 @@ def init_db():
     if 'vehicle_id' not in fuel_cols:
         c.execute("ALTER TABLE fuel_log ADD COLUMN vehicle_id INTEGER DEFAULT NULL")
 
+    # ----- Google Sheet Sync History Table -----
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS sync_history (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            fetched_rows    INTEGER NOT NULL DEFAULT 0,
+            inserted_rows   INTEGER NOT NULL DEFAULT 0,
+            duplicate_rows  INTEGER NOT NULL DEFAULT 0,
+            failed_rows     INTEGER NOT NULL DEFAULT 0,
+            duration_sec    REAL    NOT NULL DEFAULT 0,
+            status          TEXT    NOT NULL DEFAULT 'success',
+            error_message   TEXT    DEFAULT NULL,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     conn.commit()
 
     # Backfill vehicles + vehicle_id from existing fuel_log entries
     c.execute("SELECT DISTINCT license_plate, driver_name FROM fuel_log WHERE license_plate IS NOT NULL AND license_plate != ''")
     distinct_plates = c.fetchall()
+
+    # Pre-build a mapping of normalised suffix → (vehicle_id, plate)
+    c.execute("SELECT id, plate_number FROM vehicles")
+    suffix_to_vehicle: dict[str, tuple[int, str]] = {}
+    for vid, vplate in c.fetchall():
+        digits = ''.join(ch for ch in (vplate or '') if ch.isdigit())
+        key = digits[-5:] if len(digits) >= 5 else digits
+        if key:
+            is_numeric = vplate.isdigit() and len(vplate) == 5
+            if not is_numeric or key not in suffix_to_vehicle:
+                suffix_to_vehicle[key] = (vid, vplate)
+
     for plate, driver in distinct_plates:
-        # Upsert vehicle
+        digits = ''.join(ch for ch in (plate or '') if ch.isdigit())
+        suffix = digits[-5:] if len(digits) >= 5 else digits
+
+        # Skip purely numeric 5-digit plates — never create duplicate vehicles
+        if plate.isdigit() and len(plate) == 5:
+            match = suffix_to_vehicle.get(suffix)
+            if match:
+                orig_id, orig_plate = match
+                # Update fuel_log to use the full plate + correct vehicle_id
+                c.execute(
+                    "UPDATE fuel_log SET license_plate = ?, vehicle_id = ? WHERE license_plate = ? AND vehicle_id IS NULL",
+                    (orig_plate, orig_id, plate)
+                )
+            continue
+
+        # Upsert vehicle for normal (full) plates
         c.execute(
             "INSERT INTO vehicles (plate_number, current_driver) VALUES (?, ?) ON CONFLICT(plate_number) DO UPDATE SET current_driver = COALESCE(NULLIF(?, ''), current_driver)",
             (plate, driver or '', driver or '')
@@ -2537,6 +2580,43 @@ def api_vehicles_delete(vehicle_id):
         return jsonify({"success": False, "message": str(e)}), 500
 
 
+@app.route("/api/fleet/vehicles/bulk-delete", methods=["POST"])
+def api_vehicles_bulk_delete():
+    """Delete multiple vehicles by ID. Runs inside a transaction."""
+    try:
+        data = request.json or {}
+        ids = data.get("ids", [])
+        if not ids:
+            return jsonify({"success": False, "message": "No vehicle IDs provided"}), 400
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        conn.execute("BEGIN")
+
+        try:
+            deleted = 0
+            for vid in ids:
+                # Delete container config and features if present
+                c.execute("SELECT container_config_id FROM vehicles WHERE id=?", (vid,))
+                row = c.fetchone()
+                if row and row[0]:
+                    c.execute("DELETE FROM container_features WHERE container_config_id = ?", (row[0],))
+                    c.execute("DELETE FROM container_configs WHERE id = ?", (row[0],))
+                c.execute("DELETE FROM vehicles WHERE id=?", (vid,))
+                if c.rowcount > 0:
+                    c.execute("UPDATE fuel_log SET vehicle_id = NULL WHERE vehicle_id = ?", (vid,))
+                    deleted += 1
+            conn.commit()
+            conn.close()
+            return jsonify({"success": True, "message": f"{deleted} vehicle(s) deleted", "deleted": deleted})
+        except Exception:
+            conn.rollback()
+            conn.close()
+            raise
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 @app.route("/api/fleet/vehicles/search")
 def api_vehicles_search():
     """Autocomplete: returns matching vehicles with plate, type, driver."""
@@ -2631,6 +2711,12 @@ def _compute_fuel_entry(row: dict) -> dict:
     raw_liters = entry["liters"] or 0
     entry["total_cost"] = round(raw_liters * (entry.get("unit_price") or 0), 2)
     entry["is_anomaly"] = False
+
+    # Missing KM — cannot compute efficiency
+    if not (entry.get("old_km") and entry.get("new_km")):
+        entry["l_per_100km"] = 0
+        entry["is_anomaly"] = True
+        return entry
 
     if not entry["is_full_tank"]:
         entry["l_per_100km"] = 0
@@ -2757,12 +2843,30 @@ def _get_anomaly_multiplier(plate: str) -> float:
 
 
 def _apply_anomaly_flag(entry: dict, baseline: float) -> dict:
-    """Mark entry as anomaly if l_per_100km > threshold * baseline."""
+    """Mark entry as anomaly if l_per_100km is outside expected range.
+
+    Anomalies include:
+    * l_per_100km > baseline × anomaly_multiplier (unusually high consumption)
+    * l_per_100km > 0 and l_per_100km < 8 (unrealistically low consumption - likely data error)
+
+    Anomalous entries have l_per_100km reset to 0 so they are excluded
+    from charts and averages while remaining visible in the table as flagged.
+    """
     entry["baseline"] = round(baseline, 2)
     entry["normal_l_per_100km"] = round(_get_normal_l_per_100km(entry["license_plate"]), 2)
     entry["anomaly_multiplier"] = _get_anomaly_multiplier(entry["license_plate"])
+
+    # Unrealistically low consumption (< 8 L/100km) — data error
+    if 0 < entry["l_per_100km"] < 8:
+        entry["is_anomaly"] = True
+        entry["l_per_100km"] = 0
+        return entry
+
+    # Unusually high consumption (> baseline × multiplier)
     if baseline > 0 and entry["l_per_100km"] > baseline * entry["anomaly_multiplier"]:
         entry["is_anomaly"] = True
+        return entry
+
     return entry
 
 
@@ -2987,17 +3091,31 @@ def api_fuel_log_create():
 
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
+
+        # Resolve numeric-only plate to full plate if a matching vehicle exists
+        if plate.isdigit() and len(plate) == 5:
+            digits = ''.join(ch for ch in (plate or '') if ch.isdigit())
+            plate_suffix = digits[-5:] if len(digits) >= 5 else digits
+            c.execute("SELECT id, plate_number FROM vehicles")
+            for vid, vplate in c.fetchall():
+                vdigits = ''.join(ch for ch in (vplate or '') if ch.isdigit())
+                vsuffix = vdigits[-5:] if len(vdigits) >= 5 else vdigits
+                if vsuffix == plate_suffix and not (vplate.isdigit() and len(vplate) == 5):
+                    plate = vplate
+                    vehicle_id = vid
+                    break
         c.execute(
             "INSERT INTO fuel_log (license_plate, log_date, log_time, gas_store, old_km, new_km, liters, driver_name, unit_price, notes, vehicle_id, is_full_tank) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (plate, log_date, log_time, gas_store, old_km, new_km, liters, driver_name, unit_price, notes, vehicle_id, is_full_tank)
         )
         conn.commit()
         new_id = c.lastrowid
-        # Ensure vehicle exists in vehicles table
-        c.execute(
-            "INSERT INTO vehicles (plate_number, current_driver) VALUES (?, ?) ON CONFLICT(plate_number) DO UPDATE SET current_driver = COALESCE(NULLIF(?, ''), current_driver)",
-            (plate, driver_name, driver_name)
-        )
+        # Ensure vehicle exists in vehicles table (skip numeric-only plates)
+        if not (plate.isdigit() and len(plate) == 5):
+            c.execute(
+                "INSERT INTO vehicles (plate_number, current_driver) VALUES (?, ?) ON CONFLICT(plate_number) DO UPDATE SET current_driver = COALESCE(NULLIF(?, ''), current_driver)",
+                (plate, driver_name, driver_name)
+            )
         # Link vehicle_id if not already set
         if not vehicle_id:
             c.execute(
@@ -3351,6 +3469,97 @@ def api_fuel_log_profile_delete(plate):
         conn.commit()
         conn.close()
         return jsonify({"success": True, "message": f"Normal L/100km for {plate} cleared"})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Google Sheet Sync Endpoints
+# ---------------------------------------------------------------------------
+@app.route("/api/fuel/sync", methods=["POST"])
+def api_fuel_sync():
+    """Trigger a Google Sheet synchronisation and store the result."""
+    if not _sync_lock.acquire(blocking=False):
+        return jsonify({"success": False, "message": "Sync already in progress"}), 429
+    try:
+        from services.google_sheet_service import GoogleSheetService
+
+        svc = GoogleSheetService()
+        result = svc.sync_to_database()
+
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            c = conn.cursor()
+            c.execute(
+                """INSERT INTO sync_history
+                   (fetched_rows, inserted_rows, duplicate_rows, failed_rows, duration_sec, status)
+                   VALUES (?, ?, ?, ?, ?, 'success')""",
+                (result["fetched"], result["inserted"],
+                 result["duplicate"], result["failed"],
+                 result.get("duration_sec", 0)),
+            )
+            conn.commit()
+            history_id = c.lastrowid
+        finally:
+            conn.close()
+
+        return jsonify({"success": True, "data": {**result, "history_id": history_id}})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            c = conn.cursor()
+            c.execute(
+                """INSERT INTO sync_history
+                   (fetched_rows, inserted_rows, duplicate_rows, failed_rows, duration_sec, status, error_message)
+                   VALUES (0, 0, 0, 0, 0, 'error', ?)""",
+                (str(e),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        _sync_lock.release()
+
+
+@app.route("/api/fuel/sync/history")
+def api_fuel_sync_history():
+    """Return recent sync history entries."""
+    limit = request.args.get("limit", 20)
+    try:
+        limit = int(limit)
+    except (ValueError, TypeError):
+        limit = 20
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute(
+            "SELECT * FROM sync_history ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = [dict(r) for r in c.fetchall()]
+        conn.close()
+        return jsonify({"success": True, "data": rows})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/api/fuel/sync/last")
+def api_fuel_sync_last():
+    """Return the most recent sync result."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM sync_history ORDER BY created_at DESC LIMIT 1")
+        row = c.fetchone()
+        conn.close()
+        return jsonify({"success": True, "data": dict(row) if row else None})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 

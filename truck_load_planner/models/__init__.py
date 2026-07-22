@@ -95,6 +95,8 @@ class Package:
     allow_rotation: bool = False
     fragile: bool = False
     color: str = "#3b82f6"
+    max_top_weight_kg: float = 0.0
+    max_stack_layers: int = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -122,6 +124,8 @@ class Package:
             allow_rotation=bool(row.get("allow_rotation", 0)),
             fragile=bool(row.get("fragile", 0)),
             color=row.get("color", "#3b82f6"),
+            max_top_weight_kg=float(row.get("max_top_weight_kg", 0.0)),
+            max_stack_layers=int(row.get("max_stack_layers", 0)),
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
         )

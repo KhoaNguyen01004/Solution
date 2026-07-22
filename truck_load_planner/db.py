@@ -117,5 +117,13 @@ def init_tlp_tables(db_path: str):
     if "default_qty" not in pkg_cols:
         c.execute("ALTER TABLE tlp_packages ADD COLUMN default_qty INTEGER DEFAULT 1")
 
+    # Migrations for stacking model
+    c.execute("PRAGMA table_info(tlp_packages)")
+    pkg_cols2 = {col[1] for col in c.fetchall()}
+    if "max_top_weight_kg" not in pkg_cols2:
+        c.execute("ALTER TABLE tlp_packages ADD COLUMN max_top_weight_kg REAL DEFAULT 0")
+    if "max_stack_layers" not in pkg_cols2:
+        c.execute("ALTER TABLE tlp_packages ADD COLUMN max_stack_layers INTEGER DEFAULT 0")
+
     conn.commit()
     conn.close()

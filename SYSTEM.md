@@ -8,67 +8,90 @@ Flask-based fleet management with GPS tracking, fuel monitoring, oil changes, an
 
 ## Sorting Algorithm
 
-### Multi-Vehicle Distribution (Best-Fit Decreasing)
+### Multi-Vehicle Distribution (Largest-Vehicle-First)
 
-**File**: `routes.py` → `_distribute_across_vehicles()`
+**File**: `engine/distribution.py` → `distribute_across_vehicles()`
 
-When auto-arrange is called without specifying a single vehicle, the backend distributes all packages across every vehicle that has a container config.
+When auto-arrange is called without specifying a single vehicle, the backend distributes all packages across every vehicle that has a container config. Uses **Largest-Vehicle-First**: biggest vehicles are loaded first, smaller ones only receive leftovers.
 
 ```
 Input:  [Package A, Package B, ..., Package N], [Vehicle 1, Vehicle 2, ..., Vehicle M]
 Output: { placed_packages, failed_packages, per_vehicle: [{ vehicle_id, plate_number, package_count }] }
 
 Algorithm:
-1. Sort packages: (stackable ASC, volume DESC, footprint DESC, weight DESC)
-2. Track active_indices = []   // vehicles that already have packages
-3. For each package:
-   a. Generate candidate points and expand with 0° / 90° rotations
-   b. Add right-wall candidate (0, container.width - pkg.width - clearance, 0)
-   c. Rank all candidates by priority (see Candidate Priority)
-   d. PHASE 1 — Try active_indices; for each vehicle test candidates in priority order:
-      - Validate (boundary, collision, weight, support, door access)
-      - Score valid candidates
-      - Record best score AND estimate remaining capacity after placement
-      - Early-exit if score ≥ 99.99
-   e. PHASE 2 — If no active vehicle succeeded, try the next unused vehicle
-   f. PHASE 3 — If best position touches rear wall (xmax ≥ container.length),
-      redirect to last vehicle unconditionally if it can accommodate
-   g. From all valid positions, pick the one with:
-      Primary:   lowest sum(volume_remain%, floor_remain%, payload_remain%)  // tightest fit
-      Secondary: highest placement score (tiebreaker)
-   h. place_package() and mark vehicle as active
-4. If no position found → try Y-slide: slide each base candidate left/right
-   in Y by 100mm steps (up to 3 each direction) and re-validate
-5. Return { placed, failed, unplaced, vehicle_map }
+1. Sort packages by volume DESC (biggest first)
+2. Sort vehicles by combined capacity (volume_mm³ × payload_kg) DESC
+3. For each vehicle (biggest → smallest):
+      For each remaining package (biggest → smallest):
+        a. Generate candidate points (extreme points + right-wall + floor anchors)
+        b. Expand with 0° / 90° rotations
+        c. Score all candidates (13-factor placement score, 0–100)
+        d. Tighten top 5 candidates via tighten_position() (snap to nearest extreme point)
+        e. Re-score tightened candidates
+        f. Pick best; if stack (z>0) and n_floor ≤ 10, try _try_local_rearrangement():
+           - Identify blocking floor packages (clearance-aware AABB overlap)
+           - Remove ≤ 3 blockers, place package on floor, re-place blockers
+           - Accept only if floor score > stack score
+        g. If position found: place_package() → door_used stored
+        h. If not found: Y-slide fallback (100mm steps, ±3 per axis)
+        i. If still not found: keep for next vehicle
+4. Return { placed, failed, unplaced, vehicle_map }
 ```
 
-**Why Best-Fit Decreasing over First-Fit?**
-- BFD evaluates every active vehicle for each package and picks the tightest fit, reducing wasted space
-- The `_estimate_remaining_after()` helper computes three ratios after placement: `volume_used / container_volume`, `floor_used / container_floor`, `weight_used / payload`
-- Remaining = 1 − each ratio; sum lower = vehicle fuller = better fit
-- BFD produces denser overall packing than FFD across the fleet
-
-**Phase 3 — Rear-Door Redirect:**
-- When the best position found places a package with its rear edge touching the container rear wall (`xmax ≥ container.length`), it is unconditionally redirected to the last vehicle in the fleet if that vehicle can accommodate it
-- This fills the last vehicle's unused space with packages that would be unloaded first anyway
+**Why Largest-Vehicle-First?**
+- The biggest vehicles have the most capacity — fully utilising them first reduces the number of vehicles needed
+- No waste estimation or per-package cross-vehicle comparisons needed
+- Smaller vehicles naturally receive only what big ones cannot accommodate
+- Works well with fleet consolidation post-pass
 
 ### Single-Vehicle Placement: `LargestFirstStrategy`
 
 **File**: `engine/auto_arrange.py` → `LargestFirstStrategy.arrange()`
 
-Once a vehicle is selected (either explicitly or as part of multi-vehicle distribution), the strategy places packages one-by-one:
+Once a vehicle is selected, the strategy places packages one-by-one:
 
 ```
-For each package (sorted: non-stackable → volume DESC → footprint DESC → weight DESC):
+For each package (sorted by volume DESC):
   1. Generate candidate points = {(0,0,0)} ∪ {right-corner, front-corner, top-corner of each placed package}
   2. Add right-wall candidate (0, container.width - pkg.width - clearance, 0)
-  3. For each (x,y,z), try rotation=0 and (if allow_rotation) rotation=90
-  4. Validate: check_boundary(), check_collision(), check_weight(), check_support(), check_door_access()
-  5. Score each valid candidate: score_placement() → 0–100
-  6. Pick the highest-scoring position; if score ≥ 99.99, stop scanning
-  7. place_package(x, y, z, rotation) → commit
-  8. If no position found → Y-slide fallback
+  3. Add floor anchor candidates via generate_floor_anchors() (largest empty floor rectangles, Y-boundary sweep, top 2 regions × 3 positions)
+  4. For each (x,y,z), try rotation=0 and (if allow_rotation) rotation=90
+  5. Score all candidates (13-factor, 0–100), tighten top 5, re-score
+  6. Validate: check_boundary(), check_weight(), check_door_fit(), check_collision(), check_support(), check_door_sweep()
+  7. Pick the highest-scoring position; if score ≥ 99.99, stop scanning
+  8. place_package(x, y, z, rotation) → door_used stored on Placement
+  9. If no position found → Y-slide fallback
 ```
+
+### Frontier-Based Gap Prevention
+
+**File**: `engine/auto_arrange.py` (integration), `engine/frontier.py` (`FrontierTracker`)
+
+During the greedy scoring pass, each candidate receives a **frontier gap penalty** to prevent placement behind the current packed front:
+
+```
+gap_distance = frontier(Y_strip) − candidate.x     # negative = in a gap
+gap_ratio = gap_distance / container.length
+penalty = −min(gap_distance × (0.5 + gap_ratio × 0.5), 500)
+```
+
+The `FrontierTracker` maintains a 1D Y-strip frontier (default strip_width_mm = 200–250 mm). For each Y strip, it records the maximum X (depth) of the packed front. After each placement, the frontier is updated via `update_from_placement()`.
+
+### Frontier Gap-Filling Pass
+
+**File**: `engine/distribution.py` → `fill_frontier_gaps()`
+
+After the initial greedy sweep, a post-processing pass detects and resettles gapped packages:
+
+1. Scan all placed packages sorted by X
+2. For each, compute `frontier.get_frontier_at(package.y_center + package.width/2)`
+3. If `package.xmin > frontier`, flag as gapped
+4. Call `settle_package()` — analytically snaps package to the nearest extreme point that closes the gap
+5. If settle gives no improvement (same position), fall back to `tighten_position()`
+6. Only re-place if `tx >= pl.x - 1.0` (≥1 mm forward improvement)
+7. Update frontier immediately after each re-placement
+
+Replaces older `fill_interior_gaps` calls in compaction pipelines. The guard against sub‑mm improvement prevents jitter.
 
 ### Y-Slide Fallback
 
@@ -94,6 +117,10 @@ Sort by: (z, x, y)
 
 Extreme points are offset by `+2*clearance` (10mm default) to prevent adjacent package AABBs from overlapping after inflation.
 
+**Floor Anchors**: `generate_floor_anchors()` adds additional candidates from the largest empty floor rectangles. It sweeps Y-boundaries of placed packages, identifies the top 2 empty regions (by area), and generates front/center/rear positions for each. This helps fill large open floor areas that extreme points might miss. O(N²) with N = number of floor packages; only called when there are packages on the floor.
+
+**Tighten Position**: `tighten_position()` snaps a candidate (x, y, z, rotation) back to the nearest valid extreme point. This corrects drift introduced by floor anchor positions or custom candidates that don't align with package corners. Called on the top 5 candidates after initial scoring, before re-scoring.
+
 ### Candidate Priority (Pre-Validation Ranking)
 
 **File**: `routes.py` → `_candidate_priority()` (module-level function)
@@ -118,24 +145,39 @@ Before the expensive validation loop, every candidate position (extreme point + 
 
 **File**: `engine/scorer.py` → `score_placement()`
 
-Every valid candidate position receives a 0–100 score. The scorer never validates — invalid positions are filtered before scoring.
+Every valid candidate position receives a 0–200 score. The scorer never validates — invalid positions are filtered before scoring.
 
 ### Scoring Categories
 
 | Category | Weight | Calculation |
 |----------|--------|-------------|
-| `floor_contact` | 25 | 1.0 if `aabb.zmin == 0`, else 0.0 |
-| `wall_contact` | 10 | (walls_touched) / 4 — counts front(x=0), rear(x=len), left(y=0), right(y=wid) |
-| `package_contact` | 15 | contact_area / max_possible — sum of coincident-face overlap area vs total surface area |
-| `face_contact` | 10 | faces_touched / 6 — counts each of 6 faces touching another package or container wall |
-| `compactness` | 5 | max(0, 1 − nearest_centroid_dist / 2000) — distance to closest package centroid |
-| `stack_quality` | 5 | support_area / footprint_area — XY overlap with packages directly below |
-| `vertical_stability` | 10 | max(0, 1 − mid_z / container_height) — lower is better |
-| `z_preference` | 10 | max(0, 1 − zmin / container_height) — prefers floor-level placement |
-| `x_preference` | 5 | max(0, 1 − xmin / container_length) — rewards deep placement near front wall |
-| `rear_proximity` | 10 | min(1, gap / max(8% length, 300mm)) — rewards distance from rear door |
-| `y_balance` | 15 | Y-centre-of-gravity of all packages (existing + candidate); maximum when COG is at container.width/2 |
-| `dead_space_quality` | 10 | See [Dead Space Quality](#dead-space-quality-estimation) below |
+| `floor_contact` | 40 | 1.0 if `aabb.zmin == 0`, else 0.0 |
+| `wall_contact` | 2 | (walls_touched) / 4 — counts front(x=0), rear(x=len), left(y=0), right(y=wid) |
+| `package_contact` | 8 | contact_area / max_possible — sum of coincident-face overlap area vs total surface area |
+| `face_contact` | 2 | faces_touched / 6 — counts each of 6 faces touching another package or container wall |
+| `compactness` | 15 | max(0, 1 − nearest_centroid_dist / 2000) — distance to closest package centroid |
+| `stack_quality` | 0 | support_area / footprint_area — XY overlap with packages directly below |
+| `vertical_stability` | 5 | max(0, 1 − mid_z / container_height) — lower is better |
+| `z_preference` | 50 | max(0, 1 − zmin / container_height) — prefers floor-level placement |
+| `x_preference` | 120 | max(0, 1 − xmin / container_length) — rewards deep placement near front wall |
+| `rear_proximity` | 200 | min(1, gap / max(8% length, 300mm)) — rewards distance from rear door |
+| `y_balance` | 3 | Y-centre-of-gravity of all packages (existing + candidate); maximum when COG is at container.width/2 |
+| `cluster_cohesion` | 10 | rewards positions near centroid of all placed packages (small+deep+compact bonus) |
+| `dead_space_quality` | 3 | See [Dead Space Quality](#dead-space-quality-estimation) below |
+| `load_profile_stability` | 3 | 1 − `max_step / container_height` — penalises tall vertical steps; see [Load Profile Stability](#load-profile-stability) below |
+
+### Frontier Gap Penalty (Runtime Modifier)
+
+In addition to the 14 scoring categories, a **frontier gap penalty** is applied during the greedy placement pass (in `auto_arrange.py`, not in `scorer.py` itself):
+
+```
+gap_distance = frontier(Y_strip) − candidate.x
+gap_ratio = gap_distance / container.length
+penalty = −min(gap_distance × (0.5 + gap_ratio × 0.5), 500)
+adjusted_score = raw_score + penalty   # penalty ≤ 0
+```
+
+This is not a scoring category — it's a runtime modifier that prevents placement behind the current packed front. The penalty caps at −500 to avoid completely dominating the score.
 
 ### Design Principles
 - Every category has an isolated function (can be tuned independently)
@@ -151,7 +193,7 @@ The `_score_y_balance` function computes the Y-centre-of-gravity (Y-COG) of all 
 score = max(0, 1 − |y_cog − container.width/2| / (container.width/2))
 ```
 
-This gives 1.0 when the COG is perfectly centred and 0.0 when it's at either wall. Combined weight 15, it is the strongest factor after floor and package contact for influencing left-right distribution.
+This gives 1.0 when the COG is perfectly centred and 0.0 when it's at either wall. Combined weight 3, it provides gentle nudging toward centre without dominating the score.
 
 ### Rear-Proximity Details
 
@@ -163,7 +205,7 @@ threshold = max(container.length × 0.08, 300 mm)
 score = min(1.0, gap / threshold)
 ```
 
-A package with its rear edge more than `threshold` from the rear wall gets full score (1.0). As the gap shrinks below threshold, the score drops linearly to 0.0 at the rear wall. Weight 10 makes this a meaningful deterrent while still allowing rear-wall placement when the container is full.
+A package with its rear edge more than `threshold` from the rear wall gets full score (1.0). As the gap shrinks below threshold, the score drops linearly to 0.0 at the rear wall. Weight 200 makes rear proximity the dominant factor, strongly pushing packages toward the front wall.
 
 ### Dead Space Quality Estimation
 
@@ -216,18 +258,34 @@ For the candidate AABB, examine each of the 6 faces:
 
 ---
 
+## Load Profile Stability
+
+**File**: `engine/scorer.py` → `_score_load_profile_stability()`
+
+Evaluates the flatness of the packed cargo profile. The container floor is divided into 10 longitudinal slices (`NUM_PROFILE_SLICES = 10`). For each slice, the maximum occupied height is recorded. The score is:
+
+```
+max_step = max |height[i] − height[i−1]| across all slices
+score = max(0, 1 − max_step / container.height)
+```
+
+This rewards layouts with small vertical steps (flat cargo surfaces) and penalises tall isolated stacks. Weight 8 creates a 4+ point gap between flat and tower-heavy layouts. The metric was changed from `sum_diffs / ((n-1) × H)` (which had a ~0.1 point range and ranked concentrated towers better than staircases) to `max_step / H` for a 59× improvement in discriminative power.
+
+---
+
 ## Validation Pipeline
 
 **File**: `engine/validation.py` → `validate_placement()`
 
-Every candidate position passes through 5 checks in order. The first failure short-circuits.
+Every candidate position passes through 6 checks in order (cheapest first). The first failure short-circuits.
 
 ```
 1. check_boundary()    — is the package fully inside the container? (uses actual AABB, no clearance)
-2. check_door_access() — can the package reach this position through a door?
-3. check_collision()   — does it overlap any already-placed package? (uses inflated AABB with clearance)
-4. check_weight()      — does total weight exceed payload?
-5. check_support()     — is the package properly supported below? (uses actual AABB)
+2. check_weight()      — does total weight exceed payload?
+3. check_door_fit()    — does the package cross-section fit through a door opening? (cheap, no sweep)
+4. check_collision()   — does it overlap any already-placed package? (uses inflated AABB with per-axis clearance)
+5. check_support()     — is the package properly supported below? (uses actual AABB, combined-support model)
+6. check_door_sweep()  — is the sweep volume from position to door clear of obstacles? (most expensive)
 ```
 
 ### Clearance Handling in Validation
@@ -235,9 +293,11 @@ Every candidate position passes through 5 checks in order. The first failure sho
 | Check | AABB Used | Rationale |
 |-------|-----------|-----------|
 | Boundary | Actual (no clearance) | Packages can touch walls; clearance is about inter-package gaps |
-| Collision | Inflated (+clearance on all sides) | Ensures 10mm gap between every pair of packages |
+| Weight / Payload | — | Simple sum, no geometry involved |
+| Door Fit | Inflated | Cross-section must clear the door opening with breathing room |
+| Collision | Inflated (+clearance_xy) | Ensures horizontal gap between packages; vertical clearance uses separate `clearance_z` |
 | Support | Actual (no clearance) | Support surface area should reflect physical contact, not inflated boxes |
-| Door Access | Inflated | Sweep volume must account for the package's safety bubble |
+| Door Sweep | Inflated | Sweep volume must account for the package's safety bubble |
 
 ### Door Access Validation
 
@@ -272,20 +332,33 @@ Accept the first door with a clear sweep and valid fit.
 
 **File**: `engine/support.py` → `check_support()`
 
-#### Combined-Support Model (replaces per-package area check)
+#### Combined-Support Model (Capacity-Based)
+
+Stacking uses a capacity-based model with three modes and multiple constraints:
+
+| Mode | Behaviour |
+|------|-----------|
+| `NONE` | Nothing allowed above this package |
+| `LIGHT_ONLY` | Only packages ≤ `max_top_weight_kg` may stack on top |
+| `NORMAL` | Stacking allowed subject to weight, layers, and coverage rules |
 
 | Rule | Check | Implementation |
 |------|-------|----------------|
 | Floor | Always supported | If `z == 0`, skip all checks |
-| Stackable base | Every below package must be `stackable = True` | Rejects with reason if any below package is not stackable |
+| Top package unstackable | Candidate must have `stacking_mode ≠ NONE` | Rejects if candidate itself is unstackable — prevents unstackable packages sitting on top of others |
+| Stackable base | Every below package must allow stacking based on its mode | Rejects if any below package has mode `NONE`; `LIGHT_ONLY` enforces weight limit |
 | Weight | Candidate lighter than every below package | Rejects if candidate weight > any below package's weight |
-| Combined coverage | Union of XY overlap of all below AABBs ≥ 90% of candidate footprint | Grid-samples candidate footprint at 20×20 resolution; counts samples inside any below AABB |
+| Max stack layers | Each below package must not exceed `max_stack_layers` already stacked on it | Prevents tower instability |
+| Footprint area | Candidate footprint ≤ every below package's footprint | Largest-area packages at the bottom |
+| Combined coverage | Union of XY overlap of all below AABBs ≥ 50% of candidate footprint | Grid-samples candidate footprint at 20×20 resolution; counts samples inside any below AABB |
 | Centre-of-mass | Candidate's XY centre must lie within at least one below package's XY extent | Prevents unstable bridging/overhang |
+
+The `stackable` bool auto-derives `stacking_mode` via `Package.__post_init__()`: `stackable=False` → `stacking_mode=NONE`, which blocks stacking in both directions (cannot stack on, cannot be stacked on). Explicit `max_top_weight_kg > 0` sets `LIGHT_ONLY`.
 
 **Why combined-support instead of per-package area?**
 - Old model: each supporting package individually needed footprint ≥ candidate's footprint — impossible to straddle two smaller packages
 - New model: computes the **union** of all below-package XY overlap regions; a wide box can rest on two narrower boxes side-by-side as long as their combined coverage meets the threshold and the centre is supported
-- The `support_threshold` parameter (default 0.90) is configurable per call
+- The `support_threshold` parameter (default 0.50) is configurable per call
 
 ### Support Area Grid Sampling
 
@@ -312,11 +385,18 @@ After auto-arrange completes, the frontend sorts placements by `load_sequence` a
 ```
 1. Sort placements by load_sequence ASC
 2. For each step:
-   a. Create a mesh at start position (x = container.length + package.length, outside rear door)
-   b. Tween to final position over 500ms with cubic ease-out (1 − (1−t)³)
-   c. On completion, convert to permanent mesh
+   a. Read door_used field from placement
+   b. Choose start position based on door:
+      - "rear":       (container.length + pkg_length, y, z)  — outside rear wall
+      - "side_right": (x, y, container.width + pkg_width)     — outside right wall
+      - "side_left":  (x, y, -pkg_width)                      — outside left wall
+   c. Create a mesh at start position
+   d. Tween to final position over 500ms with cubic ease-out (1 − (1−t)³)
+   e. On completion, convert to permanent mesh
 3. Auto-play advances every 700ms (500ms tween + 200ms pause)
 ```
+
+**Source**: `static/js/truck-load-planner.js:3126` — `_stepNext()` reads `placement.door_used` and computes the correct entry point. The backend stores `door_used` in `Placement.door_used` (default `"rear"`).
 
 The animation is driven by `requestAnimationFrame` inside the existing `_animate3D()` loop. Step meshes are tracked separately from the main scene to avoid conflicts with normal `update3DScene()` calls.
 

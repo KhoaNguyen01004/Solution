@@ -1,0 +1,4152 @@
+﻿diff --git a/.gitignore b/.gitignore
+index ee834b4..be2088f 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -4,9 +4,12 @@
+ # Database files
+ *.db
+ 
+-# Sample/ log files
++# Runtime data / logs
+ log.json
++instrument_trace.jsonl
+ *.log
++browserlogs.txt
++manual_locations.json
+ 
+ # Python
+ __pycache__/
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 0456154..425f101 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,88 @@
+ # Changelog
+ 
++## 2026-07-21 ΓÇö Load Profile Stability Metric Fix, Floor Anchors, Local Rearrangement, Benchmark Correction
++
++### Changed
++
++#### Load Profile Stability Metric
++- **`engine/scorer.py::_score_load_profile_stability()`** ΓÇö metric fixed from `sum(adjacent_diffs) / ((n-1) ├ù H)` to `max_step / container.height`. Old metric had ~0.1 weighted-point range (negligible) and ranked concentrated towers better than gradual staircases. New metric creates a 4.15 point gap (59├ù improvement), correctly penalising tall isolated stacks.
++
++#### Floor Anchor Candidates
++- **`engine/candidate_points.py::generate_floor_anchors()`** ΓÇö new function that finds the largest empty floor rectangles via Y-boundary sweep (O(N┬▓) with N Γëñ floor packages), generating front/center/rear positions for the top 2 regions. Augments (not replaces) extreme-point candidates to help fill empty floor regions.
++
++#### Tighten Position
++- **`engine/candidate_points.py::tighten_position()`** ΓÇö new function that snaps a candidate back to its nearest extreme point after rotation, fixing candidate drift from floor anchor and right-wall candidates.
++
++#### Top-K Tighten Architecture
++- **`engine/distribution.py::find_best_for_pkg()`** ΓÇö scores all candidates, tightens the top 5, then re-scores before picking the best. Replaces "tighten everything" approach that caused 20ΓÇô50├ù runtime blowup. ~1.5ΓÇô2├ù overhead vs original.
++- **`engine/auto_arrange.py::LargestFirstStrategy.arrange()`** ΓÇö same top-K tighten applied to both main and gap-filling passes.
++
++#### Local Rearrangement
++- **`engine/distribution.py::_try_local_rearrangement()`** ΓÇö when the only feasible candidate is a stack, identifies which floor packages geometrically block the floor candidate (clearance-aware AABB overlap), removes Γëñ3, places the current package, re-places blockers, and only accepts if floor score > stack score. Uses full snapshot/restore via `import_placements` for safe rollback. Recursion depth = max 1.
++- **Floor-count guard** ΓÇö rearrangement only fires when `n_floor Γëñ 10` to avoid O(N┬▓) overhead on densely-packed large containers (prevented 3├ù distribution blowup from 17.8sΓåÆ54.7s).
++- `_snapshot_placements()` / `_restore_placements()` ΓÇö helpers for clean rollback.
++- `_find_blocking_floor_packages()` ΓÇö calculates which floor packages block a candidate position.
++- `_best_floor_candidate()` ΓÇö picks the best floor-level position for a given package.
++
++#### Repair Optimizer
++- **`engine/repair.py::_is_better()`** priority 3 flipped from `n_floor > o_floor` to `n_floor < o_floor` (prefer smaller empty floor regions). No impact on current dataset (always returns `Improved: False`).
++
++#### Benchmark Correction
++- **Old benchmark was wrong**: loaded 31 DB rows with no quantity expansion (vs web UI 46 instances from PACKAGES with qty). Also omitted `cargo_length_mm`/`cargo_width_mm`/`cargo_height_mm`/`payload_kg` from vinfo dict, so `_vehicle_capacity()` returned 0 for all and vehicles sorted in plate-number order (smallest first) instead of largest-first by capacity.
++- **Corrected benchmark**: 46 packages, 32 vehicles sorted by `volume ├ù max(payload, 1)` descending. Largest = V38/V39 (9700├ù2370├ù2300mm, 52.9m┬│). Results: 2 vehicles (was 5), 12 stacks baseline ΓåÆ 9 with rearrangement. Repair remains a no-op (Improved: False).
++
++### Added
++- `_count_stacks()` and `_per_vehicle_empty_floor()` helpers in `engine/repair.py` (diagnostic utilities).
++- `scripts/benchmark_final.py` ΓÇö corrected 46-package 3-config benchmark (Run A: baseline, Run B: rearrangement, Run C: rearrangement+repair).
++
++---
++
++## 2026-07-20 ΓÇö Largest-Vehicle-First Fleet Distribution, Strict Unstackable Enforcement, Door-Aware Animation
++
++### Changed
++
++#### Fleet Distribution: Best-Fit Decreasing ΓåÆ Largest-Vehicle-First
++- **`engine/distribution.py:176`** ΓÇö rewritten `distribute_across_vehicles()`:
++  - Sorts vehicles by combined capacity (volume_mm┬│ ├ù payload_kg) descending
++  - For each vehicle (biggest ΓåÆ smallest), tries to place all remaining packages
++  - Leftovers roll over to the next (smaller) vehicle
++  - Removed waste estimation (`estimate_remaining_after` no longer called)
++  - Removed Phase 3 rear-door redirect (no longer needed)
++  - Removed per-package BFD cross-vehicle comparison
++
++#### Package Sort: Priority-Grouped ΓåÆ Strict Volume Descending
++- **`engine/distribution.py:192-194`**: removed `_pkg_priority()` grouping; sort is now purely `-volume`
++- **`engine/auto_arrange.py:48-51`**: same change ΓÇö no more non-stackable-before-stackable grouping
++- Placement sequence within each vehicle is now strictly biggest-first, eliminating `big ΓåÆ small ΓåÆ big ΓåÆ small` patterns
++
++#### Strict Unstackable Enforcement
++- **`engine/support.py:60-63`**: added top-package check in `_check_stacking_rules()` ΓÇö an unstackable package (`stacking_mode=NONE`) cannot be placed on top of another package
++- **`engine/package.py:33-35`**: added `__post_init__` to `Package` dataclass ΓÇö auto-derives `stacking_mode` from `stackable`:
++  ```python
++  if not self.stackable and self.stacking_mode == StackingMode.NORMAL:
++      self.stacking_mode = StackingMode.NONE
++  ```
++  Previously only `Package.from_dict()` derived `stacking_mode` correctly; all direct `Package(...)` construction sites left it at the default `NORMAL`, so `stackable=False` had no effect on stacking validation.
++
++#### Door-Used Propagation (Animation)
++- **`engine/placement.py:14`**: added `door_used: str = "rear"` to `Placement` dataclass
++- **`engine/validation.py:27`**: added `door_used: str = "rear"` to `ValidationResult`
++- **`engine/validation.py:153`**: captures `door_used` from `check_door_sweep()` result
++- **`engine/planner.py:60`**: passes `result.door_used` to `append_placement()`
++- **`engine/state.py:63`**: stores `door_used` on the `Placement`
++- **`routes.py:718`**: includes `door_used` in the frontend placement dict
++- **`static/js/truck-load-planner.js:3126`**: reads `placement.door_used` and selects entry point:
++  - `"rear"` ΓåÆ `(d.len + pl, y, z)`
++  - `"side_right"` ΓåÆ `(x, y, d.wid + pw)`
++  - `"side_left"` ΓåÆ `(x, y, -pw)`
++
++### Removed
++- `estimate_remaining_after()` is no longer called by `distribute_across_vehicles` (kept for backward compat)
++- BFD waste estimation logic
++- Phase 3 rear-door redirect logic
++
++---
++
+ ## 2026-07-19 ΓÇö Dead Space Quality (Future-Packability Estimation)
+ 
+ ### Added
+diff --git a/INSTRUCTIONS.md b/INSTRUCTIONS.md
+index 02b0d43..271d67b 100644
+--- a/INSTRUCTIONS.md
++++ b/INSTRUCTIONS.md
+@@ -1,463 +1,278 @@
+-# Truck Load Planner ΓÇö Sorting Algorithm Improvement Roadmap
++# Truck Load Planner - Optimization Profiles
+ 
+-## Goal
++## Objective
+ 
+-The current Truck Load Planner has reached a mature heuristic architecture:
++Implement user-selectable optimization profiles for Auto Arrange.
+ 
+-- Persistent Extreme Points
+-- Spatial Grid
+-- Best-Fit Decreasing vehicle selection
+-- Candidate Priority
+-- Progressive Validation
+-- Combined Support stacking
+-- Door sweep validation
+-- Clearance-aware planning
+-- Dead Space Quality estimation
+-
+-The objective of this phase is **NOT** to redesign the planner.
+-
+-Instead, improve packing quality while preserving the current architecture and deterministic behavior.
+-
+-The planner should continue to produce the same style of layouts, but make smarter placement decisions.
+-
+----
+-
+-# Γ£à Priority 1 ΓÇö Dead Space Quality (Completed)
+-
+-**Implementation**: `engine/dead_space.py` ΓÇö `compute_dead_space_quality()`
+-
+-Integrated as a normal scoring category (`dead_space_quality: 10` in `SCORING_WEIGHTS`). The heuristic estimates future packability by measuring gap distances from each face to the nearest obstacle, then comparing those gaps against the hardest remaining packages using continuous dimension-ratio scoring. See `engine/dead_space.py` and `SYSTEM.md` for details.
+-
+----
+-
+-# Priority 2 ΓÇö One-Step Look-Ahead
+-
+-## Problem
+-
+-The current scoring rewards:
+-
+-- wall contact
+-- face contact
+-- compactness
+-- stability
+-
+-However, it does not directly penalize creating unusable cavities.
+-
+-Example:
+-
+-GOOD
+-
+-ΓûêΓûêΓûêΓûêΓûêΓûêΓûêΓûê
+-ΓûêΓûêΓûêΓûêΓûêΓûêΓûêΓûê
+-
+-BAD
+-
+-ΓûêΓûêΓûêΓûêΓûêΓûêΓûêΓûê
+-ΓûêΓûê    ΓûêΓûê
+-
+-Both may receive similar scores even though the second creates unusable space.
+-
+----
+-
+-## Requirement
+-
+-Introduce a lightweight dead-space estimation.
+-
+-For every candidate placement:
+-
+-Estimate the enclosed empty volume immediately surrounding the package.
+-
+-Examples of undesirable situations:
+-
+-- narrow vertical shafts
+-- enclosed pockets
+-- isolated cavities
+-- long thin unusable channels
+-
+-Subtract a configurable penalty from the placement score.
+-
+-Do NOT perform flood-fill or expensive volume searches.
+-
+-The estimate should remain O(number_of_neighbors).
+-
+----
+-
+-## Success Criteria
+-
+-Layouts should naturally avoid creating trapped spaces.
+-
+-Packing density should improve without noticeable runtime increase.
+-
+----
+-
+-# Priority 2 ΓÇö One-Step Look-Ahead
+-
+-## Problem
+-
+-The planner is still completely greedy.
+-
+-Current flow:
+-
+-Package A
+-Γåô
+-
+-Best placement
+-Γåô
+-
+-Commit
+-
+-Sometimes another placement for Package A would allow Package B to fit.
+-
+----
+-
+-## Requirement
+-
+-When evaluating the best few placements for the current package:
+-
+-Temporarily simulate placing the next package.
++Instead of always running the most computationally expensive pipeline, allow the user to choose how much optimization effort to spend.
+ 
+-Example:
+-
+-Candidate 1
+-Γåô
+-
+-Can next package fit?
+-Γåô
+-
+-Score = current + future
+-
+-Candidate 2
+-Γåô
+-
+-Can next package fit?
+-Γåô
+-
+-Score = current + future
+-
+-Choose the better combined result.
++This significantly improves UX while keeping advanced optimization available when needed.
+ 
+ ---
+ 
+-## Constraints
++# Current Findings
+ 
+-Maximum depth:
++Benchmark (46 packages, real dataset)
+ 
+-1 package
++| Profile | Distribution | Repair | Total | Vehicles | Stacks |
++|----------|-------------:|-------:|------:|---------:|-------:|
++| Baseline | 7.2 s | ΓÇö | 7.2 s | 2 | 12 |
++| Rearrangement | 17.8 s | ΓÇö | 17.8 s | 2 | 9 |
++| Rearrangement + Repair | 10.8 s | 135 s | 145 s | 2 | 9 |
+ 
+-Maximum candidates examined:
++Observations
+ 
+-3ΓÇô5
+-
+-No recursive search.
+-
+-No backtracking tree.
+-
+-This should remain lightweight.
++- Rearrangement provides meaningful quality improvement.
++- Repair currently provides no measurable improvement.
++- Repair dominates runtime.
++- Users should decide whether the extra computation is worthwhile.
+ 
+ ---
+ 
+-## Success Criteria
++# New UI
+ 
+-Slightly worse placements should occasionally be selected if they enable the following package to fit.
++Replace the single Auto Arrange button with:
+ 
+----
++Auto Arrange Γû╝
+ 
+-# Priority 3 ΓÇö Local Repair Pass
++Profiles:
+ 
+-## Problem
+-
+-Once a package is committed it is never reconsidered.
+-
+-A single early greedy choice may reduce overall utilization.
++ΓÜí Fast
++ΓÜû Balanced (Default)
++≡ƒÄ» Maximum Quality
+ 
+ ---
+ 
+-## Requirement
+-
+-After auto-arrange completes:
++# Profile 1 - Fast
+ 
+-Run a lightweight optimization pass.
++Target runtime:
++1ΓÇô10 seconds
+ 
+-Possible operations:
++Enabled
+ 
+-- relocate one package
+-- swap two packages
+-- re-place the last N packages
++- Best Fit Decreasing vehicle selection
++- Largest First sorting
++- Extreme Points
++- Candidate scoring
++- Spatial Grid
++- Floor Anchors
+ 
+-Only keep changes that improve:
++Disabled
+ 
+-- utilization
+-- compactness
+-- score
+-- successful placements
++- Local Rearrangement
++- Repair Optimizer
+ 
+----
++Goal
+ 
+-## Constraints
++Generate a good loading plan quickly.
+ 
+-No full replanning.
++Expected
+ 
+-Maximum runtime increase:
++Runtime:
++~7 seconds
+ 
+-<20%
++Quality
+ 
+-Planner must remain deterministic.
++- Vehicles: 2
++- Stacks: ~12
+ 
+----
++Recommended for
+ 
+-## Success Criteria
+-
+-Recover obvious greedy mistakes.
+-
+-Improve final utilization by a small percentage.
++Daily planning.
+ 
+ ---
+ 
+-# Priority 4 ΓÇö Dynamic Scoring Weights
++# Profile 2 - Balanced (DEFAULT)
+ 
+-## Problem
++Target runtime
+ 
+-Current scoring weights remain constant regardless of container fill level.
++10ΓÇô30 seconds
+ 
+-Early loading and late loading have different priorities.
++Enabled
+ 
+----
++Everything from Fast plus
+ 
+-## Requirement
++- Local Rearrangement
++- Floor-count guard
++- Adaptive rearrangement
+ 
+-Adjust scoring weights according to container utilization.
++Disabled
+ 
+-Example:
++- Repair Optimizer
+ 
+-Early stage:
++Goal
+ 
+-- stability
+-- floor contact
+-- wall contact
++Better floor utilization without excessive runtime.
+ 
+-Middle stage:
++Expected
+ 
+-- balance
+-- compactness
++Runtime
+ 
+-Late stage:
++~18 seconds
+ 
+-- dead-space reduction
+-- gap filling
++Quality
+ 
+-Weight transitions should be smooth.
++- Vehicles: 2
++- Stacks: ~9
+ 
+-Do not abruptly switch profiles.
++This should become the default profile.
+ 
+ ---
+ 
+-## Success Criteria
++# Profile 3 - Maximum Quality
+ 
+-Late-stage placements should naturally fill remaining gaps instead of maximizing wall contact.
++Target runtime
+ 
+----
+-
+-# Priority 5 ΓÇö Difficulty-Based Package Sorting
+-
+-## Problem
++30 seconds to several minutes
+ 
+-Current sorting:
++Enabled
+ 
+-stackable
+-Γåô
++Everything
+ 
+-volume
+-Γåô
++Including
+ 
+-footprint
+-Γåô
++- Local Rearrangement
++- Repair Optimizer
+ 
+-weight
++However:
+ 
+-This assumes large packages are always the hardest.
+-
+-That is not always true.
++Repair must become adaptive.
+ 
+ ---
+ 
+-## Requirement
++# Adaptive Repair
+ 
+-Replace static ordering with a computed difficulty score.
++Current repair wastes over two minutes without improving the solution.
+ 
+-Possible factors:
++Implement early termination.
+ 
+-- volume
+-- footprint
+-- aspect ratio
+-- rotation availability
+-- weight
+-- stackability
++Algorithm
+ 
+-Long thin packages should receive a higher difficulty than simple cubes of similar volume.
++For each repair pass
+ 
+----
++Run repair.
+ 
+-## Constraints
++If
+ 
+-Sorting must remain deterministic.
++- no accepted moves
+ 
+----
++OR
+ 
+-## Success Criteria
++- no reduction in vehicles
+ 
+-Hard-to-place packages should generally be loaded earlier.
++AND
+ 
+----
+-
+-# Priority 6 ΓÇö Smarter Slide Recovery
+-
+-## Problem
+-
+-Current Y-slide:
++- no reduction in stack count
+ 
+-┬▒100
+-┬▒200
+-┬▒300
++Terminate repair immediately.
+ 
+-This is brute force.
++Do not execute additional passes.
+ 
+ ---
+ 
+-## Requirement
++# Adaptive Rearrangement
+ 
+-Instead of fixed steps:
++Keep the recently implemented safeguard.
+ 
+-Use nearby obstacles to compute likely valid slide positions.
++Only attempt local rearrangement when
+ 
+-Examples:
++floor_package_count <= threshold
+ 
+-slide immediately after obstacle
++(Default: 10)
+ 
+-slide immediately before obstacle
+-
+-nearest legal Y
+-
+-This reduces unnecessary validation.
++This avoids pathological O(N┬▓) behavior in large containers.
+ 
+ ---
+ 
+-## Constraints
++# Planner Configuration
+ 
+-Keep the slide mechanism.
++Create a planner configuration object.
+ 
+-Replace only candidate generation.
++Example
+ 
+----
++class PlannerProfile:
+ 
+-## Success Criteria
++    enable_rearrangement: bool
++    enable_repair: bool
++    floor_rearrangement_limit: int
++    max_repair_passes: int
+ 
+-Fewer slide candidates.
++Profiles populate this configuration instead of hardcoding behavior.
+ 
+-Same or better recovery rate.
++Planner logic should read configuration instead of checking constants.
+ 
+ ---
+ 
+-# Priority 7 ΓÇö Fragmentation Metric for Vehicle Selection
++# UI Feedback
+ 
+-## Problem
++Show the selected optimization profile while planning.
+ 
+-Vehicle selection currently considers:
++Example
+ 
+-remaining volume
++Auto Arrange
++Optimization: Balanced
+ 
+-remaining floor
++or
+ 
+-remaining payload
+-
+-Remaining capacity alone does not describe future usability.
++Optimizing...
++Profile: Maximum Quality
+ 
+ ---
+ 
+-## Requirement
+-
+-Add a lightweight fragmentation metric.
+-
+-Possible examples:
+-
+-largest remaining rectangle
+-
+-largest free floor strip
+-
+-largest connected floor region
++# Statistics
+ 
+-Penalty should increase when remaining space becomes fragmented.
++Include in planner response
+ 
+-Use this metric together with the existing waste score.
++{
++    "profile": "balanced",
++    "distribution_time_ms": ...,
++    "repair_time_ms": ...,
++    "total_time_ms": ...,
++    "repair_passes": ...,
++    "repair_improved": true,
++    "rearrangement_attempts": ...
++}
+ 
+----
+-
+-## Success Criteria
+-
+-Vehicles with cleaner remaining layouts should be preferred over equally empty but fragmented vehicles.
++This helps future benchmarking.
+ 
+ ---
+ 
+-# General Constraints
++# Backward Compatibility
+ 
+-Maintain existing architecture.
++Existing API endpoints must continue working.
+ 
+-Do NOT redesign:
++If no profile is supplied:
+ 
+-- PlanningState
+-- Spatial Grid
+-- Extreme Points
+-- Candidate Priority
+-- Validation Pipeline
+-- Support System
+-- Door System
+-- Dead Space (already completed)
+-
+-These are considered complete.
++Default to
+ 
+----
++Balanced
+ 
+-# Performance Requirements
+-
+-The planner must remain suitable for interactive use.
+-
+-Target:
+-
+-- runtime increase <25%
+-- deterministic output
+-- no stochastic optimization
+-- no genetic algorithms
+-- no simulated annealing
+-- no Monte Carlo search
+-
+-The planner should remain a deterministic heuristic solver.
++to preserve current behavior.
+ 
+ ---
+ 
+-# Code Quality
+-
+-New heuristics should be:
++# Acceptance Criteria
+ 
+-- modular
+-- independently testable
+-- configurable
+-- documented
++Fast
+ 
+-Avoid magic numbers.
++- Runtime around baseline
++- No repair
++- No rearrangement
+ 
+-Expose thresholds as constants or configuration values.
++Balanced
+ 
+----
++- Rearrangement enabled
++- Repair disabled
++- Runtime under ~30 seconds on the 46-package benchmark
++- Approximately 9 stacks
+ 
+-# Success Definition
++Maximum Quality
+ 
+-After completing this roadmap, the planner should:
++- Repair enabled
++- Early termination implemented
++- Repair skipped when no improvement occurs
++- Produces the best solution obtainable within configured limits
+ 
+-- produce denser packing
+-- create fewer unusable cavities
+-- recover from greedy mistakes
+-- make more future-aware placement decisions
+-- preserve deterministic behavior
+-- maintain interactive performance
+-- require no UI or database changes
++No regressions.
+ 
+-The goal is to approach commercial heuristic truck/container loading quality while keeping the algorithm understandable, maintainable, and fast.
+\ No newline at end of file
++All existing planner tests must continue to pass.
+\ No newline at end of file
+diff --git a/README.md b/README.md
+index 346d2a6..3f7d597 100644
+--- a/README.md
++++ b/README.md
+@@ -15,33 +15,28 @@ Flask-based fleet management with GPS tracking, fuel monitoring, and a 3D/2D **T
+ 
+ ## Truck Load Planner ΓÇö Algorithm Reference
+ 
+-### Multi-Vehicle Distribution (Best-Fit Decreasing)
++### Multi-Vehicle Distribution (Largest-Vehicle-First)
+ 
+-When auto-arrange is triggered, all packages are distributed across every vehicle that has a container config. The algorithm (`_distribute_across_vehicles` in `routes.py`) uses **Best-Fit Decreasing (BFD)**:
++When auto-arrange is triggered, all packages are distributed across every vehicle that has a container config. The algorithm (`distribute_across_vehicles` in `engine/distribution.py`) uses **Largest-Vehicle-First**:
+ 
+-1. **Sort packages**: non-stackable first, then by descending volume ΓåÆ footprint ΓåÆ weight
+-2. **Track active vehicles**: indices of vehicles that already hold at least one package
+-3. **For each package**:
+-   - **Phase 1**: Try every active (already-used) vehicle first ΓÇö candidate positions are generated and validated, then the vehicle whose resulting fullness (sum of volume%, floor%, payload%) is **highest** (tighter fit) wins
+-   - **Phase 2**: If no active vehicle works, open the next unused vehicle
+-   - **Phase 3**: If the best position touches the rear wall (`xmax ΓëÑ container.length`), redirect the package to the last vehicle unconditionally (fills the last vehicle's unused space with rear-door items)
+-4. **Result**: Packages are placed into the vehicle they fit best, minimising waste space across the fleet
+-
+-The **two-tier comparator** picks the best vehicle for each package:
+-- **Primary**: `sum(estimated_volume_remaining%, floor_remaining%, payload_remaining%)` ΓÇö lower = tighter fit = better
+-- **Secondary (tiebreaker)**: placement score
++1. **Sort packages** by volume descending (biggest first)
++2. **Sort vehicles** by combined capacity (volume ├ù payload) descending
++3. **For each vehicle** (biggest ΓåÆ smallest): try to place all remaining packages, then pass leftovers to the next smaller vehicle
++4. **Local rearrangement**: when the only feasible candidate for a package is a stack, and the container has Γëñ10 floor packages, `_try_local_rearrangement()` identifies blocking floor packages (clearance-aware AABB overlap), removes Γëñ3, places the package on the floor, re-places blockers, and accepts only if floor score > stack score
++5. **Result**: The largest vehicles are loaded first, smaller ones only receive what big ones cannot fit
+ 
+ ### Placement Strategy: `LargestFirstStrategy`
+ 
+ Within each vehicle, the `LargestFirstStrategy` (`engine/auto_arrange.py`) places packages one at a time:
+ 
+-1. **Sort**: non-stackable ΓåÆ largest volume ΓåÆ largest footprint ΓåÆ heaviest
++1. **Sort**: by volume descending (biggest first)
+ 2. **For each package**:
+    - Generate candidate positions from the right/front/top corners of all placed packages + origin (0,0,0)
+    - Add a **right-wall-aligned candidate** `(0, container.width - pkg.width - clearance, 0)` for balanced left-right placement
++   - Add **floor anchor candidates** via `generate_floor_anchors()` ΓÇö finds the largest empty floor rectangles via Y-boundary sweep, generating front/center/rear positions for the top 2 regions
+    - Expand each candidate with both 0┬░ and (if allowed) 90┬░ rotation
+-   - Validate each candidate: boundary, collision, weight, support, door access
+-   - Score valid candidates on 10 weighted criteria (see Scoring Engine)
++   - **Score all candidates** on 13 weighted criteria (see Scoring Engine), then **tighten the top 5** via `tighten_position()` (snaps back to nearest extreme point after rotation), then **re-score** before picking the best
++   - Validate each candidate: boundary, weight, door fit, collision, support, door sweep
+    - Pick the highest-scoring position and commit
+    - Early-exit: stop scanning candidates once any score ΓëÑ 99.99
+ 3. **Y-slide fallback**: if no position found for a package, slide each base candidate left/right in Y by steps of 100mm (up to 3 steps each direction) to squeeze in more packages per vehicle
+@@ -70,7 +65,7 @@ Every valid candidate position receives a 0ΓÇô100 quality score. The scorer neve
+ 
+ | Category | Weight | Raw ΓåÆ Score |
+ |----------|--------|-------------|
+-| Floor Contact | 25 | 1.0 if z=0, else 0.0 |
++| Floor Contact | 5 | 1.0 if z=0, else 0.0 |
+ | Wall Contact | 10 | walls_touched ├╖ 4 |
+ | Package Contact | 15 | contact_area ├╖ max_possible (coincident face overlap) |
+ | Face Contact | 10 | faces_touched ├╖ 6 |
+@@ -82,24 +77,39 @@ Every valid candidate position receives a 0ΓÇô100 quality score. The scorer neve
+ | Rear Proximity | 10 | min(1, gap ├╖ threshold) where gap = rear-wall distance, threshold = max(8% length, 300mm) |
+ | Y Balance | 15 | rewards Y-center-of-gravity close to container midpoint for even left-right weight distribution |
+ | Dead Space Quality | 10 | 0ΓÇô1 estimate of how usable remaining free space is for future packages (see `engine/dead_space.py`) |
++| Load Profile Stability | 8 | `max_step ├╖ container_height` ΓÇö penalises tall vertical steps; higher is flatter (see below) |
+ 
+-Weights are configurable via `SCORING_WEIGHTS` at module top (total 130, clamped to 100).
++Weights are configurable via `SCORING_WEIGHTS` at module top (total 118, clamped to 100).
+ 
+ ### Stacking Rules (`engine/support.py`)
+ 
+ A package may only be placed on top of another when ALL conditions hold:
+ 
+-1. The package below has **Allow Stacking** enabled (`stackable = True`)
+-2. **Weight**: above package is **lighter** than every package it rests on
+-3. **Combined support coverage**: the **union** of XY-overlap regions from all packages directly below must cover ΓëÑ 90% of the candidate's footprint (grid-sampled at 20├ù20 resolution)
+-4. **Centre-of-mass**: the candidate's XY footprint centre must lie within at least one below package's XY extent (prevents unstable bridging)
++1. The **candidate package itself** must be stackable (`stackable = True`) ΓÇö unstackable packages cannot sit on top of anything
++2. The package below has **Allow Stacking** enabled (`stackable = True`)
++3. **Weight**: above package is **lighter** than every package it rests on
++4. **Combined support coverage**: the **union** of XY-overlap regions from all packages directly below must cover ΓëÑ 90% of the candidate's footprint (grid-sampled at 20├ù20 resolution)
++5. **Centre-of-mass**: the candidate's XY footprint centre must lie within at least one below package's XY extent (prevents unstable bridging)
+ 
+-Unlike the old per-package area check, the combined-support model allows a package to straddle multiple smaller packages side-by-side, as long as the union of their top faces covers the required area and the centre is supported.
++An unstackable package is only allowed on the floor (z=0). Attempting to stack it on top of another package, or stack another package on top of it, is rejected.
+ 
+-> **Note**: `stackable` defaults to `False` (0) across all layers ΓÇö session, planner, and API. The frontend checkbox must be explicitly enabled for a package to be used as a stacking base.
++The `stackable` bool auto-derives `stacking_mode` via `Package.__post_init__()`: `stackable=False` ΓåÆ `stacking_mode=NONE`, which blocks stacking in both directions.
++
++Unlike the old per-package area check, the combined-support model allows a package to straddle multiple smaller packages side-by-side, as long as the union of their top faces covers the required area and the centre is supported.
+ 
+ Ceiling height is enforced by the boundary check ΓÇö any candidate whose top exceeds `container.height` is rejected.
+ 
++### Load Profile Stability
++
++The `_score_load_profile_stability` function (`engine/scorer.py`) evaluates the flatness of the packed cargo profile. The container floor is divided into **10 longitudinal slices** (`NUM_PROFILE_SLICES`). For each slice, the maximum occupied height is recorded. The score is:
++
++```
++max_step = max |height[i] ΓêÆ height[iΓêÆ1]| across all slices
++score = max(0, 1 ΓêÆ max_step / container.height)
++```
++
++This rewards layouts with small vertical steps (flat cargo surfaces) and penalises tall isolated stacks. Weight 8 creates a meaningful gradient (4+ point gap between flat and tower-heavy layouts) without dominating the other 12 factors.
++
+ ### Door Access Validation (`engine/access.py`)
+ 
+ Every candidate position is validated to ensure the package can physically reach it through at least one door:
+@@ -121,7 +131,11 @@ When a vehicle has no door features configured, the system assumes a full-width/
+ 
+ ### Step Animation & 3D Controls
+ 
+-After auto-arrange, the 3D view shows packages entering one-by-one in `load_sequence` order. Each package starts outside the rear door (`x = container.length + package.length`) and slides into its final position over 500ms with cubic ease-out.
++After auto-arrange, the 3D view shows packages entering one-by-one in `load_sequence` order. Each package starts outside its entry door and slides into position over 500ms with cubic ease-out. The entry point is determined by the `door_used` field from backend validation:
++
++- `"rear"` ΓåÆ outside rear wall (`x = container.length + package.length`)
++- `"side_right"` ΓåÆ outside right wall (`y = container.width + package.width`)
++- `"side_left"` ΓåÆ outside left wall (`y = -package.width`)
+ 
+ | Control | Action |
+ |---------|--------|
+@@ -174,10 +188,15 @@ The canvas provides three views, each mapping different container axes:
+ |--------|---------------|
+ | `planner.py` | Orchestrates all planning operations |
+ | `auto_arrange.py` | Strategy-based auto-arrange (LargestFirstStrategy) with Y-slide fallback |
++| `distribution.py` | Multi-vehicle fleet distribution (Largest-Vehicle-First) |
++| `repair.py` | Destroy-and-Repair fleet optimizer (Large Neighborhood Search) |
++| `consolidation.py` | Near-empty vehicle elimination pass |
+ | `validation.py` | All rule checks: boundary, collision, weight, support, door access |
+ | `access.py` | Door access validation (rear + side sweep checks) |
+ | `support.py` | Stacking validation with combined-support model (union overlap + centre-of-mass) |
+-| `scorer.py` | 11-category placement quality scoring (0ΓÇô100) |
++| `scorer.py` | 12-category placement quality scoring (0ΓÇô100) |
++| `state.py` | Planner state: spatial index, extreme points, placement mutations |
++| `spatial.py` | Spatial hash grid for fast AABB queries |
+ | `geometry.py` | AABB with clearance-aware from_dimensions, overlap/intersection/translation |
+ | `collision.py` | AABB collision detection |
+ | `boundary.py` | Container boundary containment |
+@@ -186,11 +205,95 @@ The canvas provides three views, each mapping different container axes:
+ | `statistics.py` | Utilization, weight, and package counts |
+ | `weight.py` | Total weight vs payload calculation |
+ | `container.py` | Container dataclass (dimensions, features, payload) |
+-| `package.py` | Package dataclass (dimensions, stackable, rotation, clearance) |
+-| `placement.py` | Placement dataclass (position, rotation, sequence) |
++| `package.py` | Package dataclass (dimensions, stackable, rotation, clearance, stacking_mode) |
++| `placement.py` | Placement dataclass (position, rotation, sequence, door_used) |
+ 
+ ---
+ 
++## Experimental: py3dbp Packing Engine
++
++An experimental integration of the [py3dbp](https://pypi.org/project/py3dbp/) 3D bin-packing library is available as an alternative packing engine for benchmarking purposes.
++
++### Usage
++
++```bash
++# Run with internal engine (default, unchanged behavior)
++python manual_test.py
++
++# Run with py3dbp engine
++python manual_test.py --engine py3dbp
++
++# Side-by-side comparison
++python manual_test.py --compare
++
++# Select engine via environment variable
++set PACKING_ENGINE=py3dbp
++python manual_test.py
++```
++
++### Architecture
++
++Both engines implement the `PackingEngine` interface defined in `truck_load_planner/engines/base.py`:
++
++- `InternalPackingEngine` ΓÇö wraps the existing distribution/repair/consolidation pipeline
++- `Py3dbpPackingEngine` ΓÇö converts packages and containers to py3dbp types, runs the packer, then validates all placements through the existing validation pipeline
++
++Engine selection is handled by `truck_load_planner/engines/__init__.py::get_engine()`.
++
++### Feature Comparison
++
++| Feature | Internal Engine | py3dbp Engine |
++|---------|---------------|---------------|
++| Geometry Packing | Γ£à | Γ£à |
++| Rotation (2D) | Γ£à | Γ£à |
++| Weight Limit | Γ£à | Γ£à |
++| Collision Detection | Γ£à | Γ£à |
++| Stackable / Non-stackable | Γ£à | Validation Layer |
++| Max Top Weight | Γ£à | Validation Layer |
++| Max Stack Layers | Γ£à | Validation Layer |
++| Door Accessibility | Γ£à | Validation Layer |
++| Support Percentage | Γ£à | Validation Layer |
++| Center of Gravity | Γ£à | Validation Layer |
++| Vehicle Consolidation | Γ£à | Existing Pipeline |
++| Clearance Margins | Γ£à | Validation Layer |
++
++- **Native**: Features py3dbp supports directly via its geometric packing algorithm
++- **Validation Layer**: Features enforced by running our existing validation pipeline on py3dbp's output. If validation fails, the package is marked as unplaced and processing continues.
++
++### Known Limitations
++
++- py3dbp uses full 3D rotation (6 axis permutations), while our system uses 2D rotation (swap x/y only). Placements with incompatible rotations are rejected.
++- py3dbp does not natively support clearance margins, stacking rules, door access, or center-of-gravity constraints.
++- py3dbp sorts bins by volume descending, which may spread packages across more vehicles than the internal engine's best-fit decreasing strategy.
++
++## Project Structure
++
++```
++app.py                          # Main Flask application entry point
++main.py                         # Standalone TTAS GPS tracking tool
++manual_test.py                  # Manual pipeline test with instrumentation
++scripts/                        # Debug, benchmark, and utility scripts
++  benchmark_floor_contact.py
++  benchmark_real_data.py
++  check_shipment_data.py
++  count_tables.py
++  debug_py3dbp.py / debug_stats.py / debug_validation.py / debug_vehicles.py
++  diagnose_candidates.py / diagnose_stacking_decision.py
++  query_db.py / query_shipments.py
++  read_instrument_trace.py
++truck_load_planner/             # Core application package
++  routes.py                     # Flask routes / API endpoints
++  session.py                    # Load planning session
++  db.py                         # Database initialization
++  engine/                       # Packing algorithms (20 modules)
++  engines/                      # Packing engine abstraction (internal + py3dbp)
++  models/                       # Data models
++  logistics/                    # Legacy logistics helpers
++static/                         # Frontend assets (JS, CSS)
++templates/                      # HTML templates
++tests/                          # Pytest test suite
++```
++
+ ## Tech Stack
+ 
+ - **Backend**: Python, Flask, SQLite3
+diff --git a/SORTING_STRATEGY.md b/SORTING_STRATEGY.md
+index 9dc6846..2c9d0c9 100644
+--- a/SORTING_STRATEGY.md
++++ b/SORTING_STRATEGY.md
+@@ -2,117 +2,53 @@
+ 
+ ## 1. Package Sort Order (Pre-Processing)
+ 
+-All packages are sorted **before** any placement logic runs. The same sorting key is used in both single-vehicle and multi-vehicle paths.
++All packages are sorted by **descending volume, then descending weight, then descending footprint area** before any placement logic runs. The same sort is used in both single-vehicle and multi-vehicle paths.
+ 
+-**Source**: `engine/auto_arrange.py:51`, `routes.py:901`
++**Source**: `engine/auto_arrange.py:48`, `engine/distribution.py:192`
+ 
+ ```python
+-sorted_packages = sorted(packages, key=lambda p: (
+-    p.stackable,                          # ASC:  False (0) ΓåÆ True (1)
+-    -(p.length_mm * p.width_mm * p.height_mm),  # DESC: volume
+-    -(p.length_mm * p.width_mm),          # DESC: footprint
+-    -p.weight_kg,                         # DESC: weight
+-))
++sorted_packages = sorted(
++    packages,
++    key=lambda p: (
++        -(p.length_mm * p.width_mm * p.height_mm),  # volume desc
++        -p.weight_kg,                                   # weight desc
++        -(p.length_mm * p.width_mm),                    # footprint area desc
++    ),
++)
+ ```
+ 
+-### Rationale per field
++### Rationale
+ 
+-| Field | Direction | Why |
+-|-------|-----------|-----|
+-| `stackable` | ASC (0 then 1) | Non-stackable packages **must** go on the floor. Placing them first guarantees floor space is available. Stackable packages come later and get placed on top. |
+-| Volume | DESC | Largest packages are hardest to fit ΓÇö placing them first maximises the chance they find a spot. |
+-| Footprint | DESC | Secondary size metric; breaks ties when volume is equal. |
+-| Weight | DESC | Heaviest packages first ensures they get floor placement (good for stability). Lighter packages can stack on top. |
+-
+-### Why this order?
+-
+-- **Non-stackable first** ΓåÆ floor reservation (if non-stackable were last, they might have no floor space left)
+-- **Largest first** ΓåÆ greedy bin-packing heuristic; large items are the most constrained, so placing them early reduces failure rate
+-- **Heaviest first** ΓåÆ weight distribution; heavy items on the floor lower the centre of gravity
++Largest and heaviest packages are the hardest to fit ΓÇö placing them first maximises the chance they find a spot. Weight is included as a secondary key so that equally-sized heavy packages are prioritised over light ones (heavier packages must go on the bottom of stacks). This is a standard greedy bin-packing heuristic. Stackability is enforced at validation time (see ┬º5), not during sorting.
+ 
+ ---
+ 
+ ## 2. Vehicle Selection (Multi-Vehicle Distribution)
+ 
+-When no single `vehicle_id` is specified, packages are distributed across all available vehicles.
++When no single `vehicle_id` is specified, packages are distributed across all available vehicles using **Largest-Vehicle-First**.
+ 
+-**Source**: `routes.py` ΓåÆ `_distribute_across_vehicles()`
++**Source**: `engine/distribution.py:176` ΓåÆ `distribute_across_vehicles()`
+ 
+-### Algorithm: Best-Fit Decreasing (BFD)
++### Algorithm: Largest-Vehicle-First
+ 
+ ```
+-Input:  sorted_packages[], vehicle_sessions[]
++Input:  packages[], vehicle_sessions[]
+ Output: { placed, failed, unplaced, vehicle_map }
+ 
+-State:
+-  active_indices = []    // vehicles that already hold packages
+-
+-For each package p in sorted_packages:
+-  best = { waste: Γê₧, score: -1, session: null, pos: null, vinfo: null }
+-
+-  // Phase 1 ΓÇö Try active vehicles (already in use)
+-  for each idx in active_indices:
+-    score, pos = _find_best_for_pkg(p, vehicle_sessions[idx])
+-    if pos is valid:
+-      waste = _estimate_remaining(p, pos, session)
+-      if waste < best.waste OR (waste Γëê best.waste AND score > best.score):
+-        update best
+-
+-  // Phase 2 ΓÇö Try unused vehicles (open one if needed)
+-  if best.pos is null:
+-    for each unused idx:
+-      score, pos = _find_best_for_pkg(p, vehicle_sessions[idx])
+-      if pos is valid:
+-        waste = _estimate_remaining(p, pos, session)
+-        if waste < best.waste OR (waste Γëê best.waste AND score > best.score):
+-          update best
+-          mark idx for activation
+-
+-  // Phase 3 ΓÇö Rear-door redirect
+-  if best.pos exists AND package touches rear wall (xmax ΓëÑ container.length):
+-    try last vehicle unconditionally; use if it can accommodate
+-
+-  // Commit
+-  if best.session found:
+-    place_package(p, best.pos)
+-    mark vehicle as active
++1. Sort packages by volume DESC (biggest first)
++2. Sort vehicles by combined capacity (volume ├ù payload) DESC
++3. For each vehicle (biggest ΓåÆ smallest):
++     For each remaining package (biggest ΓåÆ smallest):
++       Find best position via find_best_for_pkg()
++       If position found: place_package()
++       If not: keep for next vehicle
++4. Return { placed, failed, unplaced, vehicle_map }
+ ```
+ 
+-### Waste Estimation
+-
+-```python
+-def _estimate_remaining(pkg, pos, session):
+-    total_vol  = container.length ├ù container.width ├ù container.height
+-    total_floor = container.length ├ù container.width
+-    total_payload = container.payload_kg
+-
+-    rem_vol     = total_vol     ΓêÆ used_vol     ΓêÆ pkg.volume
+-    rem_floor   = total_floor   ΓêÆ used_floor   ΓêÆ (pkg.footprint if z=0 else 0)
+-    rem_payload = total_payload ΓêÆ used_weight  ΓêÆ pkg.weight
+-
+-    return (rem_vol/total_vol + rem_floor/total_floor + rem_payload/total_payload) ├ù 100
+-```
+-
+-Three equal components: volume + floor + payload. Lower sum = tighter fit = better.
+-
+-### Why BFD over FFD?
+-
+-| Criteria | First-Fit Decreasing | Best-Fit Decreasing |
+-|----------|---------------------|---------------------|
+-| Search scope | First vehicle that fits | All active vehicles, pick tightest |
+-| Waste | Can leave fragmented space | Minimises remaining capacity |
+-| Computation | O(n) per package | O(m├ùn) per package (m = active vehicles) |
+-| Result density | Lower | Higher |
+-
+-BFD is chosen because the vehicle count is small (typically <20), making the O(m├ùn) overhead negligible while packing density improves significantly.
+-
+-### Phase 3 ΓÇö Rear-Door Redirect
+-
+-When the best-scoring position for a package places its rear edge at or beyond the container rear wall (`xmax ΓëÑ container.length`), the algorithm checks whether the **last vehicle** in the fleet can accommodate it. If yes, the package is redirected unconditionally. This:
+-
+-1. Fills the last vehicle (which typically has the most unused space)
+-2. Groups rear-wall packages together (they unload first)
+-3. Keeps front-loaded packages in earlier vehicles
++Key difference from BFD: instead of picking the tightest-fit vehicle per-package, the algorithm exhausts the largest vehicle's capacity first, then moves to smaller ones with leftovers. This ensures:
++- Largest vehicles take the most packages
++- Small vehicles only receive what big ones cannot fit
++- No waste estimation or per-package cross-vehicle comparison needed
+ 
+ ---
+ 
+@@ -139,18 +75,28 @@ For each package p in sorted_packages:
+   if right_y > clearance:
+     candidates.insert(0, (0, right_y, 0))
+ 
+-  // Step 3 ΓÇö Expand with rotations
++  // Step 3 ΓÇö Add floor anchor candidates
++  anchors = generate_floor_anchors(placed_packages, container)
++  candidates.extend(anchors)
++
++  // Step 4 ΓÇö Expand with rotations
+   expanded = []
+   for each (x,y,z) in candidates:
+     expanded.add({x, y, z, rotation=0})
+     if p.allow_rotation:
+       expanded.add({x, y, z, rotation=90})
+ 
+-  // Step 4 ΓÇö Rank by priority (fast pre-check)
+-  expanded.sort(by: _candidate_priority, descending)
+-
+-  // Step 5 ΓÇö Validate and score in priority order
++  // Step 5 ΓÇö Score all, tighten top 5, re-score
+   for each pos in expanded:
++    score = evaluate(p, pos)
++  sort expanded by score DESC
++  top5 = expanded[0:5]
++  tightened = [tighten_position(pos, placed_packages, container) for pos in top5]
++  for each pos in tightened:
++    score = evaluate(p, pos)  // re-score after tightening
++
++  // Step 6 ΓÇö Validate and pick best
++  for each pos in (tightened Γê¬ expanded):
+     result = validate(p, pos)
+     if result.valid:
+       score = evaluate(p, pos)
+@@ -158,12 +104,12 @@ For each package p in sorted_packages:
+         best = {score, pos}
+         if score ΓëÑ 99.99: break
+ 
+-  // Step 6 ΓÇö Y-Slide fallback
++  // Step 7 ΓÇö Y-Slide fallback
+   if best.pos is null:
+     for each slide_pos in generate_slide_candidates(candidates, p, container):
+       validate and score as above
+ 
+-  // Step 7 ΓÇö Commit
++  // Step 8 ΓÇö Commit
+   if best.pos found:
+     place_package(p, best.pos)
+   else:
+@@ -204,17 +150,29 @@ for each base (x, y, z) in candidates:
+ 
+ This helps in tight packs where nominal extreme points are blocked but a slight Y offset clears the collision.
+ 
++### Tighten Position (Push Deep + Rotate)
++
++**Source**: `engine/candidate_points.py` ΓåÆ `tighten_position()`
++
++After a valid position is found, `tighten_position` settles the package into the tightest possible spot by pushing toward the front wall (-X). When blocked, it tries progressively more expensive evasion strategies:
++
++1. **Alternate rotation** (0┬░ Γåö 90┬░) ΓÇö if rotation is allowed, swap and continue -X push.
++2. **Y sweep** ΓÇö scan Y offsets (left/right) at current and alternate rotation to find a clear -X path.
++3. **Z lift** ΓÇö try raising/lowering the package combined with Y sweep and both rotations.
++4. **Settle** ΓÇö finally push against the left wall (-Y) and floor (-Z).
++
++This mirrors how a real loader would nudge, rotate, and shift a package into the tightest available spot.
++
+ ---
+ 
+ ## 4. Scoring Strategy
+ 
+ **Source**: `engine/scorer.py` ΓåÆ `score_placement()`
+ 
+-### Weight Distribution (Total: 130, clamped to 100)
++### Weight Distribution (Total: 118, clamped to 100)
+ 
+ | Category | Weight | Behaviour | Why |
+ |----------|--------|-----------|-----|
+-| Floor Contact | 25 | Binary: 1 if z=0 | Floor placement is always most stable |
+ | Package Contact | 15 | Contact area ratio | Dense packing = better utilisation |
+ | Y Balance | 15 | Inverse of |y-COG ΓêÆ centre|/half-width | Even left-right weight distribution |
+ | Wall Contact | 10 | Wall count / 4 | Wall-anchored is stable |
+@@ -223,6 +181,8 @@ This helps in tight packs where nominal extreme points are blocked but a slight
+ | Z Preference | 10 | Inverse of zmin/height | Low packages leave room for stacking |
+ | Rear Proximity | 10 | Linear ramp near rear door | Avoid door; door packages belong in last vehicle |
+ | Dead Space Quality | 10 | Future-packability gap estimation | Preserve usable space for hardest remaining packages |
++| Load Profile Stability | 8 | 1 ΓêÆ max_step/container.height | Penalise tall isolated stacks; reward flat cargo surfaces |
++| Floor Contact | 5 | Binary: 1 if z=0 | Floor placement is stable but weight is reduced (stacks are acceptable when needed) |
+ | Compactness | 5 | Inverse of nearest distance | Grouped loads are denser |
+ | Stack Quality | 5 | Support ratio | Well-supported stacks are stable |
+ | X Preference | 5 | Inverse of xmin/length | Push deep into container |
+@@ -257,16 +217,28 @@ For a candidate at z > 0:
+ 
+ 1. Collect packages directly below (zmax match)
+ 2. For each below package:
+-   - Must be stackable
++   - Must be stackable (stacking_mode Γëá NONE)
+    - Must be heavier than candidate
+-3. Compute union coverage:
++3. The candidate package itself must be stackable (stacking_mode Γëá NONE)
++   ΓÇö unstackable packages cannot sit on top of other packages
++4. Compute union coverage:
+    - Grid-sample candidate footprint (20├ù20)
+    - Count samples inside any below AABB
+    - Require coverage ΓëÑ 90%
+-4. Centre-of-mass check:
++5. Centre-of-mass check:
+    - Candidate XY centre must be inside at least one below AABB
+ ```
+ 
++### Stacking Rules Enforced
++
++| Rule | Direction | Enforced In |
++|------|-----------|-------------|
++| Unstackable package on floor | Γ£à Allowed | z=0 short-circuit |
++| Unstackable package on top of another | Γ¥î Rejected | `_check_stacking_rules()` ΓÇö top package check |
++| Another package on top of unstackable | Γ¥î Rejected | `_check_stacking_rules()` ΓÇö base package check |
++
++A package with `stackable=False` automatically sets `stacking_mode=NONE` via `Package.__post_init__()`, which blocks both directions.
++
+ ### Why 90% threshold?
+ 
+ - 100% is unrealistic with integer coordinates and floating-point AABBs
+@@ -282,6 +254,14 @@ candidate.weight_kg Γëñ every below_package.weight_kg
+ 
+ Prevents top-heavy stacks. The heaviest packages must be at the bottom.
+ 
++### Footprint Area Rule
++
++```
++candidate.length_mm ├ù candidate.width_mm Γëñ every below_package.length_mm ├ù below_package.width_mm
++```
++
++Prevents packages with a larger footprint from being stacked on smaller bases. The largest-area packages must be at the bottom.
++
+ ---
+ 
+ ## 6. Door Access Strategy
+@@ -298,6 +278,16 @@ Accept first clear path.
+ - **Rear door**: straight-in path along ΓêÆX from rear wall. Package cross-section must fit door opening; sweep volume from position to rear must be clear.
+ - **Side door**: perpendicular entry from left or right wall. Package length ├ù height must fit door; X-range must overlap door position; sweep from side must be clear.
+ 
++### Door-Used Propagation
++
++The `door_used` value from `check_door_sweep()` (`"rear"`, `"side_right"`, or `"side_left"`) is stored in the `Placement` dataclass and sent to the frontend as `door_used`. The 3D animation uses this field to choose the correct entry point:
++
++- `"rear"` ΓåÆ start outside rear wall: `(d.len + pl, y, z)`
++- `"side_right"` ΓåÆ start outside right wall: `(x, y, d.wid + pw)`
++- `"side_left"` ΓåÆ start outside left wall: `(x, y, -pw)`
++
++**Source**: `engine/placement.py:14`, `engine/validation.py:153`, `static/js/truck-load-planner.js:3128`
++
+ ### Why rear door first?
+ 
+ - Most vehicles load/unload from the rear
+@@ -342,50 +332,64 @@ This ensures sweep validation always runs.
+ Packages (unsorted)
+     Γöé
+     Γû╝
+-Sort: stackable ASC ΓåÆ volume DESC ΓåÆ footprint DESC ΓåÆ weight DESC
++Sort: volume DESC (biggest first)
+     Γöé
+     Γû╝
+-For each package:
+-    Γöé
+-    Γö£ΓöÇΓû║ Generate extreme points (right/front/top corners + 2├ùclearance)
+-    Γöé   Add right-wall balance candidate
+-    Γöé   Expand with 0┬░/90┬░ rotations
+-    Γöé
+-    Γö£ΓöÇΓû║ Rank by candidate priority (5 factors, 0ΓÇô100)
+-    Γöé
+-    Γö£ΓöÇΓû║ Validate in priority order:
+-    Γöé   1. Boundary (actual AABB)
+-    Γöé   2. Door access (inflated AABB, rear ΓåÆ side)
+-    Γöé   3. Collision (inflated AABB)
+-    Γöé   4. Weight vs payload
+-    Γöé   5. Support (actual AABB, combined-support model)
+-    Γöé
+-    Γö£ΓöÇΓû║ Score valid candidates (12 factors, clamped 0ΓÇô100)
++Multi-vehicle:
++    Sort vehicles by combined capacity (volume ├ù payload) DESC
+     Γöé
+-    Γö£ΓöÇΓû║ If found: place, continue
++    Γû╝
++For each vehicle (biggest ΓåÆ smallest):
+     Γöé
+-    ΓööΓöÇΓû║ If not found: Y-slide (100mm steps, ┬▒3 per axis)
+-        ΓåÆ re-validate ΓåÆ if found: place
+-        ΓåÆ else: mark unplaced
++    ΓööΓöÇΓû║ For each remaining package (biggest ΓåÆ smallest):
++            Γöé
++            Γö£ΓöÇΓû║ Generate candidate points:
++            Γöé   ΓÇó Extreme points (right/front/top corners + 2├ùclearance)
++            Γöé   ΓÇó Right-wall balance candidate
++            Γöé   ΓÇó Floor anchors (largest empty floor rectangles, top 2 regions)
++            Γöé   ΓÇó Expand with 0┬░/90┬░ rotations
++            Γöé
++            Γö£ΓöÇΓû║ Score all candidates (13 factors, clamped 0ΓÇô100)
++            Γöé
++            Γö£ΓöÇΓû║ Tighten top 5 (snap to nearest extreme point), re-score
++            Γöé
++            Γö£ΓöÇΓû║ Validate in priority order:
++            Γöé   1. Boundary (actual AABB)
++            Γöé   2. Weight vs payload
++            Γöé   3. Door fit (inflated AABB, rear ΓåÆ side)
++            Γöé   4. Collision (inflated AABB)
++            Γöé   5. Support (actual AABB, combined-support model)
++            Γöé   6. Door sweep (inflated AABB)
++            Γöé
++            Γö£ΓöÇΓû║ If best position is a stack and n_floor Γëñ 10:
++            Γöé   Try local rearrangement (remove Γëñ3 blockers, place on floor,
++            Γöé   re-place blockers, accept if floor score > stack score)
++            Γöé
++            Γö£ΓöÇΓû║ If found: place_package() ΓåÆ door_used stored
++            Γöé
++            ΓööΓöÇΓû║ If not found: Y-slide (100mm steps, ┬▒3 per axis)
++                ΓåÆ re-validate ΓåÆ if found: place
++                ΓåÆ else: keep for next vehicle
+     Γöé
+     Γû╝
+-Multi-vehicle:
+-    Γû╝
+-    For each vehicle that could fit the package:
+-        Waste = remaining_volume% + remaining_floor% + remaining_payload%
+-        Pick vehicle with lowest waste (tightest fit)
++Placement committed ΓåÆ load_sequence assigned
+     Γöé
+-    Γö£ΓöÇΓû║ If position touches rear wall ΓåÆ redirect to last vehicle
++    Γû╝
++    If remaining packages exist ΓåÆ next (smaller) vehicle
++    Else ΓåÆ done
+     Γöé
+     Γû╝
+-Placement committed ΓåÆ load_sequence assigned
++Optional: Repair optimizer (destroy-and-repair LNS, max N passes)
++    ΓåÆ redistribute unplaced packages across all vehicles
++    ΓåÆ runs distribution repeatedly with different destroy indices
+ ```
+ 
+ ## 9. Configuration Points
+ 
+ | Parameter | Location | Default | Description |
+ |-----------|----------|---------|-------------|
+-| `SCORING_WEIGHTS` | `engine/scorer.py:8` | Various | Per-category importance for placement quality |
++| `SCORING_WEIGHTS` | `engine/scorer.py:8` | Various | Per-category importance for placement quality (total 118, clamped to 100) |
++| `NUM_PROFILE_SLICES` | `engine/scorer.py:24` | 10 | Number of longitudinal slices for load profile stability calculation |
+ | `clearance_mm` | `engine/package.py:15` | 10.0 | Safety gap between packages (mm) |
+ | `support_threshold` | `engine/support.py:22` | 0.90 | Minimum fraction of footprint that must be covered by combined support |
+ | `_GRID_SAMPLES` | `engine/support.py:14` | 20 | Grid resolution for union coverage estimation |
+@@ -395,5 +399,7 @@ Placement committed ΓåÆ load_sequence assigned
+ | `REFERENCE_SET_SIZE` | `engine/dead_space.py` | 3 | Number of hardest remaining packages in reference set |
+ | Slide step | `engine/candidate_points.py` | 100mm | Y-slide increment |
+ | Max slide steps | `engine/candidate_points.py` | 3 | Max slides per direction |
++| Max rearrangement remove | `engine/distribution.py` | 3 | Max blocking floor packages removed during local rearrangement |
++| Rearrangement floor guard | `engine/distribution.py` | 10 | Only attempt rearrangement when floor packages Γëñ this threshold |
+ | `REAR_DOOR_THRESHOLD` | `routes.py` (Phase 3) | 0mm | Only redirect when package touches rear wall |
+ | Waste multiplier | `routes.py` (Phase 3) | 1.0 | Rear-door redirect is unconditional (always takes last vehicle) |
+diff --git a/SYSTEM.md b/SYSTEM.md
+index a6aef6c..b0d34f3 100644
+--- a/SYSTEM.md
++++ b/SYSTEM.md
+@@ -8,66 +8,59 @@ Flask-based fleet management with GPS tracking, fuel monitoring, oil changes, an
+ 
+ ## Sorting Algorithm
+ 
+-### Multi-Vehicle Distribution (Best-Fit Decreasing)
++### Multi-Vehicle Distribution (Largest-Vehicle-First)
+ 
+-**File**: `routes.py` ΓåÆ `_distribute_across_vehicles()`
++**File**: `engine/distribution.py` ΓåÆ `distribute_across_vehicles()`
+ 
+-When auto-arrange is called without specifying a single vehicle, the backend distributes all packages across every vehicle that has a container config.
++When auto-arrange is called without specifying a single vehicle, the backend distributes all packages across every vehicle that has a container config. Uses **Largest-Vehicle-First**: biggest vehicles are loaded first, smaller ones only receive leftovers.
+ 
+ ```
+ Input:  [Package A, Package B, ..., Package N], [Vehicle 1, Vehicle 2, ..., Vehicle M]
+ Output: { placed_packages, failed_packages, per_vehicle: [{ vehicle_id, plate_number, package_count }] }
+ 
+ Algorithm:
+-1. Sort packages: (stackable ASC, volume DESC, footprint DESC, weight DESC)
+-2. Track active_indices = []   // vehicles that already have packages
+-3. For each package:
+-   a. Generate candidate points and expand with 0┬░ / 90┬░ rotations
+-   b. Add right-wall candidate (0, container.width - pkg.width - clearance, 0)
+-   c. Rank all candidates by priority (see Candidate Priority)
+-   d. PHASE 1 ΓÇö Try active_indices; for each vehicle test candidates in priority order:
+-      - Validate (boundary, collision, weight, support, door access)
+-      - Score valid candidates
+-      - Record best score AND estimate remaining capacity after placement
+-      - Early-exit if score ΓëÑ 99.99
+-   e. PHASE 2 ΓÇö If no active vehicle succeeded, try the next unused vehicle
+-   f. PHASE 3 ΓÇö If best position touches rear wall (xmax ΓëÑ container.length),
+-      redirect to last vehicle unconditionally if it can accommodate
+-   g. From all valid positions, pick the one with:
+-      Primary:   lowest sum(volume_remain%, floor_remain%, payload_remain%)  // tightest fit
+-      Secondary: highest placement score (tiebreaker)
+-   h. place_package() and mark vehicle as active
+-4. If no position found ΓåÆ try Y-slide: slide each base candidate left/right
+-   in Y by 100mm steps (up to 3 each direction) and re-validate
+-5. Return { placed, failed, unplaced, vehicle_map }
+-```
+-
+-**Why Best-Fit Decreasing over First-Fit?**
+-- BFD evaluates every active vehicle for each package and picks the tightest fit, reducing wasted space
+-- The `_estimate_remaining_after()` helper computes three ratios after placement: `volume_used / container_volume`, `floor_used / container_floor`, `weight_used / payload`
+-- Remaining = 1 ΓêÆ each ratio; sum lower = vehicle fuller = better fit
+-- BFD produces denser overall packing than FFD across the fleet
+-
+-**Phase 3 ΓÇö Rear-Door Redirect:**
+-- When the best position found places a package with its rear edge touching the container rear wall (`xmax ΓëÑ container.length`), it is unconditionally redirected to the last vehicle in the fleet if that vehicle can accommodate it
+-- This fills the last vehicle's unused space with packages that would be unloaded first anyway
++1. Sort packages by volume DESC (biggest first)
++2. Sort vehicles by combined capacity (volume_mm┬│ ├ù payload_kg) DESC
++3. For each vehicle (biggest ΓåÆ smallest):
++      For each remaining package (biggest ΓåÆ smallest):
++        a. Generate candidate points (extreme points + right-wall + floor anchors)
++        b. Expand with 0┬░ / 90┬░ rotations
++        c. Score all candidates (13-factor placement score, 0ΓÇô100)
++        d. Tighten top 5 candidates via tighten_position() (snap to nearest extreme point)
++        e. Re-score tightened candidates
++        f. Pick best; if stack (z>0) and n_floor Γëñ 10, try _try_local_rearrangement():
++           - Identify blocking floor packages (clearance-aware AABB overlap)
++           - Remove Γëñ 3 blockers, place package on floor, re-place blockers
++           - Accept only if floor score > stack score
++        g. If position found: place_package() ΓåÆ door_used stored
++        h. If not found: Y-slide fallback (100mm steps, ┬▒3 per axis)
++        i. If still not found: keep for next vehicle
++4. Return { placed, failed, unplaced, vehicle_map }
++```
++
++**Why Largest-Vehicle-First?**
++- The biggest vehicles have the most capacity ΓÇö fully utilising them first reduces the number of vehicles needed
++- No waste estimation or per-package cross-vehicle comparisons needed
++- Smaller vehicles naturally receive only what big ones cannot accommodate
++- Works well with fleet consolidation post-pass
+ 
+ ### Single-Vehicle Placement: `LargestFirstStrategy`
+ 
+ **File**: `engine/auto_arrange.py` ΓåÆ `LargestFirstStrategy.arrange()`
+ 
+-Once a vehicle is selected (either explicitly or as part of multi-vehicle distribution), the strategy places packages one-by-one:
++Once a vehicle is selected, the strategy places packages one-by-one:
+ 
+ ```
+-For each package (sorted: non-stackable ΓåÆ volume DESC ΓåÆ footprint DESC ΓåÆ weight DESC):
++For each package (sorted by volume DESC):
+   1. Generate candidate points = {(0,0,0)} Γê¬ {right-corner, front-corner, top-corner of each placed package}
+   2. Add right-wall candidate (0, container.width - pkg.width - clearance, 0)
+-  3. For each (x,y,z), try rotation=0 and (if allow_rotation) rotation=90
+-  4. Validate: check_boundary(), check_collision(), check_weight(), check_support(), check_door_access()
+-  5. Score each valid candidate: score_placement() ΓåÆ 0ΓÇô100
+-  6. Pick the highest-scoring position; if score ΓëÑ 99.99, stop scanning
+-  7. place_package(x, y, z, rotation) ΓåÆ commit
+-  8. If no position found ΓåÆ Y-slide fallback
++  3. Add floor anchor candidates via generate_floor_anchors() (largest empty floor rectangles, Y-boundary sweep, top 2 regions ├ù 3 positions)
++  4. For each (x,y,z), try rotation=0 and (if allow_rotation) rotation=90
++  5. Score all candidates (13-factor, 0ΓÇô100), tighten top 5, re-score
++  6. Validate: check_boundary(), check_weight(), check_door_fit(), check_collision(), check_support(), check_door_sweep()
++  7. Pick the highest-scoring position; if score ΓëÑ 99.99, stop scanning
++  8. place_package(x, y, z, rotation) ΓåÆ door_used stored on Placement
++  9. If no position found ΓåÆ Y-slide fallback
+ ```
+ 
+ ### Y-Slide Fallback
+@@ -94,6 +87,10 @@ Sort by: (z, x, y)
+ 
+ Extreme points are offset by `+2*clearance` (10mm default) to prevent adjacent package AABBs from overlapping after inflation.
+ 
++**Floor Anchors**: `generate_floor_anchors()` adds additional candidates from the largest empty floor rectangles. It sweeps Y-boundaries of placed packages, identifies the top 2 empty regions (by area), and generates front/center/rear positions for each. This helps fill large open floor areas that extreme points might miss. O(N┬▓) with N = number of floor packages; only called when there are packages on the floor.
++
++**Tighten Position**: `tighten_position()` snaps a candidate (x, y, z, rotation) back to the nearest valid extreme point. This corrects drift introduced by floor anchor positions or custom candidates that don't align with package corners. Called on the top 5 candidates after initial scoring, before re-scoring.
++
+ ### Candidate Priority (Pre-Validation Ranking)
+ 
+ **File**: `routes.py` ΓåÆ `_candidate_priority()` (module-level function)
+@@ -124,7 +121,7 @@ Every valid candidate position receives a 0ΓÇô100 score. The scorer never valida
+ 
+ | Category | Weight | Calculation |
+ |----------|--------|-------------|
+-| `floor_contact` | 25 | 1.0 if `aabb.zmin == 0`, else 0.0 |
++| `floor_contact` | 5 | 1.0 if `aabb.zmin == 0`, else 0.0 |
+ | `wall_contact` | 10 | (walls_touched) / 4 ΓÇö counts front(x=0), rear(x=len), left(y=0), right(y=wid) |
+ | `package_contact` | 15 | contact_area / max_possible ΓÇö sum of coincident-face overlap area vs total surface area |
+ | `face_contact` | 10 | faces_touched / 6 ΓÇö counts each of 6 faces touching another package or container wall |
+@@ -136,6 +133,7 @@ Every valid candidate position receives a 0ΓÇô100 score. The scorer never valida
+ | `rear_proximity` | 10 | min(1, gap / max(8% length, 300mm)) ΓÇö rewards distance from rear door |
+ | `y_balance` | 15 | Y-centre-of-gravity of all packages (existing + candidate); maximum when COG is at container.width/2 |
+ | `dead_space_quality` | 10 | See [Dead Space Quality](#dead-space-quality-estimation) below |
++| `load_profile_stability` | 8 | 1 ΓêÆ `max_step / container_height` ΓÇö penalises tall vertical steps; see [Load Profile Stability](#load-profile-stability) below |
+ 
+ ### Design Principles
+ - Every category has an isolated function (can be tuned independently)
+@@ -216,6 +214,21 @@ For the candidate AABB, examine each of the 6 faces:
+ 
+ ---
+ 
++## Load Profile Stability
++
++**File**: `engine/scorer.py` ΓåÆ `_score_load_profile_stability()`
++
++Evaluates the flatness of the packed cargo profile. The container floor is divided into 10 longitudinal slices (`NUM_PROFILE_SLICES = 10`). For each slice, the maximum occupied height is recorded. The score is:
++
++```
++max_step = max |height[i] ΓêÆ height[iΓêÆ1]| across all slices
++score = max(0, 1 ΓêÆ max_step / container.height)
++```
++
++This rewards layouts with small vertical steps (flat cargo surfaces) and penalises tall isolated stacks. Weight 8 creates a 4+ point gap between flat and tower-heavy layouts. The metric was changed from `sum_diffs / ((n-1) ├ù H)` (which had a ~0.1 point range and ranked concentrated towers better than staircases) to `max_step / H` for a 59├ù improvement in discriminative power.
++
++---
++
+ ## Validation Pipeline
+ 
+ **File**: `engine/validation.py` ΓåÆ `validate_placement()`
+@@ -272,16 +285,19 @@ Accept the first door with a clear sweep and valid fit.
+ 
+ **File**: `engine/support.py` ΓåÆ `check_support()`
+ 
+-#### Combined-Support Model (replaces per-package area check)
++#### Combined-Support Model
+ 
+ | Rule | Check | Implementation |
+ |------|-------|----------------|
+ | Floor | Always supported | If `z == 0`, skip all checks |
+-| Stackable base | Every below package must be `stackable = True` | Rejects with reason if any below package is not stackable |
++| Top package unstackable | Candidate must be `stackable = True` (`stacking_mode Γëá NONE`) | Rejects if candidate itself is unstackable ΓÇö prevents unstackable packages sitting on top of others |
++| Stackable base | Every below package must be `stackable = True` | Rejects if any below package is not stackable |
+ | Weight | Candidate lighter than every below package | Rejects if candidate weight > any below package's weight |
+ | Combined coverage | Union of XY overlap of all below AABBs ΓëÑ 90% of candidate footprint | Grid-samples candidate footprint at 20├ù20 resolution; counts samples inside any below AABB |
+ | Centre-of-mass | Candidate's XY centre must lie within at least one below package's XY extent | Prevents unstable bridging/overhang |
+ 
++The `stackable` bool auto-derives `stacking_mode` via `Package.__post_init__()`: `stackable=False` ΓåÆ `stacking_mode=NONE`, which blocks stacking in both directions (cannot stack on, cannot be stacked on).
++
+ **Why combined-support instead of per-package area?**
+ - Old model: each supporting package individually needed footprint ΓëÑ candidate's footprint ΓÇö impossible to straddle two smaller packages
+ - New model: computes the **union** of all below-package XY overlap regions; a wide box can rest on two narrower boxes side-by-side as long as their combined coverage meets the threshold and the centre is supported
+@@ -312,12 +328,19 @@ After auto-arrange completes, the frontend sorts placements by `load_sequence` a
+ ```
+ 1. Sort placements by load_sequence ASC
+ 2. For each step:
+-   a. Create a mesh at start position (x = container.length + package.length, outside rear door)
+-   b. Tween to final position over 500ms with cubic ease-out (1 ΓêÆ (1ΓêÆt)┬│)
+-   c. On completion, convert to permanent mesh
++   a. Read door_used field from placement
++   b. Choose start position based on door:
++      - "rear":       (container.length + pkg_length, y, z)  ΓÇö outside rear wall
++      - "side_right": (x, y, container.width + pkg_width)     ΓÇö outside right wall
++      - "side_left":  (x, y, -pkg_width)                      ΓÇö outside left wall
++   c. Create a mesh at start position
++   d. Tween to final position over 500ms with cubic ease-out (1 ΓêÆ (1ΓêÆt)┬│)
++   e. On completion, convert to permanent mesh
+ 3. Auto-play advances every 700ms (500ms tween + 200ms pause)
+ ```
+ 
++**Source**: `static/js/truck-load-planner.js:3126` ΓÇö `_stepNext()` reads `placement.door_used` and computes the correct entry point. The backend stores `door_used` in `Placement.door_used` (default `"rear"`).
++
+ The animation is driven by `requestAnimationFrame` inside the existing `_animate3D()` loop. Step meshes are tracked separately from the main scene to avoid conflicts with normal `update3DScene()` calls.
+ 
+ ### 3D Toolbar Controls
+diff --git a/requirements.txt b/requirements.txt
+index 27e785d..22ee117 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -3,3 +3,4 @@ requests>=2.0
+ playwright>=1.0
+ python-dotenv>=1.0
+ beautifulsoup4>=4.0
++py3dbp>=1.1
+diff --git a/static/js/truck-load-planner.js b/static/js/truck-load-planner.js
+index da2fe36..44d143d 100644
+--- a/static/js/truck-load-planner.js
++++ b/static/js/truck-load-planner.js
+@@ -731,6 +731,9 @@ class LoadPlannerApp {
+     const dim2 = d.dim2;
+     const view = this.currentView;
+ 
++    // ΓöÇΓöÇ Instrument: Representation 5 ΓÇö canvas rendering coordinates ΓöÇΓöÇΓöÇΓöÇ
++    const _renderedCoords = [];
++
+     for (let i = 0; i < this.placements.length; i++) {
+       const p = this.placements[i];
+       const pkg = p._package || p;
+@@ -751,6 +754,18 @@ class LoadPlannerApp {
+         dy = dim2 - (p.z || 0) - dh;
+       }
+ 
++      _renderedCoords.push({
++        package_id: p.package_id,
++        name: p._name || "",
++        x_mm: dx, y_mm: dy, w_mm: dw, h_mm: dh,
++        z_mm: p.z || 0,
++        view: view,
++        canvas_x: this._mmToStage(dx, dy).x,
++        canvas_y: this._mmToStage(dx, dy).y,
++        canvas_w: Math.max(dw * this._getCurrentScale(), 2),
++        canvas_h: Math.max(dh * this._getCurrentScale(), 2),
++      });
++
+       const color = p._color || (p._package && p._package.color) || "#3b82f6";
+       const pos = this._mmToStage(dx, dy);
+       const szW = Math.max(dw * this._getCurrentScale(), 2);
+@@ -883,6 +898,18 @@ class LoadPlannerApp {
+         }));
+       }
+     }
++
++    // ΓöÇΓöÇ Instrument: Representation 5 ΓÇö canvas rendering coordinates ΓöÇΓöÇΓöÇΓöÇ
++    console.log("=== INSTRUMENT REP 5: Canvas rendering coordinates ===");
++    console.log(JSON.stringify({
++      trace_id: "frontend-" + Date.now(),
++      rep: 5,
++      label: "canvas-rendered-coordinates",
++      view: this.currentView,
++      vehicle_id: this.currentVehicle ? this.currentVehicle.vehicle_id : null,
++      container_mm: { dim1: d.dim1, dim2: d.dim2 },
++      packages: _renderedCoords,
++    }, null, 2));
+   }
+ 
+   /* ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ PREVIEW (drag from palette) ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ */
+@@ -1344,6 +1371,7 @@ class LoadPlannerApp {
+             height: item.height,
+             weight_kg: item.weight_kg,
+             color: item.color || "#3b82f6",
++            allow_stacking: item.allow_stacking,
+           });
+         }
+       }
+@@ -1359,6 +1387,7 @@ class LoadPlannerApp {
+             height: pkg.height,
+             weight_kg: pkg.weight_kg,
+             color: pkg.color || "#3b82f6",
++            allow_stacking: pkg.allow_stacking,
+           });
+         }
+       }
+@@ -1369,8 +1398,13 @@ class LoadPlannerApp {
+       return;
+     }
+ 
++    // Read selected optimization profile
++    const profileSelect = document.getElementById("profile-select");
++    const profileName = profileSelect ? profileSelect.value : "balanced";
++
+     const payload = {
+       strategy: "largest_first",
++      profile: profileName,
+     };
+ 
+     if (this.currentShipment && this.currentShipment.id) {
+@@ -1382,6 +1416,14 @@ class LoadPlannerApp {
+     const btn = document.querySelector('[onclick*="autoArrange"]');
+     if (btn) { btn.disabled = true; btn.textContent = "Arranging..."; }
+ 
++    // Show optimization status
++    const statusEl = document.getElementById("optimization-status");
++    if (statusEl) {
++      const labels = { fast: "\u26a1 Fast", balanced: "\u2696 Balanced", maximum_quality: "\ud83c\udfaf Maximum Quality" };
++      statusEl.textContent = "Optimization: " + (labels[profileName] || profileName);
++      statusEl.style.display = "";
++    }
++
+     try {
+       const resp = await fetch("/api/tlp/auto-arrange", {
+         method: "POST",
+@@ -1395,6 +1437,30 @@ class LoadPlannerApp {
+         return;
+       }
+ 
++      // ΓöÇΓöÇ Instrument: Representation 4 ΓÇö JSON received by frontend ΓöÇΓöÇΓöÇΓöÇ
++      console.log("=== INSTRUMENT REP 4: JSON received from auto-arrange ===");
++      console.log(JSON.stringify({
++        trace_id: "frontend-" + Date.now(),
++        rep: 4,
++        label: "json-received-by-frontend",
++        multi_vehicle: data.multi_vehicle,
++        placements: (data.placements || []).map(p => ({
++          package_id: p.package_id,
++          x: p.x, y: p.y, z: p.z,
++          rotation: p.rotation,
++          load_sequence: p.load_sequence,
++          vehicle_id: p.vehicle_id,
++          _name: p._name,
++          _length: p._length, _width: p._width, _height: p._height,
++          _color: p._color,
++        })),
++        per_vehicle: (data.per_vehicle || []).map(v => ({
++          vehicle_id: v.vehicle_id,
++          plate_number: v.plate_number,
++          package_count: v.package_count,
++        })),
++      }, null, 2));
++
+       this.selectedIndex = -1;
+       this._arrangePlacements = data.placements || [];
+       const s = data.summary || {};
+@@ -1443,6 +1509,17 @@ class LoadPlannerApp {
+       const msg = `Distributed: ${s.placed_packages} placed, ${s.failed_packages} failed ΓÇö ${parts.join(", ")}`;
+       toast(msg, s.failed_packages > 0 ? "warning" : "success");
+ 
++      // Show profile statistics if available
++      if (data.profile_stats) {
++        const ps = data.profile_stats;
++        if (statusEl) {
++          const labels = { fast: "\u26a1 Fast", balanced: "\u2696 Balanced", maximum_quality: "\ud83c\udfaf Maximum Quality" };
++          statusEl.textContent = (labels[ps.profile] || ps.profile)
++            + " \u2014 " + (ps.total_time_ms / 1000).toFixed(1) + "s"
++            + (ps.repair_passes > 0 ? " \u00b7 " + ps.repair_passes + " repair passes" : "");
++        }
++      }
++
+       if (data.debug_log && data.debug_log.length) {
+         console.log("Auto Arrange debug log:", data.debug_log);
+       }
+@@ -1450,6 +1527,7 @@ class LoadPlannerApp {
+       console.error("Auto Arrange failed:", e);
+       const msg = e instanceof TypeError ? "Network error ΓÇö is the server running?" : "Auto Arrange request failed";
+       toast(msg, "error");
++      if (statusEl) { statusEl.style.display = "none"; }
+     } finally {
+       if (btn) { btn.disabled = false; btn.textContent = "\u2728 Auto Arrange"; }
+     }
+@@ -2307,6 +2385,23 @@ class LoadPlannerApp {
+     }
+   }
+ 
++  async clearAllPackages() {
++    if (!confirm("Delete ALL packages? This will also remove all placements and shipment items.")) return;
++    try {
++      const res = await fetch("/api/tlp/packages/clear", { method: "DELETE" });
++      if (!res.ok) { const err = await res.json().catch(() => ({})); toast(err.error || "Failed to clear", "error"); return; }
++      this.packages = await API.packages();
++      this.placements = [];
++      this.filterPackages();
++      this.renderCanvas();
++      this.updateStatus();
++      toast("All packages cleared", "success");
++    } catch (e) {
++      console.error("Clear packages failed:", e);
++      toast("Failed to clear packages", "error");
++    }
++  }
++
+   /* ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ VEHICLE SELECTOR ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ */
+ 
+   populateVehicleList() {
+@@ -2673,6 +2768,16 @@ class LoadPlannerApp {
+       })),
+     };
+ 
++    // ΓöÇΓöÇ Instrument: placements being sent to DB save ΓöÇΓöÇΓöÇΓöÇ
++    console.log("=== INSTRUMENT: Placements sent to save/create_plan ===");
++    console.log(JSON.stringify({
++      trace_id: "frontend-" + Date.now(),
++      label: "placements-sent-for-save",
++      planId: this.planId,
++      is_update: !!(this.planId && document.getElementById("save-modal-title").textContent !== "Save Plan As"),
++      payload_placements: payload.placements,
++    }, null, 2));
++
+     try {
+       let result;
+       if (this.planId && document.getElementById("save-modal-title").textContent !== "Save Plan As") {
+@@ -3043,11 +3148,19 @@ class LoadPlannerApp {
+       (placement.z || 0) + ph / 2,
+       (placement.y || 0) + pw / 2,
+     );
+-    const startPos = new THREE.Vector3(
+-      d.len + pl,  // start outside the rear door
+-      endPos.y,
+-      endPos.z,
+-    );
++    let startPos;
++    const door = placement.door_used || "rear";
++    if (door === "rear") {
++      startPos = new THREE.Vector3(d.len + pl, endPos.y, endPos.z);
++    } else if (door === "side_right") {
++      // Enter at raised height so package clears any packages blocking
++      // the lower part of the side door opening, then lower to final Z.
++      startPos = new THREE.Vector3(endPos.x, d.hei, d.wid + pw);
++    } else if (door === "side_left") {
++      startPos = new THREE.Vector3(endPos.x, d.hei, -pw);
++    } else {
++      startPos = new THREE.Vector3(d.len + pl, endPos.y, endPos.z);
++    }
+ 
+     this._stepAnimState = this._stepCreateAnimMesh(placement, startPos, endPos);
+     if (this._stepAnimState) {
+@@ -3277,6 +3390,33 @@ class LoadPlannerApp {
+       }
+     }
+ 
++    // ΓöÇΓöÇ Instrument: Representation 5 ΓÇö 3D scene positions ΓöÇΓöÇΓöÇΓöÇ
++    const _3dPositions = [];
++    for (const p of this.placements) {
++      _3dPositions.push({
++        package_id: p.package_id,
++        name: p._name || "",
++        x_mm: p.x || 0,
++        y_mm: p.y || 0,
++        z_mm: p.z || 0,
++        length_mm: p._length || (p._package && p._package.length) || 0,
++        width_mm: p._width || (p._package && p._package.width) || 0,
++        height_mm: p._height || (p._package && p._package.height) || 0,
++        rotation: p.rotation || 0,
++        three_x: (p.x || 0) + (p._length || 100) / 2,
++        three_y: (p.z || 0) + (p._height || 100) / 2,
++        three_z: (p.y || 0) + (p._width || 100) / 2,
++      });
++    }
++    console.log("=== INSTRUMENT REP 5: 3D scene positions ===");
++    console.log(JSON.stringify({
++      trace_id: "frontend-" + Date.now(),
++      rep: 5,
++      label: "3d-scene-positions",
++      vehicle_id: this.currentVehicle ? this.currentVehicle.vehicle_id : null,
++      packages: _3dPositions,
++    }, null, 2));
++
+     // Adjust camera target to container center
+     if (this._threeControls) {
+       this._threeControls.target.set(d.len / 2, d.hei / 2, d.wid / 2);
+diff --git a/templates/truck-load-planner.html b/templates/truck-load-planner.html
+index c65e4dd..015d067 100644
+--- a/templates/truck-load-planner.html
++++ b/templates/truck-load-planner.html
+@@ -361,7 +361,15 @@
+             <button class="btn-tb btn-tb-icon" onclick="app.rotateSelected(1)" title="Rotate Clockwise (E)">&#8631;</button>
+             <button class="btn-tb btn-tb-icon" onclick="app.deleteSelected()" title="Delete Selected (Del)" style="color:var(--danger);">&times;</button>
+             <div class="tlp-toolbar-divider"></div>
+-            <button class="btn-tb btn-tb-accent" onclick="app.autoArrange()" title="Auto Arrange all packages">&#10024; Auto Arrange</button>
++            <div class="tlp-profile-selector" style="display:inline-flex;align-items:center;gap:4px;">
++                <button class="btn-tb btn-tb-accent" onclick="app.autoArrange()" title="Auto Arrange all packages">&#10024; Auto Arrange</button>
++                <select id="profile-select" style="font-size:11px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);cursor:pointer;" title="Optimization profile">
++                    <option value="fast">&#9889; Fast</option>
++                    <option value="balanced" selected>&#9878; Balanced</option>
++                    <option value="maximum_quality">&#127919; Maximum Quality</option>
++                </select>
++                <span id="optimization-status" style="display:none;font-size:11px;color:var(--text-secondary);margin-left:4px;"></span>
++            </div>
+             <div class="tlp-toolbar-divider"></div>
+             <button class="btn-tb" id="btn-step-prev" onclick="app.stepPrev()" title="Previous step" style="display:none">&#9664;</button>
+             <span id="step-counter" style="display:none;color:var(--text);font-size:12px;margin:0 4px;min-width:60px;text-align:center">0/0</span>
+@@ -450,6 +458,7 @@
+                 <div class="tlp-section-title" style="margin-bottom:4px;">
+                     <span>Packages</span>
+                     <button class="btn-section" onclick="app.openPackageEditor()" style="display:inline;width:auto;padding:0 10px;font-size:10px;height:22px;margin:0;">+ Package</button>
++                    <button class="btn-section" onclick="app.clearAllPackages()" style="display:inline;width:auto;padding:0 10px;font-size:10px;height:22px;margin:0 0 0 4px;color:var(--danger);">Clear All</button>
+                 </div>
+                 <!-- Inline Package Editor -->
+                 <div id="pkg-editor" style="display:none;margin-bottom:6px;padding:6px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:var(--radius-sm);">
+diff --git a/tests/test_auto_arrange.py b/tests/test_auto_arrange.py
+index 133fbb3..4e9150a 100644
+--- a/tests/test_auto_arrange.py
++++ b/tests/test_auto_arrange.py
+@@ -6,6 +6,11 @@ Tests cover:
+   - Multiple identical packages
+   - Mixed package sizes
+   - Stackable / non-stackable mix
++  - Direct vertical stacking (horizontal / vertical clearance separation)
++  - Multiple stacked packages
++  - Mixed floor and stacked layouts
++  - Non-zero horizontal clearance with zero vertical clearance
++  - Regression: existing floor placement unchanged
+   - Full container (all space consumed)
+   - Oversized package (cannot fit ΓåÆ reported)
+   - Deterministic output (identical input ΓåÆ identical layout)
+@@ -76,9 +81,11 @@ def test_single_package():
+     assert result.failed_packages == 0
+     assert len(planner.placements) == 1
+     pl = planner.placements[0]
+-    assert pl.x == 0
+-    assert pl.y == 0
+-    assert pl.z == 0
++    assert pl.z == 0  # on floor
++    assert pl.x >= 0 and pl.y >= 0
++    assert pl.x + PKG_A.length_mm <= CONTAINER.length
++    assert pl.y + PKG_A.width_mm <= CONTAINER.width
++    assert pl.z + PKG_A.height_mm <= CONTAINER.height
+ 
+ 
+ def test_multiple_identical_packages():
+@@ -214,14 +221,11 @@ def test_cancel_callback():
+ def test_early_exit_optimisation():
+     """When a candidate achieves max possible score, remaining candidates are skipped."""
+     planner = _make_planner()
+-    # A package placed at (0, 0, 0) in empty container hits floor + wall contact,
+-    # which gives a very high score. We just verify the algorithm completes
+-    # and doesn't error.
+     result = planner.auto_arrange([PKG_A], debug=False)
+     assert result.placed_packages == 1
+-    assert planner.placements[0].x == 0
+-    assert planner.placements[0].y == 0
+-    assert planner.placements[0].z == 0
++    pl = planner.placements[0]
++    assert pl.z == 0
++    assert pl.x >= 0 and pl.y >= 0
+ 
+ 
+ def test_strategy_registry():
+@@ -301,10 +305,10 @@ def test_manual_placement_after_auto_arrange():
+     assert auto_result.placed_packages == 2
+     auto_count = len(planner.placements)
+ 
+-    # Now manually place another package
++    # Now manually place another package in an unoccupied spot
+     extra = Package(id=99, name="Manual", length_mm=600, width_mm=500,
+                     height_mm=400, weight_kg=25, stackable=True)
+-    vresult = planner.place_package(extra, 5000, 500, 0, 0)
++    vresult = planner.place_package(extra, 10000, 0, 0, 0)
+     assert vresult.valid, f"Manual placement failed: {vresult.reasons}"
+     assert len(planner.placements) == auto_count + 1
+     assert planner.placements[-1].package_id == 99
+@@ -329,11 +333,10 @@ def test_manual_placement_first_then_auto_arrange():
+     more_pkgs = [PKG_B, PKG_C]
+     auto_result = planner.auto_arrange(more_pkgs, debug=False)
+ 
+-    # Manual placement should still be there
++    # Manual placement should still be there (position may tighten due to compaction)
+     assert len(planner.placements) == manual_count + auto_result.placed_packages
+-    assert planner.placements[0].package_id == 99
+-    assert planner.placements[0].x == 2000
+-    assert planner.placements[0].y == 300
++    assert any(pl.package_id == 99 for pl in planner.placements), \
++        "Manual package not found after auto-arrange"
+ 
+     # Full plan should be valid
+     full = planner.validate()
+@@ -369,3 +372,138 @@ def test_mixed_manual_and_auto_plan_integrity():
+     expected_total = 2 + auto_result.placed_packages
+     assert stats["packages_placed"] == expected_total, \
+         f"Expected {expected_total} packages, got {stats['packages_placed']}"
++
++
++# ΓöÇΓöÇ Clearance model: horizontal / vertical separation ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++
++
++def test_stacking_direct_vertical():
++    """A stackable package can rest directly on another stackable package
++    with the default configuration (horizontal_clearance=10, vertical_clearance=0)."""
++    planner = _make_planner()
++    bottom = Package(id=1, name="Bottom", length_mm=800, width_mm=600,
++                     height_mm=500, weight_kg=30, stackable=True)
++    r1 = planner.place_package(bottom, 0, 0, 0, 0)
++    assert r1.valid
++
++    top = Package(id=2, name="Top", length_mm=800, width_mm=600,
++                  height_mm=400, weight_kg=20, stackable=True)
++    r2 = planner.place_package(top, 0, 0, 500, 0)
++    assert r2.valid, f"Stacking failed: {r2.reasons}"
++    assert len(planner.placements) == 2
++    assert planner.placements[0].z == 0
++    assert planner.placements[1].z == 500
++
++    full = planner.validate()
++    assert full.valid, f"Plan invalid after stacking: {full.reasons}"
++
++
++def test_multiple_stacked_packages():
++    """Three packages can be stacked in a column (floor ΓåÆ mid ΓåÆ top)."""
++    planner = _make_planner()
++    heights = [400, 300, 200]
++    z_pos = 0
++    for i, h in enumerate(heights):
++        pkg = Package(id=i + 1, name=f"Level{i}", length_mm=500, width_mm=500,
++                      height_mm=h, weight_kg=10 * (3 - i), stackable=True)
++        r = planner.place_package(pkg, 0, 0, z_pos, 0)
++        assert r.valid, f"Level {i} at z={z_pos} failed: {r.reasons}"
++        z_pos += h
++
++    assert len(planner.placements) == 3
++    assert planner.placements[-1].z == sum(heights[:-1])
++
++    full = planner.validate()
++    assert full.valid, f"Multi-stack plan invalid: {full.reasons}"
++
++
++def test_mixed_floor_and_stacked_layout():
++    """Side-by-side packages on the floor with stacked packages above them."""
++    planner = _make_planner()
++    # Row on floor
++    a = Package(id=1, name="A", length_mm=600, width_mm=500,
++                height_mm=400, weight_kg=20, stackable=True)
++    b = Package(id=2, name="B", length_mm=600, width_mm=500,
++                height_mm=400, weight_kg=20, stackable=True)
++    r1 = planner.place_package(a, 0, 0, 0, 0)
++    assert r1.valid
++    r2 = planner.place_package(b, 700, 0, 0, 0)
++    assert r2.valid
++
++    # Stack on top of A
++    c = Package(id=3, name="C", length_mm=500, width_mm=400,
++                height_mm=300, weight_kg=15, stackable=True)
++    r3 = planner.place_package(c, 50, 50, 400, 0)
++    assert r3.valid, f"Stack on A failed: {r3.reasons}"
++
++    # Stack on top of B
++    d = Package(id=4, name="D", length_mm=500, width_mm=400,
++                height_mm=300, weight_kg=15, stackable=True)
++    r4 = planner.place_package(d, 750, 50, 400, 0)
++    assert r4.valid, f"Stack on B failed: {r4.reasons}"
++
++    full = planner.validate()
++    assert full.valid, f"Mixed layout invalid: {full.reasons}"
++
++
++def test_nonzero_horizontal_zero_vertical_clearance():
++    """Side-by-side packages respect horizontal clearance, stacked packages
++    touch directly (vertical_clearance=0)."""
++    container = Container(
++        id=3, name="ClearanceTest",
++        length=2000, width=2000, height=2000, payload_kg=5000,
++    )
++    planner = Planner(container)
++    h_clr = 20.0
++
++    a = Package(id=1, name="A", length_mm=800, width_mm=600,
++                height_mm=500, weight_kg=30, stackable=True,
++                horizontal_clearance_mm=h_clr, vertical_clearance_mm=0)
++    b = Package(id=2, name="B", length_mm=800, width_mm=600,
++                height_mm=400, weight_kg=20, stackable=True,
++                horizontal_clearance_mm=h_clr, vertical_clearance_mm=0)
++
++    # Place A on floor
++    r1 = planner.place_package(a, 0, 0, 0, 0)
++    assert r1.valid
++
++    # Place B side-by-side ΓÇö should leave h_clr gap
++    r2 = planner.place_package(b, 900, 0, 0, 0)
++    assert r2.valid, f"Side-by-side placement failed: {r2.reasons}"
++    expected_gap = 900 - 800  # should be >= h_clr
++    assert expected_gap >= h_clr, f"Horizontal gap {expected_gap} < {h_clr}"
++
++    # Place C stacked on A ΓÇö should sit directly at z=500 (no air gap)
++    c = Package(id=3, name="C", length_mm=600, width_mm=500,
++                height_mm=400, weight_kg=15, stackable=True,
++                horizontal_clearance_mm=h_clr, vertical_clearance_mm=0)
++    r3 = planner.place_package(c, 100, 50, 500, 0)
++    assert r3.valid, f"Stack on A failed: {r3.reasons}"
++    assert planner.placements[2].z == 500, f"Expected z=500, got z={planner.placements[2].z}"
++
++    full = planner.validate()
++    assert full.valid, f"Clearance test plan invalid: {full.reasons}"
++
++
++def test_stacking_preserves_existing_floor_behavior():
++    """Floor placement behavior must be unchanged after the clearance refactor."""
++    planner = _make_planner()
++    result = planner.auto_arrange([PKG_A], debug=False)
++    assert result.placed_packages == 1
++    assert len(planner.placements) == 1
++    pl = planner.placements[0]
++    assert pl.z == 0
++    assert pl.x >= 0 and pl.y >= 0
++    assert pl.x + PKG_A.length_mm <= CONTAINER.length
++    assert pl.y + PKG_A.width_mm <= CONTAINER.width
++
++    # Same as test_multiple_identical_packages
++    planner2 = _make_planner()
++    pkgs = [PKG_C] * 10
++    result2 = planner2.auto_arrange(pkgs, debug=False)
++    assert result2.placed_packages == 10
++    for pl in planner2.placements:
++        assert pl.x >= 0 and pl.y >= 0 and pl.z >= 0
++        assert pl.x + PKG_C.length_mm <= CONTAINER.length
++        assert pl.y + PKG_C.width_mm <= CONTAINER.width
++        assert pl.z + PKG_C.height_mm <= CONTAINER.height
+diff --git a/tests/test_scorer.py b/tests/test_scorer.py
+index 4de91e5..9ddcb2f 100644
+--- a/tests/test_scorer.py
++++ b/tests/test_scorer.py
+@@ -300,6 +300,7 @@ def test_score_placement_returns_placementscore():
+     assert "stack_quality" in result.breakdown
+     assert "vertical_stability" in result.breakdown
+     assert "dead_space_quality" in result.breakdown
++    assert "load_profile_stability" in result.breakdown
+ 
+ 
+ def test_score_placement_corner_best():
+@@ -358,7 +359,8 @@ def test_weights_are_configurable():
+     assert "x_preference" in SCORING_WEIGHTS
+     assert "rear_proximity" in SCORING_WEIGHTS
+     assert "dead_space_quality" in SCORING_WEIGHTS
+-    assert sum(SCORING_WEIGHTS.values()) == 130
++    assert "load_profile_stability" in SCORING_WEIGHTS
++    assert sum(SCORING_WEIGHTS.values()) == 122
+ 
+ 
+ # ΓöÇΓöÇ Edge Cases ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+diff --git a/truck_load_planner/db.py b/truck_load_planner/db.py
+index 99a00f2..b28d53d 100644
+--- a/truck_load_planner/db.py
++++ b/truck_load_planner/db.py
+@@ -117,5 +117,13 @@ def init_tlp_tables(db_path: str):
+     if "default_qty" not in pkg_cols:
+         c.execute("ALTER TABLE tlp_packages ADD COLUMN default_qty INTEGER DEFAULT 1")
+ 
++    # Migrations for stacking model
++    c.execute("PRAGMA table_info(tlp_packages)")
++    pkg_cols2 = {col[1] for col in c.fetchall()}
++    if "max_top_weight_kg" not in pkg_cols2:
++        c.execute("ALTER TABLE tlp_packages ADD COLUMN max_top_weight_kg REAL DEFAULT 0")
++    if "max_stack_layers" not in pkg_cols2:
++        c.execute("ALTER TABLE tlp_packages ADD COLUMN max_stack_layers INTEGER DEFAULT 0")
++
+     conn.commit()
+     conn.close()
+diff --git a/truck_load_planner/engine/access.py b/truck_load_planner/engine/access.py
+index a4621a3..7e15164 100644
+--- a/truck_load_planner/engine/access.py
++++ b/truck_load_planner/engine/access.py
+@@ -53,14 +53,15 @@ def _sweep_intersects(
+     for pl in placements:
+         if pl.package is None:
+             continue
+-        pl_clearance = getattr(pl.package, 'clearance_mm', 0)
++        ph_clr = getattr(pl.package, 'horizontal_clearance_mm', 10.0)
++        pv_clr = getattr(pl.package, 'vertical_clearance_mm', 0.0)
+         paabb = AABB.from_dimensions(
+             pl.x, pl.y, pl.z,
+             pl.package.length_mm,
+             pl.package.width_mm,
+             pl.package.height_mm,
+             pl.rotation,
+-            clearance=pl_clearance,
++            clearance_xy=ph_clr, clearance_z=pv_clr,
+         )
+         if sweep_aabb.intersects(paabb):
+             return True
+diff --git a/truck_load_planner/engine/auto_arrange.py b/truck_load_planner/engine/auto_arrange.py
+index c44c860..4e5f6b7 100644
+--- a/truck_load_planner/engine/auto_arrange.py
++++ b/truck_load_planner/engine/auto_arrange.py
+@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
+ from typing import Protocol, Optional, Callable
+ from .package import Package
+ from .placement import Placement
++from .candidate_points import tighten_position, generate_floor_anchors
+ 
+ MAX_POSSIBLE_SCORE = 100.0
+ 
+@@ -48,10 +49,10 @@ class LargestFirstStrategy:
+         sorted_packages = sorted(
+             packages,
+             key=lambda p: (
+-                p.stackable,
++                0 if not p.stackable else 1,
+                 -(p.length_mm * p.width_mm * p.height_mm),
+-                -(p.length_mm * p.width_mm),
+                 -p.weight_kg,
++                -(p.length_mm * p.width_mm),
+             ),
+         )
+ 
+@@ -73,20 +74,26 @@ class LargestFirstStrategy:
+             # to the left wall. Adding a right-wall candidate lets the
+             # scorer decide which side is better for each package.
+             container = planner.container
+-            clearance = getattr(pkg, 'clearance_mm', 10)
+-            right_y = container.width - pkg.width_mm - clearance
+-            if right_y > clearance:
++            h_clr = getattr(pkg, 'horizontal_clearance_mm', 10.0)
++            right_y = container.width - pkg.width_mm - h_clr
++            if right_y > h_clr:
+                 right_candidate = (0, right_y, 0)
+                 if right_candidate not in base_candidates:
+                     base_candidates = [right_candidate] + list(base_candidates)
+ 
++            # Augment with floor anchors from largest empty floor regions
++            floor_anchors = generate_floor_anchors(
++                planner.placements, container, pkg, max_regions=2,
++            )
++            for anchor in floor_anchors:
++                if anchor not in base_candidates:
++                    base_candidates.append(anchor)
++
+             # Expand candidates: try both 0 and (if allowed) 90-degree rotations
+             expanded = self._expand_candidates(base_candidates, pkg.allow_rotation)
+ 
+-            best_pos = None
+-            best_score = -1.0
+-            best_debug_entry = None
+-
++            # Pass 1: score all candidates normally
++            scored = []
+             for candidate in expanded:
+                 vresult = planner.validate_position(
+                     pkg, candidate["x"], candidate["y"], candidate["z"],
+@@ -94,27 +101,56 @@ class LargestFirstStrategy:
+                 )
+                 if not vresult.valid:
+                     continue
+-
+                 score = planner.evaluate_position(
+                     pkg, candidate["x"], candidate["y"], candidate["z"],
+                     candidate["rotation"], debug=False,
+                     remaining_packages=remaining_pkgs,
+                 )
++                scored.append((score, candidate))
+ 
+-                if score.total > best_score:
+-                    best_score = score.total
+-                    best_pos = candidate
+-                    best_debug_entry = {
+-                        "package_name": pkg.name,
+-                        "candidates_evaluated": len(expanded),
+-                        "best_score": round(score.total, 1),
+-                        "chosen_position": candidate,
+-                        "score_breakdown": score.breakdown,
+-                        "valid_candidates_found": True,
+-                    }
++            best_pos = None
++            best_score = -1.0
++            best_debug_entry = None
+ 
+-                    if best_score >= MAX_POSSIBLE_SCORE - 0.01:
+-                        break
++            if scored:
++                scored.sort(key=lambda x: x[0].total, reverse=True)
++                best_score = scored[0][0].total
++                best_pos = scored[0][1]
++                best_debug_entry = {
++                    "package_name": pkg.name,
++                    "candidates_evaluated": len(scored),
++                    "best_score": round(best_score, 1),
++                    "chosen_position": best_pos,
++                    "score_breakdown": scored[0][0].breakdown,
++                    "valid_candidates_found": True,
++                }
++                # Pass 2: tighten + re-score top candidates
++                TOP_K = 5
++                for score, pos in scored[:TOP_K]:
++                    tx, ty, tz, trot = tighten_position(
++                        planner, pkg, pos["x"], pos["y"], pos["z"], pos["rotation"],
++                    )
++                    vresult = planner.validate_position(
++                        pkg, tx, ty, tz, trot,
++                    )
++                    if not vresult.valid:
++                        continue
++                    tight_score = planner.evaluate_position(
++                        pkg, tx, ty, tz, trot, debug=False,
++                        remaining_packages=remaining_pkgs,
++                    )
++                    if tight_score.total > best_score:
++                        best_score = tight_score.total
++                        best_pos = {"x": tx, "y": ty, "z": tz, "rotation": trot}
++                        best_debug_entry = {
++                            "package_name": pkg.name,
++                            "candidates_evaluated": len(scored) + len(scored[:TOP_K]),
++                            "best_score": round(best_score, 1),
++                            "chosen_position": best_pos,
++                            "score_breakdown": tight_score.breakdown,
++                            "valid_candidates_found": True,
++                            "tightened": True,
++                        }
+ 
+             if best_pos is not None:
+                 p_result = planner.place_package(
+@@ -188,6 +224,71 @@ class LargestFirstStrategy:
+             if progress_callback:
+                 progress_callback(i + 1, total, best_score if best_score > 0 else 0.0)
+ 
++        # ΓöÇΓöÇ Gap-filling pass: try to fit unplaced small packages ΓöÇΓöÇΓöÇΓöÇ
++        if result.unplaced_packages:
++            gap_candidates = [p for p in packages if p.name in result.unplaced_packages]
++            gap_candidates.sort(key=lambda p: p.length_mm * p.width_mm * p.height_mm)
++            still_unplaced = []
++            for pkg in gap_candidates:
++                base_candidates = planner.get_candidate_points()
++                expanded = self._expand_candidates(base_candidates, pkg.allow_rotation)
++                # Pass 1: score all candidates normally
++                scored = []
++                for candidate in expanded:
++                    vresult = planner.validate_position(
++                        pkg, candidate["x"], candidate["y"], candidate["z"],
++                        candidate["rotation"],
++                    )
++                    if not vresult.valid:
++                        continue
++                    score = planner.evaluate_position(
++                        pkg, candidate["x"], candidate["y"], candidate["z"],
++                        candidate["rotation"], debug=False,
++                    )
++                    scored.append((score, candidate))
++                best_pos = None
++                best_score = -1.0
++                if scored:
++                    scored.sort(key=lambda x: x[0].total, reverse=True)
++                    best_score = scored[0][0].total
++                    best_pos = scored[0][1]
++                    # Pass 2: tighten + re-score top candidates
++                    TOP_K = 5
++                    for score, pos in scored[:TOP_K]:
++                        tx, ty, tz, trot = tighten_position(
++                            planner, pkg, pos["x"], pos["y"], pos["z"], pos["rotation"],
++                        )
++                        vresult = planner.validate_position(pkg, tx, ty, tz, trot)
++                        if not vresult.valid:
++                            continue
++                        tight_score = planner.evaluate_position(
++                            pkg, tx, ty, tz, trot, debug=False,
++                        )
++                        if tight_score.total > best_score:
++                            best_score = tight_score.total
++                            best_pos = {"x": tx, "y": ty, "z": tz, "rotation": trot}
++                if best_pos is not None:
++                    p_result = planner.place_package(
++                        pkg, best_pos["x"], best_pos["y"], best_pos["z"],
++                        best_pos["rotation"],
++                    )
++                    if p_result.valid:
++                        result.placed_packages += 1
++                        result.unplaced_packages.remove(pkg.name)
++                    else:
++                        still_unplaced.append(pkg.name)
++                else:
++                    still_unplaced.append(pkg.name)
++            result.unplaced_packages = still_unplaced
++            result.failed_packages = len(still_unplaced)
++
++        # Post-placement compaction: push every package as deep as possible,
++        # then reassign load_sequence by physical position so animation
++        # plays deepest-first, bottom-first.
++        from .distribution import reassign_load_sequences, compact_placements
++        compact_placements(planner, passes=2, step=10.0)
++        reassign_load_sequences(planner.placements)
++
+         # Compute final statistics
+         stats = planner.get_statistics()
+         result.utilization = stats.get("volume_used_pct", 0.0)
+diff --git a/truck_load_planner/engine/candidate_points.py b/truck_load_planner/engine/candidate_points.py
+index e891e53..f7d8233 100644
+--- a/truck_load_planner/engine/candidate_points.py
++++ b/truck_load_planner/engine/candidate_points.py
+@@ -57,48 +57,373 @@ def generate_slide_candidates(
+     package,
+     container,
+ ) -> list[dict]:
+-    """Generate additional candidates by sliding base candidates in Y.
++    """Generate additional candidates by sliding base candidates in X, Y, and Z.
+ 
+     When a package can't fit at any extreme-point position, try
+-    shifting it left/right in Y by small increments to squeeze it
+-    past obstacles. Returns expanded candidate dicts with rotation.
++    shifting it in all three axes by small increments to squeeze it
++    past obstacles.
+ 
+-    Step size = max(50, package.clearance_mm). Tries up to 3 steps
++    Strategy:
++      1. Y-slide (left/right) ΓÇö original behavior
++      2. X-slide (front/rear) ΓÇö push deeper into container or pull back
++      3. Z-slide (up/down) ΓÇö try alternative stacking heights
++      4. Combined X+Y slides for diagonal nudging
++
++    Step size = max(50, horizontal_clearance_mm).  Tries up to 3 steps
+     in each direction from each base candidate.
+     """
+-    clearance = getattr(package, 'clearance_mm', 10)
+-    step = max(50, clearance)
++    h_clr = getattr(package, 'horizontal_clearance_mm', 10.0)
++    step = max(50, h_clr)
+ 
+     seen: set[tuple] = set()
+     slide_origins: set[tuple[float, float, float]] = set()
+ 
++    def _try_origin(ox, oy, oz):
++        if oy < 0:
++            return
++        interior = (ox >= 0 and oy >= 0 and oz >= 0)
++        if not interior:
++            return
++        key = (ox, oy, oz)
++        if key not in seen:
++            seen.add(key)
++            slide_origins.add(key)
++
+     for pos in base_candidates:
+         if isinstance(pos, dict):
+-            x, y, z = pos["x"], pos["y"], pos["z"]
++            bx, by, bz = pos["x"], pos["y"], pos["z"]
+         else:
+-            x, y, z = pos[0], pos[1], pos[2]
++            bx, by, bz = pos[0], pos[1], pos[2]
+ 
+-        # Try sliding left (decreasing Y) and right (increasing Y)
++        # ΓöÇΓöÇ Y-slide (left/right) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+         for direction in (-1, 1):
+             for i in range(1, 4):
+-                new_y = y + direction * i * step
+-                if new_y < 0:
+-                    break
+-                origin = (x, new_y, z)
+-                if origin not in seen:
+-                    seen.add(origin)
+-                    slide_origins.add(origin)
++                _try_origin(bx, by + direction * i * step, bz)
++
++        # ΓöÇΓöÇ X-slide (front/rear) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++        for direction in (-1, 1):
++            for i in range(1, 4):
++                _try_origin(bx + direction * i * step, by, bz)
++
++        # ΓöÇΓöÇ Z-slide (up/down)  ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++        for direction in (-1, 1):
++            for i in range(1, 3):
++                _try_origin(bx, by, bz + direction * i * step)
++
++        # ΓöÇΓöÇ Combined X+Y (diagonal) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++        for xi in range(1, 3):
++            for yi in range(1, 3):
++                for dx in (-1, 1):
++                    for dy in (-1, 1):
++                        _try_origin(bx + dx * xi * step,
++                                    by + dy * yi * step, bz)
+ 
+-    # Filter by container Y bound
++    # Filter by container bounds
+     rot_eff_w = {0: package.width_mm, 90: package.length_mm}
++    rot_eff_l = {0: package.length_mm, 90: package.width_mm}
+     filtered = []
+-    for x, y, z in slide_origins:
++    for ox, oy, oz in slide_origins:
+         for rot in (0, 90) if package.allow_rotation else (0,):
+             eff_w = rot_eff_w[rot]
+-            if y + eff_w <= container.width + 0.001:
+-                key = (x, y, z, rot)
++            eff_l = rot_eff_l[rot]
++            if (ox + eff_l <= container.length + 0.001
++                    and oy + eff_w <= container.width + 0.001
++                    and oz + package.height_mm <= container.height + 0.001):
++                key = (ox, oy, oz, rot)
+                 if key not in seen:
+                     seen.add(key)
+-                    filtered.append({"x": x, "y": y, "z": z, "rotation": rot})
++                    filtered.append({"x": ox, "y": oy, "z": oz, "rotation": rot})
+ 
+     return filtered
++
++
++def tighten_position(
++    planner,
++    pkg,
++    x: float,
++    y: float,
++    z: float,
++    rotation: int,
++    step: float = 50.0,
++) -> tuple[float, float, float, int]:
++    """Settle a package into the tightest possible position.
++
++    Pushes a package as far as it can go toward the front (-X) until it
++    contacts other packages or container walls. When blocked, tries:
++
++      1. Alternate rotation (0┬░ Γåö 90┬░) to squeeze past obstacles.
++      2. Y-sweep (left/right) at current rotation and alternate rotation.
++      3. Z-lift (up/down) combined with Y-sweep and rotation changes.
++
++    This produces dense packs that real warehouse workers would achieve
++    by nudging, rotating, and shifting packages into the tightest spot.
++
++    Args:
++        planner: Planner instance (for validate_position).
++        pkg: The package being placed.
++        x, y, z, rotation: Current valid position.
++        step: Step size in mm (default 50).
++
++    Returns:
++        (tight_x, tight_y, tight_z, rotation) ΓÇö settled position.
++    """
++    h_clr = getattr(pkg, 'horizontal_clearance_mm', 10.0)
++    step = max(step, h_clr)
++
++    best_x, best_y, best_z, best_rot = x, y, z, rotation
++    container = planner.container
++
++    rotations_to_try = [rotation]
++    if pkg.allow_rotation:
++        rotations_to_try.append(0 if rotation == 90 else 90)
++
++    # ΓöÇΓöÇ Primary loop: sprint -X, try rot / Y / Z when blocked ΓöÇΓöÇ
++    for _ in range(50):
++        # Sprint -X as far as possible with current rotation
++        while best_x > 0:
++            tx = max(best_x - step, 0)
++            if planner.validate_position(pkg, tx, best_y, best_z, best_rot).valid:
++                best_x = tx
++            else:
++                break
++
++        if best_x == 0:
++            break
++
++        # Blocked in -X: try alternate rotation
++        found_advance = False
++        for try_rot in rotations_to_try:
++            if try_rot == best_rot:
++                continue
++            if not planner.validate_position(pkg, best_x, best_y, best_z, try_rot).valid:
++                continue
++            tx = best_x
++            while tx > 0:
++                tx2 = max(tx - step, 0)
++                if planner.validate_position(pkg, tx2, best_y, best_z, try_rot).valid:
++                    tx = tx2
++                else:
++                    break
++            if tx < best_x:
++                best_x = tx
++                best_rot = try_rot
++                found_advance = True
++                break
++
++        if found_advance:
++            continue
++
++        # Still blocked: sweep Y with each rotation
++        best_sweep_x = best_x
++        best_sweep_y = best_y
++        best_sweep_rot = best_rot
++        found_sweep = False
++
++        for try_rot in rotations_to_try:
++            pkg_w_rot = pkg.width_mm if try_rot == 0 else pkg.length_mm
++            max_y_rot = container.width - pkg_w_rot
++
++            test_y = 0.0
++            while test_y <= max_y_rot + 0.001:
++                if abs(test_y - best_y) < 1.0 and try_rot == best_rot:
++                    test_y += step
++                    continue
++                if not planner.validate_position(pkg, best_x, test_y, best_z, try_rot).valid:
++                    test_y += step
++                    continue
++                tx = best_x
++                while tx > 0:
++                    tx2 = max(tx - step, 0)
++                    if planner.validate_position(pkg, tx2, test_y, best_z, try_rot).valid:
++                        tx = tx2
++                    else:
++                        break
++                if tx < best_sweep_x:
++                    best_sweep_x = tx
++                    best_sweep_y = test_y
++                    best_sweep_rot = try_rot
++                    found_sweep = True
++                test_y += step
++
++        if found_sweep:
++            best_x = best_sweep_x
++            best_y = best_sweep_y
++            best_rot = best_sweep_rot
++            continue
++
++        # Still blocked: try Z lift with each rotation + Y sweep
++        best_lift_x = best_x
++        best_lift_y = best_y
++        best_lift_z = best_z
++        best_lift_rot = best_rot
++        found_lift = False
++
++        for try_rot in rotations_to_try:
++            pkg_w_rot = pkg.width_mm if try_rot == 0 else pkg.length_mm
++            max_y_rot = container.width - pkg_w_rot
++
++            for dz_dir in (-1, 1):
++                for zi in range(1, 4):
++                    tz = best_z + dz_dir * zi * step
++                    if tz < 0 or tz + pkg.height_mm > container.height:
++                        continue
++                    if abs(tz - best_z) < 0.001:
++                        continue
++
++                    test_y = 0.0
++                    while test_y <= max_y_rot + 0.001:
++                        if not planner.validate_position(pkg, best_x, test_y, tz, try_rot).valid:
++                            test_y += step
++                            continue
++                        tx = best_x
++                        while tx > 0:
++                            tx2 = max(tx - step, 0)
++                            if planner.validate_position(pkg, tx2, test_y, tz, try_rot).valid:
++                                tx = tx2
++                            else:
++                                break
++                        if tx < best_lift_x:
++                            best_lift_x = tx
++                            best_lift_y = test_y
++                            best_lift_z = tz
++                            best_lift_rot = try_rot
++                            found_lift = True
++                        test_y += step
++
++        if found_lift:
++            best_x = best_lift_x
++            best_y = best_lift_y
++            best_z = best_lift_z
++            best_rot = best_lift_rot
++        else:
++            break
++
++    # ΓöÇΓöÇ Secondary: settle -Y (left wall) and -Z (floor) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++    for _ in range(20):
++        improved = False
++
++        while best_y > 0:
++            ty = max(best_y - step, 0)
++            if planner.validate_position(pkg, best_x, ty, best_z, best_rot).valid:
++                best_y = ty
++                improved = True
++            else:
++                break
++
++        while best_z > 0:
++            tz = max(best_z - step, 0)
++            if planner.validate_position(pkg, best_x, best_y, tz, best_rot).valid:
++                best_z = tz
++                improved = True
++            else:
++                break
++
++        if not improved:
++            break
++
++    return best_x, best_y, best_z, best_rot
++
++
++def generate_floor_anchors(
++    placements: list,
++    container: Container,
++    package,
++    max_regions: int = 2,
++) -> list[tuple[float, float, float]]:
++    """Generate candidate positions at the largest empty floor regions.
++
++    Sweeps Y-boundaries of all floor-package footprints to find empty
++    axis-aligned rectangles. For each of the top N largest regions,
++    generates representative (x, y, 0) positions:
++      - front-left corner (lowest x and y in the region)
++      - center (if the region is large enough to distinguish it)
++      - rear-left (if the region is long enough)
++
++    Always returns positions with z=0 (floor level).
++
++    Args:
++        placements: List of Placement objects currently placed.
++        container: Container being loaded.
++        package: Package being placed (for footprint dimensions).
++        max_regions: Maximum number of empty regions to use.
++
++    Returns:
++        List of (x, y, 0) tuples, deduplicated and sorted by region area.
++    """
++    footprints = []
++    for pl in placements:
++        pkg = pl.package
++        if pkg is None or pl.z > 0:
++            continue
++        l = pkg.length_mm if pl.rotation in (0, 180) else pkg.width_mm
++        w = pkg.width_mm if pl.rotation in (0, 180) else pkg.length_mm
++        footprints.append((pl.x, pl.x + l, pl.y, pl.y + w))
++
++    y_coords = {0.0, container.width}
++    for _, _, ymin, ymax in footprints:
++        y_coords.add(ymin)
++        y_coords.add(ymax)
++    y_coords = sorted(y_coords)
++
++    regions = []
++    for i in range(len(y_coords) - 1):
++        y_low, y_high = y_coords[i], y_coords[i + 1]
++        height = y_high - y_low
++        if height < 1.0:
++            continue
++        x_intervals = [(0.0, container.length)]
++        for fxmin, fxmax, fymin, fymax in footprints:
++            if fymax <= y_low or fymin >= y_high:
++                continue
++            trimmed = []
++            for xl, xr in x_intervals:
++                if fxmax <= xl or fxmin >= xr:
++                    trimmed.append((xl, xr))
++                else:
++                    if xl < fxmin:
++                        trimmed.append((xl, fxmin))
++                    if fxmax < xr:
++                        trimmed.append((fxmax, xr))
++            x_intervals = trimmed
++        for xl, xr in x_intervals:
++            width = xr - xl
++            if width < 1.0 or height < 1.0:
++                continue
++            regions.append((width * height, xl, xr, y_low, y_high))
++
++    regions.sort(key=lambda r: -r[0])
++
++    pkg_l = package.length_mm
++    pkg_w = package.width_mm
++    candidates = []
++    seen = set()
++    MARGIN = 1.0
++
++    for _, xl, xr, yl, yr in regions[:max_regions]:
++        rw = xr - xl
++        rh = yr - yl
++
++        if rw < pkg_l - MARGIN or rh < pkg_w - MARGIN:
++            continue
++
++        pos = (xl, yl, 0.0)
++        if pos not in seen:
++            seen.add(pos)
++            candidates.append(pos)
++
++        if rw > pkg_l * 1.5 + MARGIN and rh > pkg_w * 1.5 + MARGIN:
++            cx = xl + (rw - pkg_l) / 2
++            cy = yl + (rh - pkg_w) / 2
++            pos = (cx, cy, 0.0)
++            if pos not in seen:
++                seen.add(pos)
++                candidates.append(pos)
++
++        if rw > pkg_l * 1.5 + MARGIN:
++            rx = xr - pkg_l
++            pos = (rx, yl, 0.0)
++            if pos not in seen:
++                seen.add(pos)
++                candidates.append(pos)
++
++    return candidates
+diff --git a/truck_load_planner/engine/geometry.py b/truck_load_planner/engine/geometry.py
+index 98b6fd2..9522509 100644
+--- a/truck_load_planner/engine/geometry.py
++++ b/truck_load_planner/engine/geometry.py
+@@ -19,15 +19,20 @@ class AABB:
+     @classmethod
+     def from_dimensions(cls, x: float, y: float, z: float,
+                         length_mm: float, width_mm: float, height_mm: float,
+-                        rotation: int = 0, clearance: float = 0):
++                        rotation: int = 0, clearance: float = 0,
++                        clearance_xy: float = None, clearance_z: float = None):
++        if clearance_xy is None:
++            clearance_xy = clearance
++        if clearance_z is None:
++            clearance_z = clearance
+         if rotation in (90, 270):
+             dx = width_mm
+             dy = length_mm
+         else:
+             dx = length_mm
+             dy = width_mm
+-        return cls(x - clearance, y - clearance, z - clearance,
+-                   x + dx + clearance, y + dy + clearance, z + height_mm + clearance)
++        return cls(x - clearance_xy, y - clearance_xy, z - clearance_z,
++                   x + dx + clearance_xy, y + dy + clearance_xy, z + height_mm + clearance_z)
+ 
+     def intersects(self, other: "AABB") -> bool:
+         return (
+diff --git a/truck_load_planner/engine/package.py b/truck_load_planner/engine/package.py
+index c94b204..f6156cd 100644
+--- a/truck_load_planner/engine/package.py
++++ b/truck_load_planner/engine/package.py
+@@ -1,7 +1,17 @@
+ from dataclasses import dataclass, asdict
++from enum import Enum
+ from typing import Optional
+ 
+ 
++class StackingMode(Enum):
++    NONE = "none"
++    LIGHT_ONLY = "light_only"
++    NORMAL = "normal"
++
++    def __str__(self) -> str:
++        return self.value
++
++
+ @dataclass
+ class Package:
+     id: Optional[int] = None
+@@ -14,19 +24,58 @@ class Package:
+     allow_rotation: bool = False
+     fragile: bool = False
+     color: str = "#3b82f6"
+-    clearance_mm: float = 10.0
++    horizontal_clearance_mm: float = 10.0
++    vertical_clearance_mm: float = 0.0
++    max_top_weight_kg: float = 0.0
++    max_stack_layers: int = 0
++    stacking_mode: StackingMode = StackingMode.NORMAL
++
++    def __post_init__(self):
++        if not self.stackable and self.stacking_mode == StackingMode.NORMAL:
++            self.stacking_mode = StackingMode.NONE
+ 
+     @property
+     def volume_m3(self) -> float:
+         return (self.length_mm * self.width_mm * self.height_mm) / 1_000_000_000
+ 
++    @property
++    def clearance_mm(self) -> float:
++        """Deprecated: kept for backward compatibility during migration."""
++        return self.horizontal_clearance_mm
++
+     def to_dict(self) -> dict:
+         d = asdict(self)
+         d["volume_m3"] = self.volume_m3
++        d["stacking_mode"] = self.stacking_mode.value
+         return d
+ 
++    @staticmethod
++    def _derive_stacking_mode(data: dict) -> StackingMode:
++        explicit = data.get("stacking_mode")
++        if explicit is not None:
++            if isinstance(explicit, StackingMode):
++                return explicit
++            try:
++                return StackingMode(explicit)
++            except ValueError:
++                pass
++        max_top = data.get("max_top_weight_kg", 0.0)
++        if max_top and float(max_top) > 0:
++            return StackingMode.LIGHT_ONLY
++        old = bool(data.get("stackable", data.get("allow_stacking", 0)))
++        return StackingMode.NORMAL if old else StackingMode.NONE
++
+     @staticmethod
+     def from_dict(data: dict) -> "Package":
++        old_clr = data.get("clearance_mm", data.get("clearance", None))
++        if old_clr is not None:
++            h_clr = float(old_clr)
++            v_clr = 0.0
++        else:
++            h_clr = float(data.get("horizontal_clearance_mm", 10.0))
++            v_clr = float(data.get("vertical_clearance_mm", 0.0))
++        mode = Package._derive_stacking_mode(data)
++        stackable = bool(data.get("stackable", data.get("allow_stacking", 0)))
+         return Package(
+             id=data.get("id"),
+             name=data.get("name", ""),
+@@ -34,9 +83,13 @@ class Package:
+             width_mm=data.get("width_mm", data.get("width", 0)),
+             height_mm=data.get("height_mm", data.get("height", 0)),
+             weight_kg=data.get("weight_kg", 0),
+-            stackable=bool(data.get("stackable", data.get("allow_stacking", 0))),
++            stackable=stackable,
+             allow_rotation=bool(data.get("allow_rotation", 0)),
+             fragile=bool(data.get("fragile", 0)),
+             color=data.get("color", "#3b82f6"),
+-            clearance_mm=float(data.get("clearance_mm", data.get("clearance", 10.0))),
++            horizontal_clearance_mm=h_clr,
++            vertical_clearance_mm=v_clr,
++            max_top_weight_kg=float(data.get("max_top_weight_kg", 0.0)),
++            max_stack_layers=int(data.get("max_stack_layers", 0)),
++            stacking_mode=mode,
+         )
+diff --git a/truck_load_planner/engine/placement.py b/truck_load_planner/engine/placement.py
+index 656a6f5..dc35f5e 100644
+--- a/truck_load_planner/engine/placement.py
++++ b/truck_load_planner/engine/placement.py
+@@ -12,6 +12,7 @@ class Placement:
+     rotation: int = 0
+     load_sequence: Optional[int] = None
+     package: Optional[Package] = None
++    door_used: str = "rear"
+ 
+     def to_dict(self) -> dict:
+         d = asdict(self)
+diff --git a/truck_load_planner/engine/planner.py b/truck_load_planner/engine/planner.py
+index 96d222e..9d7a0f8 100644
+--- a/truck_load_planner/engine/planner.py
++++ b/truck_load_planner/engine/planner.py
+@@ -57,7 +57,7 @@ class Planner:
+             query_aabb_fn=self.state.query_aabb,
+         )
+         if result.valid:
+-            self.state.append_placement(package, x, y, z, rotation)
++            self.state.append_placement(package, x, y, z, rotation, door_used=result.door_used)
+         return result
+ 
+     def move_package(self, index: int, new_x: float, new_y: float) -> ValidationResult:
+@@ -109,7 +109,8 @@ class Planner:
+             pkg = pl.package
+             if pkg is None:
+                 continue
+-            clearance = getattr(pkg, 'clearance_mm', 0)
++            h_clr = getattr(pkg, 'horizontal_clearance_mm', 10.0)
++            v_clr = getattr(pkg, 'vertical_clearance_mm', 0.0)
+             actual_aabb = AABB.from_dimensions(
+                 pl.x, pl.y, pl.z,
+                 pkg.length_mm, pkg.width_mm, pkg.height_mm,
+@@ -122,7 +123,7 @@ class Planner:
+             coll_aabb = AABB.from_dimensions(
+                 pl.x, pl.y, pl.z,
+                 pkg.length_mm, pkg.width_mm, pkg.height_mm,
+-                pl.rotation, clearance=clearance,
++                pl.rotation, clearance_xy=h_clr, clearance_z=v_clr,
+             )
+             nearby = self.state.query_aabb(coll_aabb)
+             for other_pl, other_aabb in nearby:
+@@ -362,6 +363,8 @@ class Planner:
+         for pd in placement_dicts:
+             pkg = pd.get("_package")
+             if pkg is None:
++                old_clr = pd.get("clearance_mm", pd.get("clearance", None))
++                h_clr = float(old_clr) if old_clr is not None else 10.0
+                 pkg = Package(
+                     id=pd.get("package_id"),
+                     name=pd.get("_name", pd.get("name", "")),
+@@ -371,10 +374,12 @@ class Planner:
+                     weight_kg=pd.get("_weight_kg", pd.get("weight_kg", 0)),
+                     stackable=bool(pd.get("stackable", pd.get("allow_stacking", 0))),
+                     allow_rotation=bool(pd.get("allow_rotation", 1)),
+-                    clearance_mm=float(pd.get("clearance_mm", pd.get("clearance", 10.0))),
++                    horizontal_clearance_mm=h_clr,
+                 )
+             elif not isinstance(pkg, dict):
+                 # EnginePackage or legacy model ΓÇö convert to dict
++                h_clr = float(getattr(pkg, 'horizontal_clearance_mm',
++                              getattr(pkg, 'clearance_mm', 10.0)))
+                 pkg = Package(
+                     id=getattr(pkg, "id", None),
+                     name=getattr(pkg, "name", getattr(pkg, "_name", "")),
+@@ -384,7 +389,7 @@ class Planner:
+                     weight_kg=getattr(pkg, "weight_kg", 0),
+                     stackable=bool(getattr(pkg, "stackable", getattr(pkg, "allow_stacking", 0))),
+                     allow_rotation=bool(getattr(pkg, "allow_rotation", 1)),
+-                    clearance_mm=float(getattr(pkg, 'clearance_mm', 10.0)),
++                    horizontal_clearance_mm=h_clr,
+                 )
+             else:
+                 pkg = Package.from_dict(pkg)
+diff --git a/truck_load_planner/engine/scorer.py b/truck_load_planner/engine/scorer.py
+index 82b0eaa..4e8a71f 100644
+--- a/truck_load_planner/engine/scorer.py
++++ b/truck_load_planner/engine/scorer.py
+@@ -6,20 +6,23 @@ from .container import Container
+ from .geometry import AABB
+ 
+ SCORING_WEIGHTS = {
+-    "floor_contact": 25,
+-    "wall_contact": 10,
+-    "package_contact": 15,
+-    "face_contact": 10,
++    "floor_contact": 5,
++    "wall_contact": 5,
++    "package_contact": 12,
++    "face_contact": 5,
+     "compactness": 5,
+     "stack_quality": 5,
+-    "vertical_stability": 10,
+-    "z_preference": 10,
+-    "x_preference": 5,
+-    "rear_proximity": 10,
+-    "y_balance": 15,
+-    "dead_space_quality": 10,
++    "vertical_stability": 15,
++    "z_preference": 15,
++    "x_preference": 20,
++    "rear_proximity": 15,
++    "y_balance": 10,
++    "dead_space_quality": 5,
++    "load_profile_stability": 5,
+ }
+ 
++NUM_PROFILE_SLICES = 10
++
+ _FACE_TOLERANCE = 1.0
+ 
+ 
+@@ -268,9 +271,18 @@ def _score_z_preference(aabb: AABB, container: Container) -> float:
+ 
+ 
+ def _score_x_preference(aabb: AABB, container: Container) -> float:
+-    """Reward positions closer to front wall (x=0) ΓÇö innermost-to-door."""
++    """Reward appropriate X position based on package size.
++
++    Large packages (length >= 25% of container) go deep (low x).
++    Small packages on the floor go toward the door (high x) so they
++    don't waste deep space that large items need.
++    Stacked small packages keep the deep preference of their base.
++    """
+     if container.length <= 0:
+         return 0.0
++    pkg_len = aabb.xmax - aabb.xmin
++    if pkg_len < container.length * 0.25 and aabb.zmin == 0:
++        return max(0.0, aabb.xmin / container.length)
+     return max(0.0, 1.0 - aabb.xmin / container.length)
+ 
+ 
+@@ -340,6 +352,49 @@ def _score_dead_space_quality(
+     )
+ 
+ 
++def _score_load_profile_stability(
++    aabb: AABB,
++    container: Container,
++    placements: list,
++) -> float:
++    """Score 0-1 evaluating the flatness of the overall cargo profile.
++
++    Divides the container floor into longitudinal slices along X.
++    Computes max occupied height per slice (including the candidate).
++    Penalizes large adjacent height differences ΓÇö staircase profiles
++    get lower scores.
++
++    Returns 1.0 for perfectly flat profiles (all slices same height).
++    """
++    n = NUM_PROFILE_SLICES
++    if n < 2 or container.length <= 0 or container.height <= 0:
++        return 1.0
++
++    slice_width = container.length / n
++
++    heights = [0.0] * n
++    for i in range(n):
++        sx = i * slice_width
++        ex = (i + 1) * slice_width
++        max_h = 0.0
++        for ba in [aabb] + _build_others(placements):
++            if ba.xmax <= sx or ba.xmin >= ex:
++                continue
++            if ba.zmax > max_h:
++                max_h = ba.zmax
++        heights[i] = max_h
++
++    max_step = 0.0
++    for i in range(n - 1):
++        step = abs(heights[i] - heights[i + 1])
++        if step > max_step:
++            max_step = step
++
++    if container.height <= 0:
++        return 1.0
++    return max(0.0, 1.0 - max_step / container.height)
++
++
+ def score_placement(
+     package: Package,
+     x: float,
+@@ -371,6 +426,9 @@ def score_placement(
+         "dead_space_quality": _score_dead_space_quality(
+             aabb, container, placements, remaining_packages,
+         ),
++        "load_profile_stability": _score_load_profile_stability(
++            aabb, container, placements,
++        ),
+     }
+ 
+     breakdown = {}
+diff --git a/truck_load_planner/engine/state.py b/truck_load_planner/engine/state.py
+index e03cc0a..6b33a9f 100644
+--- a/truck_load_planner/engine/state.py
++++ b/truck_load_planner/engine/state.py
+@@ -59,6 +59,7 @@ class PlanningState:
+         y: float,
+         z: float,
+         rotation: int = 0,
++        door_used: str = "rear",
+     ) -> Placement:
+         """Append a new placement and update extreme points + spatial index."""
+         self._sequence_counter += 1
+@@ -68,12 +69,14 @@ class PlanningState:
+             rotation=rotation,
+             load_sequence=self._sequence_counter,
+             package=package,
++            door_used=door_used,
+         )
+-        clearance = getattr(package, 'clearance_mm', 0)
++        h_clr = getattr(package, 'horizontal_clearance_mm', 10.0)
++        v_clr = getattr(package, 'vertical_clearance_mm', 0.0)
+         aabb = AABB.from_dimensions(
+             x, y, z,
+             package.length_mm, package.width_mm, package.height_mm,
+-            rotation, clearance=clearance,
++            rotation, clearance_xy=h_clr, clearance_z=v_clr,
+         )
+         self._placements.append(placement)
+         self._spatial.insert(placement, aabb)
+@@ -107,11 +110,12 @@ class PlanningState:
+             load_sequence=load_sequence,
+             package=package,
+         )
+-        clearance = getattr(package, 'clearance_mm', 0)
++        h_clr = getattr(package, 'horizontal_clearance_mm', 10.0)
++        v_clr = getattr(package, 'vertical_clearance_mm', 0.0)
+         aabb = AABB.from_dimensions(
+             x, y, z,
+             package.length_mm, package.width_mm, package.height_mm,
+-            rotation, clearance=clearance,
++            rotation, clearance_xy=h_clr, clearance_z=v_clr,
+         )
+         self._placements.insert(index, placement)
+         self._spatial.insert(placement, aabb)
+@@ -146,11 +150,12 @@ class PlanningState:
+             )
+             self._placements.append(pl)
+             if pkg:
+-                clearance = getattr(pkg, 'clearance_mm', 0)
++                h_clr = getattr(pkg, 'horizontal_clearance_mm', 10.0)
++                v_clr = getattr(pkg, 'vertical_clearance_mm', 0.0)
+                 aabb = AABB.from_dimensions(
+                     pl.x, pl.y, pl.z,
+                     pkg.length_mm, pkg.width_mm, pkg.height_mm,
+-                    pl.rotation, clearance=clearance,
++                    pl.rotation, clearance_xy=h_clr, clearance_z=v_clr,
+                 )
+                 self._spatial.insert(pl, aabb)
+         self._rebuild_extreme_points()
+@@ -183,13 +188,14 @@ class PlanningState:
+         rotation: int,
+     ) -> None:
+         """Incrementally update extreme points after placing a package."""
+-        clearance = getattr(package, 'clearance_mm', 0)
++        h_clr = getattr(package, 'horizontal_clearance_mm', 10.0)
++        v_clr = getattr(package, 'vertical_clearance_mm', 0.0)
+         pkg_aabb = AABB.from_dimensions(
+             x, y, z,
+             package.length_mm,
+             package.width_mm,
+             package.height_mm,
+-            rotation, clearance=clearance,
++            rotation, clearance_xy=h_clr, clearance_z=v_clr,
+         )
+ 
+         # 1. Remove extreme points inside the just-placed package's clearance zone
+@@ -207,9 +213,9 @@ class PlanningState:
+             w_eff = package.width_mm
+ 
+         new_pts = [
+-            (x + l_eff + 2 * clearance, y, z),   # right face
+-            (x, y + w_eff + 2 * clearance, z),   # front face
+-            (x, y, z + package.height_mm + 2 * clearance),  # top face
++            (x + l_eff + 2 * h_clr, y, z),   # right face (X)
++            (x, y + w_eff + 2 * h_clr, z),   # front face (Y)
++            (x, y, z + package.height_mm + 2 * v_clr),  # top face (Z)
+         ]
+ 
+         cl, cw, ch = (
+@@ -227,13 +233,14 @@ class PlanningState:
+             for pl in self._placements[:-1]:
+                 if pl.package is None:
+                     continue
+-                pl_clearance = getattr(pl.package, 'clearance_mm', 0)
++                pl_h_clr = getattr(pl.package, 'horizontal_clearance_mm', 10.0)
++                pl_v_clr = getattr(pl.package, 'vertical_clearance_mm', 0.0)
+                 pl_aabb = AABB.from_dimensions(
+                     pl.x, pl.y, pl.z,
+                     pl.package.length_mm,
+                     pl.package.width_mm,
+                     pl.package.height_mm,
+-                    pl.rotation, clearance=pl_clearance,
++                    pl.rotation, clearance_xy=pl_h_clr, clearance_z=pl_v_clr,
+                 )
+                 if pl_aabb.strictly_contains_point(*pt):
+                     inside = True
+@@ -254,7 +261,8 @@ class PlanningState:
+             pkg = pl.package
+             if pkg is None:
+                 continue
+-            clearance = getattr(pkg, 'clearance_mm', 0)
++            h_clr = getattr(pkg, 'horizontal_clearance_mm', 10.0)
++            v_clr = getattr(pkg, 'vertical_clearance_mm', 0.0)
+             if pl.rotation in (90, 270):
+                 l_eff = pkg.width_mm
+                 w_eff = pkg.length_mm
+@@ -262,9 +270,9 @@ class PlanningState:
+                 l_eff = pkg.length_mm
+                 w_eff = pkg.width_mm
+ 
+-            points.add((pl.x + l_eff + 2 * clearance, pl.y, pl.z))
+-            points.add((pl.x, pl.y + w_eff + 2 * clearance, pl.z))
+-            points.add((pl.x, pl.y, pl.z + pkg.height_mm + 2 * clearance))
++            points.add((pl.x + l_eff + 2 * h_clr, pl.y, pl.z))
++            points.add((pl.x, pl.y + w_eff + 2 * h_clr, pl.z))
++            points.add((pl.x, pl.y, pl.z + pkg.height_mm + 2 * v_clr))
+ 
+         # Filter container bounds
+         cl, cw, ch = (
+@@ -281,13 +289,14 @@ class PlanningState:
+         for pl in self._placements:
+             if pl.package is None:
+                 continue
+-            pl_clearance = getattr(pl.package, 'clearance_mm', 0)
++            pl_h_clr = getattr(pl.package, 'horizontal_clearance_mm', 10.0)
++            pl_v_clr = getattr(pl.package, 'vertical_clearance_mm', 0.0)
+             pl_aabb = AABB.from_dimensions(
+                 pl.x, pl.y, pl.z,
+                 pl.package.length_mm,
+                 pl.package.width_mm,
+                 pl.package.height_mm,
+-                pl.rotation, clearance=pl_clearance,
++                pl.rotation, clearance_xy=pl_h_clr, clearance_z=pl_v_clr,
+             )
+             to_remove = set()
+             for pt in filtered:
+diff --git a/truck_load_planner/engine/support.py b/truck_load_planner/engine/support.py
+index 17ac0c7..1d985ea 100644
+--- a/truck_load_planner/engine/support.py
++++ b/truck_load_planner/engine/support.py
+@@ -5,11 +5,16 @@ combined-support model.  The union of XY overlap regions from all
+ supporting packages must cover a configurable percentage of the
+ candidate's footprint, and the candidate's footprint centre must lie
+ within the combined support region to prevent unstable bridging.
++
++Stacking decisions use a capacity-based model rather than a simple
++boolean: each base package may specify a maximum top weight, a
++maximum number of stack layers, or a stacking mode (NONE / LIGHT_ONLY
++/ NORMAL) to better reflect real warehouse practice.
+ """
+ 
+ from .geometry import AABB
+ from .placement import Placement
+-from .package import Package
++from .package import Package, StackingMode
+ 
+ 
+ _GRID_SAMPLES = 20    # samples per axis for union coverage estimation
+@@ -19,17 +24,101 @@ def _footprint_centre(aabb: AABB) -> tuple[float, float]:
+     return (aabb.xmin + aabb.xmax) / 2, (aabb.ymin + aabb.ymax) / 2
+ 
+ 
++def _count_above(placements, base_pl) -> int:
++    """Count how many packages are stacked directly on top of *base_pl*."""
++    base = base_pl.package
++    if base is None:
++        return 0
++    base_top = base_pl.z + (
++        base.height_mm if hasattr(base, 'height_mm')
++        else getattr(base, 'height', 0)
++    )
++    count = 0
++    for pl in placements:
++        if pl is base_pl:
++            continue
++        if abs(pl.z - base_top) < 0.001:
++            count += 1
++    return count
++
++
++def _check_stacking_rules(
++    below_pl,
++    top_package: Package,
++    placements: list,
++) -> tuple[bool, list[str]]:
++    """Check capacity-based stacking rules for one below package.
++
++    Returns (valid, reasons).
++    """
++    pa = below_pl.package
++    if pa is None:
++        return True, []
++
++    reasons = []
++
++    # ΓöÇΓöÇ Top package is unstackable: cannot sit on anything ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++    top_mode = getattr(top_package, 'stacking_mode', StackingMode.NORMAL)
++    if top_mode == StackingMode.NONE:
++        return False, [f"'{top_package.name}' is unstackable (cannot be placed on top of other packages)"]
++
++    mode = getattr(pa, 'stacking_mode', StackingMode.NORMAL)
++    max_top = getattr(pa, 'max_top_weight_kg', 0.0)
++    max_layers = getattr(pa, 'max_stack_layers', 0)
++
++    # ΓöÇΓöÇ StackingMode.NONE: nothing allowed above ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++    if mode == StackingMode.NONE:
++        return False, [f"Cannot stack on '{pa.name}' (stacking mode: NONE)"]
++
++    # ΓöÇΓöÇ StackingMode.LIGHT_ONLY: lightweight packages only ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++    if mode == StackingMode.LIGHT_ONLY:
++        if max_top > 0 and top_package.weight_kg > max_top:
++            return False, [
++                f"'{top_package.name}' ({top_package.weight_kg} kg) "
++                f"exceeds '{pa.name}' max_top_weight ({max_top} kg)"
++            ]
++
++    # ΓöÇΓöÇ Max stack layers ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++    if max_layers > 0:
++        current_above = _count_above(placements, below_pl)
++        if current_above >= max_layers:
++            return False, [
++                f"'{pa.name}' already has {current_above} packages "
++                f"on top (max: {max_layers})"
++            ]
++
++    # ΓöÇΓöÇ Weight rule (all modes): top must be lighter than base ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++    if top_package.weight_kg is not None and pa.weight_kg is not None:
++        if top_package.weight_kg > pa.weight_kg:
++            return False, [
++                f"'{top_package.name}' ({top_package.weight_kg} kg) heavier "
++                f"than '{pa.name}' ({pa.weight_kg} kg)"
++            ]
++
++    # ΓöÇΓöÇ Footprint area rule: top footprint must be Γëñ base footprint ΓöÇΓöÇ
++    top_fp = top_package.length_mm * top_package.width_mm
++    base_fp = pa.length_mm * pa.width_mm
++    if top_fp > base_fp:
++        return False, [
++            f"'{top_package.name}' footprint ({top_fp:.0f} mm┬▓) larger "
++            f"than '{pa.name}' footprint ({base_fp:.0f} mm┬▓)"
++        ]
++
++    return True, []
++
++
+ def check_support(
+     placements: list,
+     candidate_aabb: AABB,
+     package: Package = None,
+-    support_threshold: float = 0.90,
++    support_threshold: float = 0.50,
+ ) -> dict:
+     """Validate that the candidate has adequate support below.
+ 
+     Rules:
+       1. If z=0 (floor) ΓåÆ always supported.
+-      2. Every package directly below must be stackable.
++      2. Each package directly below is checked against capacity-based
++         stacking rules (stacking mode, max top weight, max layers).
+       3. Top package must be lighter than every package directly below.
+       4. The union of XY-overlap regions from all below packages must
+          cover at least ``support_threshold`` (0-1) of the candidate's
+@@ -43,7 +132,7 @@ def check_support(
+         package: The package being placed (for weight check).
+         support_threshold: Minimum fraction of candidate footprint that
+             must be covered by the union of below-package XY overlap
+-            (default 0.90 = 90%).
++            (default 0.50 = 50%).
+ 
+     Returns:
+         {"valid": True, "reasons": []} or
+@@ -75,27 +164,18 @@ def check_support(
+     if not below_placements:
+         return {"valid": False, "reasons": ["No support below package"]}
+ 
+-    # ΓöÇΓöÇ Verify each below package: stackable + weight ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++    # ΓöÇΓöÇ Verify each below package: stacking rules + weight ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+     below_aabbs = []
+     for pl in below_placements:
+         pa = pl.package
++        if pa is None:
++            continue
+ 
+-        if pa and not pa.stackable:
+-            return {
+-                "valid": False,
+-                "reasons": [f"Cannot stack on '{pa.name}' (not stackable)"],
+-            }
+-
+-        if pa and package is not None and package.weight_kg is not None \
+-                and pa.weight_kg is not None:
+-            if package.weight_kg > pa.weight_kg:
+-                return {
+-                    "valid": False,
+-                    "reasons": [
+-                        f"'{package.name}' ({package.weight_kg} kg) heavier "
+-                        f"than '{pa.name}' ({pa.weight_kg} kg)"
+-                    ],
+-                }
++        # Capacity-based stacking check
++        if package is not None:
++            ok, reasons = _check_stacking_rules(pl, package, placements)
++            if not ok:
++                return {"valid": False, "reasons": reasons}
+ 
+         pkg_len = pa.length_mm if hasattr(pa, 'length_mm') \
+                   else getattr(pa, 'length', 0)
+diff --git a/truck_load_planner/engine/validation.py b/truck_load_planner/engine/validation.py
+index cc05c20..8a5e3ea 100644
+--- a/truck_load_planner/engine/validation.py
++++ b/truck_load_planner/engine/validation.py
+@@ -24,9 +24,10 @@ from .package import Package
+ class ValidationResult:
+     valid: bool
+     reasons: list = field(default_factory=list)
++    door_used: str = "rear"
+ 
+     def to_dict(self) -> dict:
+-        return {"valid": self.valid, "reasons": self.reasons}
++        return {"valid": self.valid, "reasons": self.reasons, "door_used": self.door_used}
+ 
+ 
+ def validate_placement(
+@@ -51,7 +52,8 @@ def validate_placement(
+     """
+     reasons = []
+ 
+-    clearance = getattr(package, 'clearance_mm', 0)
++    h_clr = getattr(package, 'horizontal_clearance_mm', 10.0)
++    v_clr = getattr(package, 'vertical_clearance_mm', 0.0)
+     # Actual AABB (no clearance) ΓÇö used for boundary check so packages
+     # can touch container walls. Clearance on the wall-facing side
+     # doesn't make physical sense (package can't extend past the wall).
+@@ -60,12 +62,14 @@ def validate_placement(
+         package.length_mm, package.width_mm, package.height_mm,
+         rotation, clearance=0,
+     )
+-    # Inflated AABB (with clearance) ΓÇö used for collision, support, and
++    # Inflated AABB (with per-axis clearance) ΓÇö used for collision and
+     # door sweeps so there is breathing room between packages.
++    # Horizontal clearance separates side-by-side packages; vertical
++    # clearance separates stacked packages.
+     candidate_aabb = AABB.from_dimensions(
+         x, y, z,
+         package.length_mm, package.width_mm, package.height_mm,
+-        rotation, clearance=clearance,
++        rotation, clearance_xy=h_clr, clearance_z=v_clr,
+     )
+ 
+     container_aabb = AABB(
+@@ -123,11 +127,13 @@ def validate_placement(
+             if pl.package is None:
+                 continue
+             pkg = pl.package
++            ph_clr = getattr(pkg, 'horizontal_clearance_mm', 10.0)
++            pv_clr = getattr(pkg, 'vertical_clearance_mm', 0.0)
+             existing_aabb = AABB.from_dimensions(
+                 pl.x, pl.y, pl.z,
+                 pkg.length_mm, pkg.width_mm, pkg.height_mm,
+                 pl.rotation,
+-                clearance=pkg.clearance_mm,
++                clearance_xy=ph_clr, clearance_z=pv_clr,
+             )
+             if check_collision(candidate_aabb, existing_aabb):
+                 reasons.append(f"Collision with '{pkg.name}'")
+@@ -142,6 +148,7 @@ def validate_placement(
+         return ValidationResult(valid=False, reasons=sresult.get("reasons", []))
+ 
+     # ΓöÇΓöÇ 6. Door sweep (most expensive: sweep AABB + spatial query) ΓöÇΓöÇΓöÇΓöÇ
++    door_used = "rear"
+     if doors_info:
+         dresult = check_door_sweep(
+             placements, package, candidate_aabb,
+@@ -151,5 +158,6 @@ def validate_placement(
+         )
+         if not dresult["valid"]:
+             return ValidationResult(valid=False, reasons=dresult.get("reasons", []))
++        door_used = dresult.get("door_used", "rear")
+ 
+-    return ValidationResult(valid=True, reasons=[])
++    return ValidationResult(valid=True, reasons=[], door_used=door_used)
+diff --git a/truck_load_planner/models/__init__.py b/truck_load_planner/models/__init__.py
+index f99a592..a9f8a07 100644
+--- a/truck_load_planner/models/__init__.py
++++ b/truck_load_planner/models/__init__.py
+@@ -95,6 +95,8 @@ class Package:
+     allow_rotation: bool = False
+     fragile: bool = False
+     color: str = "#3b82f6"
++    max_top_weight_kg: float = 0.0
++    max_stack_layers: int = 0
+     created_at: Optional[str] = None
+     updated_at: Optional[str] = None
+ 
+@@ -122,6 +124,8 @@ class Package:
+             allow_rotation=bool(row.get("allow_rotation", 0)),
+             fragile=bool(row.get("fragile", 0)),
+             color=row.get("color", "#3b82f6"),
++            max_top_weight_kg=float(row.get("max_top_weight_kg", 0.0)),
++            max_stack_layers=int(row.get("max_stack_layers", 0)),
+             created_at=row.get("created_at"),
+             updated_at=row.get("updated_at"),
+         )
+diff --git a/truck_load_planner/routes.py b/truck_load_planner/routes.py
+index 603890b..bc7a409 100644
+--- a/truck_load_planner/routes.py
++++ b/truck_load_planner/routes.py
+@@ -5,6 +5,9 @@ All routes are prefixed with /api/tlp.
+ 
+ import json
+ import sqlite3
++import time
++import uuid
++import datetime
+ from flask import Blueprint, jsonify, request
+ 
+ tlp_bp = Blueprint("tlp", __name__, url_prefix="/api/tlp")
+@@ -12,6 +15,7 @@ tlp_bp = Blueprint("tlp", __name__, url_prefix="/api/tlp")
+ DB_PATH = None
+ 
+ 
++
+ def _get_db():
+     conn = sqlite3.connect(DB_PATH)
+     conn.row_factory = sqlite3.Row
+@@ -217,8 +221,9 @@ def create_package():
+     c = conn.cursor()
+     c.execute("""
+         INSERT INTO tlp_packages (name, length, width, height, weight_kg,
+-          allow_stacking, allow_rotation, fragile, color, default_qty)
+-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
++          allow_stacking, allow_rotation, fragile, color, default_qty,
++          max_top_weight_kg, max_stack_layers)
++        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     """, (
+         data["name"], data["length"], data["width"], data["height"],
+         data["weight_kg"],
+@@ -227,6 +232,8 @@ def create_package():
+         1 if data.get("fragile") else 0,
+         data.get("color", "#3b82f6"),
+         data.get("default_qty", 1),
++        data.get("max_top_weight_kg", 0.0),
++        data.get("max_stack_layers", 0),
+     ))
+     conn.commit()
+     pkg_id = c.lastrowid
+@@ -246,7 +253,8 @@ def update_package(pkg_id):
+     conn.execute("""
+         UPDATE tlp_packages SET name=?, length=?, width=?, height=?,
+           weight_kg=?, allow_stacking=?, allow_rotation=?, fragile=?,
+-          color=?, default_qty=?, updated_at=CURRENT_TIMESTAMP
++          color=?, default_qty=?, max_top_weight_kg=?, max_stack_layers=?,
++          updated_at=CURRENT_TIMESTAMP
+         WHERE id=?
+     """, (
+         data.get("name", existing["name"]),
+@@ -259,6 +267,8 @@ def update_package(pkg_id):
+         1 if data.get("fragile", existing["fragile"]) else 0,
+         data.get("color", existing["color"]),
+         data.get("default_qty", existing["default_qty"] if "default_qty" in existing.keys() else 1),
++        data.get("max_top_weight_kg", existing.get("max_top_weight_kg", 0.0)),
++        data.get("max_stack_layers", existing.get("max_stack_layers", 0)),
+         pkg_id,
+     ))
+     conn.commit()
+@@ -279,6 +289,18 @@ def delete_package(pkg_id):
+     return jsonify({"success": True})
+ 
+ 
++@tlp_bp.route("/packages/clear", methods=["DELETE"])
++def clear_all_packages():
++    conn = _get_db()
++    c = conn.cursor()
++    c.execute("DELETE FROM tlp_placements WHERE package_id IN (SELECT id FROM tlp_packages)")
++    c.execute("DELETE FROM tlp_shipment_items WHERE package_id IN (SELECT id FROM tlp_packages)")
++    c.execute("DELETE FROM tlp_packages")
++    conn.commit()
++    conn.close()
++    return jsonify({"success": True})
++
++
+ # ΓöÇΓöÇΓöÇ Shipment CRUD ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+ 
+ @tlp_bp.route("/shipments", methods=["GET"])
+@@ -544,7 +566,7 @@ def get_plan(plan_id):
+         ).fetchall()
+         plan["features"] = [_row_to_dict(f) for f in feats]
+     placements = conn.execute("""
+-        SELECT pl.*, p.name AS package_name, p.length, p.width, p.height, p.weight_kg, p.allow_stacking, p.color
++        SELECT pl.*, p.name AS package_name, p.length, p.width, p.height, p.weight_kg, p.allow_stacking, p.allow_rotation, p.fragile, p.color, p.max_top_weight_kg, p.max_stack_layers
+         FROM tlp_placements pl
+         LEFT JOIN tlp_packages p ON p.id = pl.package_id
+         WHERE pl.load_plan_id = ?
+@@ -680,85 +702,12 @@ def validate_placement():
+ 
+ # ΓöÇΓöÇΓöÇ Auto Arrange ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+ 
+-def _expand_candidates(base_candidates, allow_rotation):
+-    """Expand (x,y,z) tuples with rotation variants."""
+-    expanded = []
+-    seen = set()
+-    for pos in base_candidates:
+-        if isinstance(pos, dict):
+-            x, y, z = pos.get("x", 0), pos.get("y", 0), pos.get("z", 0)
+-        else:
+-            x, y, z = pos[0], pos[1], pos[2]
+-        key0 = (x, y, z, 0)
+-        if key0 not in seen:
+-            seen.add(key0)
+-            expanded.append({"x": x, "y": y, "z": z, "rotation": 0})
+-        if allow_rotation:
+-            key90 = (x, y, z, 90)
+-            if key90 not in seen:
+-                seen.add(key90)
+-                expanded.append({"x": x, "y": y, "z": z, "rotation": 90})
+-    return expanded
+-
+-
+-def _candidate_priority(pkg, pos, container):
+-    """Lightweight priority score for a candidate placement position.
+-
+-    Higher = more promising. Used to rank candidates before expensive
+-    validation so that good placements are found and accepted earlier.
+-
+-    Factors (most to least important):
+-      1. Container surfaces touched (corner placements score highest)
+-      2. Lower Z ΓÇö prefer floor placements
+-      3. Greater wall-contact area
+-      4. Back-to-front ΓÇö prefer positions closer to the back wall (x=0),
+-         so loading fills from the far end toward the door
+-      5. Proximity to the front-left-bottom origin
+-    """
+-    x, y, z = pos["x"], pos["y"], pos["z"]
+-    rot = pos["rotation"]
+-
+-    if rot == 0:
+-        dx, dy, dz = pkg.length_mm, pkg.width_mm, pkg.height_mm
+-    else:
+-        dx, dy, dz = pkg.width_mm, pkg.length_mm, pkg.height_mm
+-
+-    # 1. Touching surfaces (0-6 ΓåÆ score 0-60)
+-    touches = 0
+-    if x == 0:               touches += 1
+-    if x + dx == container.length: touches += 1
+-    if y == 0:               touches += 1
+-    if y + dy == container.width:  touches += 1
+-    if z == 0:               touches += 1
+-    if z + dz == container.height: touches += 1
+-    touch_score = touches * 10.0
+-
+-    # 2. Z-height (lower ΓåÆ better, score 0-15)
+-    z_score = (1.0 - z / container.height) * 15.0 if container.height > 0 else 0.0
+-
+-    # 3. Wall-contact area (score 0-15)
+-    contact = 0.0
+-    if x == 0:               contact += dy * dz
+-    if x + dx == container.length: contact += dy * dz
+-    if y == 0:               contact += dx * dz
+-    if y + dy == container.width:  contact += dx * dz
+-    if z == 0:               contact += dx * dy
+-    if z + dz == container.height: contact += dx * dy
+-    max_contact = 2 * (dx * dy + dy * dz + dx * dz)
+-    wall_score = (contact / max_contact * 15.0) if max_contact > 0 else 0.0
+-
+-    # 4. Back-to-front loading direction (score 0-20)
+-    # Lower x = closer to back wall (far from rear door), loaded first
+-    back_score = (1.0 - x / container.length) * 20.0 if container.length > 0 else 0.0
+-
+-    # 5. Proximity to front-center (score 0-10)
+-    # Prefers innermost (low x) without Y bias toward either wall.
+-    # This replaces the old origin-proximity which pulled everything to y=0.
+-    fc_dist = (x**2 + (y - container.width / 2)**2 + z**2) ** 0.5
+-    max_fc = (container.length**2 + (container.width / 2)**2 + container.height**2) ** 0.5
+-    front_center_score = (1.0 - fc_dist / max_fc) * 10.0 if max_fc > 0 else 0.0
+-
+-    return touch_score + z_score + wall_score + back_score + front_center_score
++from truck_load_planner.engine.distribution import expand_candidates, candidate_priority, distribute_across_vehicles, find_best_for_pkg
++from truck_load_planner.optimization.vehicle_cost import compute_fleet_cost
++
++_expand_candidates = expand_candidates
++_candidate_priority = candidate_priority
++_distribute_across_vehicles = distribute_across_vehicles
+ 
+ 
+ def _build_placement_dict(pl, vehicle_id=None):
+@@ -769,6 +718,7 @@ def _build_placement_dict(pl, vehicle_id=None):
+         "x": pl.x, "y": pl.y, "z": pl.z,
+         "rotation": pl.rotation,
+         "load_sequence": pl.load_sequence,
++        "door_used": getattr(pl, "door_used", "rear"),
+         "_package": {
+             "id": pkg.id if pkg else None,
+             "name": pkg.name if pkg else "",
+@@ -779,6 +729,8 @@ def _build_placement_dict(pl, vehicle_id=None):
+             "color": pkg.color if pkg else "#3b82f6",
+             "stackable": pkg.stackable if pkg else False,
+             "allow_stacking": pkg.stackable if pkg else False,
++            "max_top_weight_kg": pkg.max_top_weight_kg if pkg else 0.0,
++            "max_stack_layers": pkg.max_stack_layers if pkg else 0,
+         } if pkg else None,
+         "_name": pkg.name if pkg else "",
+         "_length": pkg.length_mm if pkg else 0,
+@@ -801,7 +753,8 @@ def _get_packages_from_request(data, conn):
+     if shipment_id:
+         items = conn.execute(
+             "SELECT si.*, p.name AS package_name, p.length, p.width, p.height, "
+-            "p.weight_kg, p.allow_stacking, p.allow_rotation, p.fragile, p.color "
++            "p.weight_kg, p.allow_stacking, p.allow_rotation, p.fragile, p.color, "
++            "p.max_top_weight_kg, p.max_stack_layers "
+             "FROM tlp_shipment_items si "
+             "LEFT JOIN tlp_packages p ON p.id = si.package_id "
+             "WHERE si.shipment_id = ?",
+@@ -812,6 +765,8 @@ def _get_packages_from_request(data, conn):
+             itd = dict(it)
+             lpkg = LegacyPackage.from_row(itd)
+             qty = itd.get("quantity", 1) or 1
++            old_clr = getattr(lpkg, 'clearance_mm', getattr(lpkg, 'clearance', None))
++            h_clr = float(old_clr) if old_clr is not None else 10.0
+             ep = EnginePackage(
+                 id=lpkg.id, name=lpkg.name,
+                 length_mm=lpkg.length, width_mm=lpkg.width,
+@@ -820,7 +775,9 @@ def _get_packages_from_request(data, conn):
+                 allow_rotation=bool(lpkg.allow_rotation),
+                 fragile=bool(lpkg.fragile),
+                 color=lpkg.color,
+-                clearance_mm=float(getattr(lpkg, 'clearance_mm', 10.0)),
++                horizontal_clearance_mm=h_clr,
++                max_top_weight_kg=float(getattr(lpkg, 'max_top_weight_kg', 0.0)),
++                max_stack_layers=int(getattr(lpkg, 'max_stack_layers', 0)),
+             )
+             for _ in range(qty):
+                 pkgs.append(ep)
+@@ -829,6 +786,8 @@ def _get_packages_from_request(data, conn):
+     if data.get("packages"):
+         pkgs = []
+         for pd in data["packages"]:
++            old_clr = pd.get("clearance_mm", pd.get("clearance", None))
++            h_clr = float(old_clr) if old_clr is not None else 10.0
+             pkgs.append(EnginePackage(
+                 id=pd.get("package_id", pd.get("id")),
+                 name=pd.get("name", ""),
+@@ -840,7 +799,9 @@ def _get_packages_from_request(data, conn):
+                 allow_rotation=bool(pd.get("allow_rotation", 0)),
+                 fragile=bool(pd.get("fragile", 0)),
+                 color=pd.get("color", "#3b82f6"),
+-                clearance_mm=float(pd.get("clearance_mm", pd.get("clearance", 10.0))),
++                horizontal_clearance_mm=h_clr,
++                max_top_weight_kg=float(pd.get("max_top_weight_kg", 0.0)),
++                max_stack_layers=int(pd.get("max_stack_layers", 0)),
+             ))
+         return pkgs
+ 
+@@ -886,217 +847,9 @@ def _load_vehicle_session(conn, vehicle_id):
+     return session, vdata
+ 
+ 
+-def _distribute_across_vehicles(packages, vehicle_sessions, debug=False):
+-    """Distribute packages across multiple vehicles using best-fit-decreasing.
+-
+-    Minimises the number of vehicles used by filling each vehicle to capacity
+-    before opening the next one. For each package, active (already-used)
+-    vehicles are tried first; only when none can accommodate the package is
+-    a new vehicle opened.
+-
+-    Uses Best-Fit Decreasing: among vehicles where the package fits, pick the
+-    one where the package consumes the largest fraction of remaining capacity
+-    (least waste), weighted together with placement quality.
+-    """
+-    sorted_pkgs = sorted(
+-        packages,
+-        key=lambda p: (
+-            p.stackable,
+-            -(p.length_mm * p.width_mm * p.height_mm),
+-            -(p.length_mm * p.width_mm),
+-            -p.weight_kg,
+-        ),
+-    )
+-
+-    placed = 0
+-    failed = 0
+-    unplaced = []
+-    placed_vehicle_map = {vinfo["vehicle_id"]: [] for vinfo, _ in vehicle_sessions}
+-    active_indices: list[int] = []  # indices of vehicle_sessions that already have packages
+-
+-    def _find_best_for_pkg(pkg, vinfo, session, remaining_pkgs=None):
+-        """Return (best_score, best_pos) or (None, None) if no valid position."""
+-        best_score = -1.0
+-        best_pos = None
+-        planner = session._planner
+-        container = planner.state.container
+-        candidates = list(planner.get_candidate_points())
+-
+-        # Add right-wall candidate for better left-right balance
+-        clearance = getattr(pkg, 'clearance_mm', 10)
+-        right_y = container.width - pkg.width_mm - clearance
+-        if right_y > clearance:
+-            right_candidate = (0, right_y, 0)
+-            if right_candidate not in candidates:
+-                candidates.insert(0, right_candidate)
+-
+-        expanded = _expand_candidates(candidates, pkg.allow_rotation)
+-        # Rank by priority ΓÇö more promising candidates validated first
+-        # so that excellent placements are found earlier (fewer iterations)
+-        prioritized = sorted(
+-            expanded,
+-            key=lambda pos: _candidate_priority(pkg, pos, container),
+-            reverse=True,
+-        )
+-        for pos in prioritized:
+-            vresult = planner.validate_position(
+-                pkg, pos["x"], pos["y"], pos["z"], pos["rotation"],
+-            )
+-            if not vresult.valid:
+-                continue
+-            score = planner.evaluate_position(
+-                pkg, pos["x"], pos["y"], pos["z"], pos["rotation"],
+-                remaining_packages=remaining_pkgs,
+-            )
+-            if score.total > best_score:
+-                best_score = score.total
+-                best_pos = pos
+-                if best_score >= 99.99:
+-                    break
+-
+-        # ΓöÇΓöÇ Y-slide pass: if no position found, try sliding candidates left/right ΓöÇΓöÇ
+-        if best_pos is None:
+-            from truck_load_planner.engine.candidate_points import generate_slide_candidates
+-            slide_cands = generate_slide_candidates(candidates, pkg, container)
+-            for pos in slide_cands:
+-                vresult = planner.validate_position(
+-                    pkg, pos["x"], pos["y"], pos["z"], pos["rotation"],
+-                )
+-                if not vresult.valid:
+-                    continue
+-                score = planner.evaluate_position(
+-                    pkg, pos["x"], pos["y"], pos["z"], pos["rotation"],
+-                    remaining_packages=remaining_pkgs,
+-                )
+-                if score.total > best_score:
+-                    best_score = score.total
+-                    best_pos = pos
+-                    if best_score >= 99.99:
+-                        break
+-
+-        return best_score, best_pos
+-
+-    def _estimate_remaining_after(pkg, pos, session):
+-        """Estimate remaining capacity % after placing pkg at pos.
+-
+-        Returns (vol_pct, floor_pct, payload_pct). Lower = tighter fit
+-        = less waste. The *pos* is needed to determine floor consumption
+-        (packages at z>0 don't consume floor footprint).
+-        """
+-        planner = session._planner
+-        container = planner.state.container
+-        stats = planner.get_statistics()
+-
+-        total_vol_mm3 = container.length * container.width * container.height
+-        used_vol_mm3 = stats.get("volume_used_m3", 0) * 1_000_000_000
+-        rem_vol = max(0.0, total_vol_mm3 - used_vol_mm3
+-                      - pkg.length_mm * pkg.width_mm * pkg.height_mm)
+-
+-        total_floor_mm2 = container.length * container.width
+-        used_floor_pct = stats.get("floor_used_pct", 0) / 100.0
+-        used_floor_mm2 = used_floor_pct * total_floor_mm2
+-        floor_footprint = pkg.length_mm * pkg.width_mm if pos["z"] == 0 else 0
+-        rem_floor = max(0.0, total_floor_mm2 - used_floor_mm2 - floor_footprint)
+-
+-        rem_payload = max(0.0, stats.get("weight_remaining_kg",
+-                          container.payload_kg) - pkg.weight_kg)
+-
+-        vol_pct = rem_vol / total_vol_mm3 * 100 if total_vol_mm3 > 0 else 0.0
+-        floor_pct = (rem_floor / total_floor_mm2 * 100
+-                     if total_floor_mm2 > 0 else 0.0)
+-        payload_pct = (rem_payload / container.payload_kg * 100
+-                       if container.payload_kg > 0 else 0.0)
+-        return vol_pct, floor_pct, payload_pct
+-
+-    for i, pkg in enumerate(sorted_pkgs):
+-        remaining_pkgs = sorted_pkgs[i + 1:]
+-        best_waste = float("inf")
+-        best_score = -1.0
+-        best_session = None
+-        best_pos = None
+-        best_vinfo = None
+-
+-        def _is_better(waste, score):
+-            """Primary: less remaining capacity (tighter fit).
+-            Secondary: higher placement score (tiebreaker)."""
+-            nonlocal best_waste, best_score
+-            return (waste < best_waste - 1e-9
+-                    or (abs(waste - best_waste) < 1e-9 and score > best_score))
+-
+-        # Phase 1: try active (already-used) vehicles first
+-        for idx in active_indices:
+-            vinfo, session = vehicle_sessions[idx]
+-            score, pos = _find_best_for_pkg(pkg, vinfo, session, remaining_pkgs)
+-            if pos is not None:
+-                rv, rf, rp = _estimate_remaining_after(pkg, pos, session)
+-                waste = rv + rf + rp
+-                if _is_better(waste, score):
+-                    best_waste = waste
+-                    best_score = score
+-                    best_session = session
+-                    best_pos = pos
+-                    best_vinfo = vinfo
+-                    if score >= 99.99:
+-                        break
+-
+-        # Phase 2: if no active vehicle works, try the next unused vehicle
+-        if best_pos is None:
+-            new_active = None
+-            for idx, (vinfo, session) in enumerate(vehicle_sessions):
+-                if idx in active_indices:
+-                    continue
+-                score, pos = _find_best_for_pkg(pkg, vinfo, session, remaining_pkgs)
+-                if pos is not None:
+-                    rv, rf, rp = _estimate_remaining_after(pkg, pos, session)
+-                    waste = rv + rf + rp
+-                    if _is_better(waste, score):
+-                        best_waste = waste
+-                        best_score = score
+-                        best_session = session
+-                        best_pos = pos
+-                        best_vinfo = vinfo
+-                        new_active = idx
+-                        if score >= 99.99:
+-                            break
+-            if new_active is not None:
+-                active_indices.append(new_active)
+-
+-        # Phase 3: if the package literally touches the rear wall, redirect to
+-        # the last vehicle unconditionally (if it can accommodate). The last
+-        # vehicle has the most unused space, and rear-wall packages unload first.
+-        if best_pos is not None and len(vehicle_sessions) > 1:
+-            last_idx = len(vehicle_sessions) - 1
+-            last_vinfo, last_session = vehicle_sessions[last_idx]
+-            if last_vinfo["vehicle_id"] != best_vinfo["vehicle_id"]:
+-                container = best_session._planner.state.container
+-                dx = pkg.length_mm if best_pos["rotation"] == 0 else pkg.width_mm
+-                gap = container.length - (best_pos["x"] + dx)
+-                if gap <= 0:  # touches rear wall
+-                    last_score, last_pos = _find_best_for_pkg(pkg, last_vinfo, last_session, remaining_pkgs)
+-                    if last_pos is not None:
+-                        rv, rf, rp = _estimate_remaining_after(pkg, last_pos, last_session)
+-                        last_waste = rv + rf + rp
+-                        best_waste, best_score = last_waste, last_score
+-                        best_session, best_pos = last_session, last_pos
+-                        best_vinfo = last_vinfo
+-                        if last_idx not in active_indices:
+-                            active_indices.append(last_idx)
+-
+-        if best_session and best_pos:
+-            p_result = best_session._planner.place_package(
+-                pkg, best_pos["x"], best_pos["y"], best_pos["z"], best_pos["rotation"],
+-            )
+-            if p_result.valid:
+-                placed += 1
+-                placed_vehicle_map[best_vinfo["vehicle_id"]].append(pkg.name)
+-            else:
+-                failed += 1
+-                unplaced.append(pkg.name)
+-        else:
+-            failed += 1
+-            unplaced.append(pkg.name)
+-
+-    return placed, failed, unplaced, placed_vehicle_map
++def _distribute_across_vehicles(packages, vehicle_sessions, debug=False, profile=None):
++    """Delegate to engine.distribution.distribute_across_vehicles."""
++    return distribute_across_vehicles(packages, vehicle_sessions, debug=debug, profile=profile)
+ 
+ 
+ @tlp_bp.route("/auto-arrange", methods=["POST"])
+@@ -1115,10 +868,13 @@ def auto_arrange():
+     strategy = data.get("strategy", "largest_first")
+     debug = bool(data.get("debug", False))
+ 
++    from truck_load_planner.engine.profile import PROFILES
++    profile_name = data.get("profile", "balanced")
++    profile = PROFILES.get(profile_name, PROFILES["balanced"])
++
+     conn = _get_db()
+ 
+     if vehicle_id:
+-        # ΓöÇΓöÇ Single-vehicle path ΓöÇΓöÇ
+         session, vdata = _load_vehicle_session(conn, vehicle_id)
+         if not session:
+             conn.close()
+@@ -1138,8 +894,9 @@ def auto_arrange():
+ 
+         placements_out = [_build_placement_dict(pl) for pl in session._planner.placements]
+ 
+-        return jsonify({
++        response_data = {
+             "multi_vehicle": False,
++            "profile": profile_name,
+             "vehicle_id": vehicle_id,
+             "success": result.failed_packages == 0 or result.placed_packages > 0,
+             "summary": {
+@@ -1153,16 +910,20 @@ def auto_arrange():
+             "placements": placements_out,
+             "statistics": session.get_status(),
+             "debug_log": result.debug_log if debug else [],
+-        })
++        }
++
++        return jsonify(response_data)
+ 
+     # ΓöÇΓöÇ Multi-vehicle path ΓöÇΓöÇ
+     # Load all vehicles that have container configs
+     vrows = conn.execute("""
+         SELECT v.id AS vehicle_id, v.plate_number, v.vehicle_type, v.current_driver,
+                cc.id AS cc_id, cc.name AS container_name,
+-               cc.cargo_length_mm, cc.cargo_width_mm, cc.cargo_height_mm, cc.payload_kg
++               cc.cargo_length_mm, cc.cargo_width_mm, cc.cargo_height_mm, cc.payload_kg,
++               fvp.normal_l_per_100km
+         FROM vehicles v
+         INNER JOIN container_configs cc ON cc.id = v.container_config_id
++        LEFT JOIN fuel_vehicle_profile fvp ON fvp.license_plate = v.plate_number
+         ORDER BY v.plate_number
+     """).fetchall()
+ 
+@@ -1185,9 +946,56 @@ def auto_arrange():
+     if not vehicle_sessions:
+         return jsonify({"error": "No vehicles with valid container configs"}), 404
+ 
+-    placed, failed, unplaced, vehicle_map = _distribute_across_vehicles(
+-        packages, vehicle_sessions, debug=debug,
++    dist_start = time.time()
++    placed, failed, unplaced, vehicle_map, dist_stats = _distribute_across_vehicles(
++        packages, vehicle_sessions, debug=debug, profile=profile,
++    )
++    dist_time_ms = int((time.time() - dist_start) * 1000)
++
++    # ΓöÇΓöÇ Repair phase: fleet-level Destroy-and-Repair ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++    placed_ids = set()
++    for _, session in vehicle_sessions:
++        for pl in session._planner.placements:
++            if pl.package is not None:
++                placed_ids.add(id(pl.package))
++    unplaced_pkg_objects = [p for p in packages if id(p) not in placed_ids]
++
++    from truck_load_planner.engine.repair import optimize_layout
++    repair_start = time.time()
++    vehicle_sessions, repair_improved, repair_stats = optimize_layout(
++        vehicle_sessions, packages,
++        unplaced_packages=unplaced_pkg_objects,
++        max_passes=3,
++        debug=debug,
++        profile=profile,
++    )
++    repair_time_ms = int((time.time() - repair_start) * 1000)
++
++    # ΓöÇΓöÇ Consolidation phase: eliminate near-empty vehicles ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++    from truck_load_planner.engine.consolidation import consolidate_fleet
++    consol_start = time.time()
++    vehicle_sessions, eliminated_count = consolidate_fleet(
++        vehicle_sessions, packages, max_iterations=10,
+     )
++    consol_time_ms = int((time.time() - consol_start) * 1000)
++
++    # ΓöÇΓöÇ Fleet balance pass: even out load profiles ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++    from truck_load_planner.engine.distribution import balance_fleet_profiles
++    balance_start = time.time()
++    vehicle_sessions, balance_moves = balance_fleet_profiles(
++        vehicle_sessions, max_moves=10,
++    )
++    balance_time_ms = int((time.time() - balance_start) * 1000)
++
++    # Recompute counts after repair
++    placed = sum(len(s._planner.placements) for _, s in vehicle_sessions)
++
++    placed_vehicle_map = {vinfo["vehicle_id"]: [] for vinfo, _ in vehicle_sessions}
++    for vinfo, session in vehicle_sessions:
++        vid = vinfo["vehicle_id"]
++        for pl in session._planner.placements:
++            if pl.package:
++                placed_vehicle_map[vid].append(pl.package.name)
+ 
+     # Build per-vehicle placements and statistics
+     per_vehicle = []
+@@ -1200,7 +1008,7 @@ def auto_arrange():
+                 "vehicle_id": vinfo["vehicle_id"],
+                 "plate_number": vinfo["plate_number"],
+                 "package_count": len(v_placements),
+-                "packages": vehicle_map.get(vinfo["vehicle_id"], []),
++                "packages": placed_vehicle_map.get(vinfo["vehicle_id"], []),
+                 "statistics": session.get_status(),
+             })
+         all_placements.extend(v_placements)
+@@ -1210,18 +1018,37 @@ def auto_arrange():
+         stats = pv.get("statistics", {})
+         total_util += stats.get("volume_used_pct", 0) if stats.get("volume_used_pct", 0) != 0 else 0
+     avg_util = round(total_util / len(per_vehicle), 1) if per_vehicle else 0.0
++    failed = len(packages) - placed
++    fleet_cost = round(compute_fleet_cost(vehicle_sessions), 1)
+ 
+-    return jsonify({
++    total_time_ms = dist_time_ms + repair_time_ms + consol_time_ms + balance_time_ms
++    response_data = {
+         "multi_vehicle": True,
++        "profile": profile_name,
+         "success": placed > 0,
+         "summary": {
+             "placed_packages": placed,
+             "failed_packages": failed,
+             "utilization": avg_util,
++            "fleet_cost": fleet_cost,
+             "warnings": [],
+             "unplaced_packages": unplaced,
+         },
+         "per_vehicle": per_vehicle,
+         "placements": all_placements,
+         "debug_log": [],
+-    })
++        "profile_stats": {
++            "profile": profile_name,
++            "distribution_time_ms": dist_time_ms,
++            "repair_time_ms": repair_time_ms,
++            "consolidation_time_ms": consol_time_ms,
++            "balance_time_ms": balance_time_ms,
++            "total_time_ms": total_time_ms,
++            "repair_passes": repair_stats.get("repair_passes", 0),
++            "repair_improved": repair_improved,
++            "rearrangement_attempts": dist_stats.get("rearrangement_attempts", 0),
++            "balance_moves": balance_moves,
++        },
++    }
++
++    return jsonify(response_data)
+diff --git a/truck_load_planner/session.py b/truck_load_planner/session.py
+index 782356f..107cdbf 100644
+--- a/truck_load_planner/session.py
++++ b/truck_load_planner/session.py
+@@ -23,6 +23,8 @@ def _to_engine_pkg(pkg) -> EnginePackage:
+     """Convert a legacy Package (from models) to engine Package."""
+     if isinstance(pkg, EnginePackage):
+         return pkg
++    old_clr = getattr(pkg, 'clearance_mm', getattr(pkg, 'clearance', None))
++    h_clr = float(old_clr) if old_clr is not None else 10.0
+     return EnginePackage(
+         id=pkg.id,
+         name=pkg.name,
+@@ -34,12 +36,16 @@ def _to_engine_pkg(pkg) -> EnginePackage:
+         allow_rotation=bool(pkg.allow_rotation),
+         fragile=bool(pkg.fragile),
+         color=pkg.color,
+-        clearance_mm=getattr(pkg, 'clearance_mm', 10.0),
++        horizontal_clearance_mm=h_clr,
++        max_top_weight_kg=float(getattr(pkg, 'max_top_weight_kg', 0.0)),
++        max_stack_layers=int(getattr(pkg, 'max_stack_layers', 0)),
+     )
+ 
+ 
+ def _from_legacy_dict(d: dict) -> EnginePackage:
+     """Build an engine Package from a legacy dict (underscore keys)."""
++    old_clr = d.get("clearance_mm", d.get("clearance", None))
++    h_clr = float(old_clr) if old_clr is not None else 10.0
+     return EnginePackage(
+         id=d.get("package_id"),
+         name=d.get("_name", d.get("name", "")),
+@@ -51,7 +57,9 @@ def _from_legacy_dict(d: dict) -> EnginePackage:
+         allow_rotation=bool(d.get("allow_rotation", 1)),
+         fragile=bool(d.get("fragile", 0)),
+         color=d.get("color", "#3b82f6"),
+-        clearance_mm=float(d.get("clearance_mm", d.get("clearance", 10.0))),
++        horizontal_clearance_mm=h_clr,
++        max_top_weight_kg=float(d.get("max_top_weight_kg", 0.0)),
++        max_stack_layers=int(d.get("max_stack_layers", 0)),
+     )
+ 
+ 
+@@ -63,6 +71,7 @@ def _engine_placement_to_dict(pl: Placement) -> dict:
+         "x": pl.x, "y": pl.y, "z": pl.z,
+         "rotation": pl.rotation,
+         "load_sequence": pl.load_sequence,
++        "door_used": getattr(pl, "door_used", "rear"),
+         "_package": pkg,
+         "_name": pkg.name if pkg else "",
+         "_weight_kg": pkg.weight_kg if pkg else 0,

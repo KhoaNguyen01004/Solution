@@ -10,17 +10,20 @@ from .placement import Placement
 from .container import Container
 from .geometry import AABB
 from .state import PlanningState
-from .validation import validate_placement, ValidationResult
+from .validation import validate_placement, ValidationResult, ValidationMode
 from .statistics import compute_statistics
 from .scorer import score_placement, PlacementScore, SCORING_WEIGHTS
 from .auto_arrange import AutoArrangeResult
+from .trace_mutations import M
 
 
 class Planner:
     """Coordinates all subsystems for a single loading session."""
 
-    def __init__(self, container: Container, features: Optional[list] = None):
+    def __init__(self, container: Container, features: Optional[list] = None,
+                 candidate_limit: Optional[int] = None):
         self.state = PlanningState(container, features)
+        self._candidate_limit = candidate_limit
 
     @property
     def container(self) -> Container:
@@ -49,15 +52,20 @@ class Planner:
         y: float,
         z: float = 0,
         rotation: int = 0,
+        _trace_reason: str = "place_package",
     ) -> ValidationResult:
+        mode = getattr(self, '_validation_mode', ValidationMode.INSERTION)
         result = validate_placement(
             self.state.placements, package,
             x, y, z, rotation,
             self.state.container, self.state.features,
             query_aabb_fn=self.state.query_aabb,
+            mode=mode,
         )
         if result.valid:
-            self.state.append_placement(package, x, y, z, rotation)
+            pl = self.state.append_placement(package, x, y, z, rotation, door_used=result.door_used)
+            # Re-log with caller context (append_placement already logged as "new placement")
+            M.log("Planner.place_package", pl, None, (x, y, z, rotation), _trace_reason)
         return result
 
     def move_package(self, index: int, new_x: float, new_y: float) -> ValidationResult:
@@ -65,6 +73,7 @@ class Planner:
             return ValidationResult(False, ["Invalid placement index"])
 
         old = self.state.pop_placement(index)
+        M.log_remove("Planner.move_package/pop", old, f"idx={index}")
 
         result = validate_placement(
             self.state.placements, old.package,
@@ -73,19 +82,27 @@ class Planner:
             query_aabb_fn=self.state.query_aabb,
         )
         if result.valid:
-            self.state.insert_placement(
+            pl = self.state.insert_placement(
                 index, old.package, new_x, new_y, old.z, old.rotation,
                 load_sequence=old.load_sequence,
             )
+            M.log("Planner.move_package/insert", pl,
+                  (old.x, old.y, old.z, old.rotation),
+                  (new_x, new_y, old.z, old.rotation), f"idx={index}")
         else:
-            self.state.insert_placement(
+            pl = self.state.insert_placement(
                 index, old.package, old.x, old.y, old.z, old.rotation,
                 load_sequence=old.load_sequence,
             )
+            M.log("Planner.move_package/restore", pl,
+                  (old.x, old.y, old.z, old.rotation),
+                  (old.x, old.y, old.z, old.rotation), "validation failed")
         return result
 
     def remove_package(self, index: int) -> None:
-        self.state.pop_placement(index)
+        pl = self.state.pop_placement(index)
+        if pl:
+            M.log_remove("Planner.remove_package", pl, f"idx={index}")
 
     def validate(self) -> ValidationResult:
         from .boundary import check_boundary
@@ -109,7 +126,8 @@ class Planner:
             pkg = pl.package
             if pkg is None:
                 continue
-            clearance = getattr(pkg, 'clearance_mm', 0)
+            h_clr = getattr(pkg, 'horizontal_clearance_mm', 10.0)
+            v_clr = getattr(pkg, 'vertical_clearance_mm', 0.0)
             actual_aabb = AABB.from_dimensions(
                 pl.x, pl.y, pl.z,
                 pkg.length_mm, pkg.width_mm, pkg.height_mm,
@@ -122,7 +140,7 @@ class Planner:
             coll_aabb = AABB.from_dimensions(
                 pl.x, pl.y, pl.z,
                 pkg.length_mm, pkg.width_mm, pkg.height_mm,
-                pl.rotation, clearance=clearance,
+                pl.rotation, clearance_xy=h_clr, clearance_z=v_clr,
             )
             nearby = self.state.query_aabb(coll_aabb)
             for other_pl, other_aabb in nearby:
@@ -280,11 +298,13 @@ class Planner:
         rotation: int = 0,
     ) -> ValidationResult:
         """Validate a single candidate position without placing."""
+        mode = getattr(self, '_validation_mode', ValidationMode.INSERTION)
         return validate_placement(
             self.state.placements, package,
             x, y, z, rotation,
             self.state.container, self.state.features,
             query_aabb_fn=self.state.query_aabb,
+            mode=mode,
         )
 
     def auto_arrange(
@@ -362,6 +382,8 @@ class Planner:
         for pd in placement_dicts:
             pkg = pd.get("_package")
             if pkg is None:
+                old_clr = pd.get("clearance_mm", pd.get("clearance", None))
+                h_clr = float(old_clr) if old_clr is not None else 10.0
                 pkg = Package(
                     id=pd.get("package_id"),
                     name=pd.get("_name", pd.get("name", "")),
@@ -371,10 +393,12 @@ class Planner:
                     weight_kg=pd.get("_weight_kg", pd.get("weight_kg", 0)),
                     stackable=bool(pd.get("stackable", pd.get("allow_stacking", 0))),
                     allow_rotation=bool(pd.get("allow_rotation", 1)),
-                    clearance_mm=float(pd.get("clearance_mm", pd.get("clearance", 10.0))),
+                    horizontal_clearance_mm=h_clr,
                 )
             elif not isinstance(pkg, dict):
                 # EnginePackage or legacy model — convert to dict
+                h_clr = float(getattr(pkg, 'horizontal_clearance_mm',
+                              getattr(pkg, 'clearance_mm', 10.0)))
                 pkg = Package(
                     id=getattr(pkg, "id", None),
                     name=getattr(pkg, "name", getattr(pkg, "_name", "")),
@@ -384,7 +408,7 @@ class Planner:
                     weight_kg=getattr(pkg, "weight_kg", 0),
                     stackable=bool(getattr(pkg, "stackable", getattr(pkg, "allow_stacking", 0))),
                     allow_rotation=bool(getattr(pkg, "allow_rotation", 1)),
-                    clearance_mm=float(getattr(pkg, 'clearance_mm', 10.0)),
+                    horizontal_clearance_mm=h_clr,
                 )
             else:
                 pkg = Package.from_dict(pkg)

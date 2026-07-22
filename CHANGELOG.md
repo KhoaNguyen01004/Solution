@@ -1,5 +1,133 @@
 # Changelog
 
+## 2026-07-22 — Frontier-Based Gap Prevention, Gap-Filling Pass, Debug Instrumentation
+
+### Added
+
+#### FrontierTracker (`engine/frontier.py`)
+- New module implementing a 1D Y-strip frontier for gap-aware placement:
+  - `get_frontier_at(y)` — returns the maximum X (depth) of the packed front at a given Y, within a Y-strip of configurable `strip_width_mm` (default 200–250 mm)
+  - `gap_distance(x, y, z, w)` — measures how far a candidate is from the frontier at its Y-strip; positive = ahead of frontier, negative = behind (in a gap)
+  - `gap_ratio(x, y, z, w)` — gap_distance normalized by `container.length`
+  - `update()` / `update_from_placement()` / `reset()` — frontier state management
+- Integrated into `LargestFirstStrategy.arrange()` and `ColumnStrategy.arrange()`:
+  - Gap penalty during candidate scoring: `-min(gap_distance × (0.5 + gap_ratio × 0.5), 500)`
+  - Y-slide fallback after frontier check
+
+#### Frontier Gap-Filling Pass (`fill_frontier_gaps` in `engine/distribution.py`)
+- Post-placement pass that detects frontier gaps (packages with xmin > frontier at their Y-strip)
+- For each gapped package: tries `settle_package()` first (analytical O(K)), falls back to `tighten_position()` only when settle gives no improvement
+- Guard: only re-places when `tx >= pl.x - 1.0` (meaningful forward improvement ≥ 1 mm)
+- Replaces `fill_interior_gaps` calls in compaction pipelines
+- Immediately updates frontier after each re-placement
+
+#### Detailed Debug Instrumentation (`engine/auto_arrange.py`)
+- `all_candidate_details` per debug entry captures every candidate evaluated:
+  - Input position, tightened position, validity, raw score, gap penalty, stack ceiling penalty, full breakdown, adjusted score
+- `slide_details` per debug entry tracks Y-slide fallback candidates
+
+#### `scripts/debug_arrange.py`
+- New comprehensive debugger that logs every step/decision for every package:
+  - Sorting order, per-package all-candidate decision log, frontier state, gap check (adjacent with Y-overlap), per-package frontier gap analysis, settle/tighten test, compaction steps, position changes, validation
+  - Saves to `reports/debug_<scenario>_<timestamp>.txt`
+- Scenarios: `kbf_lc900`, `mixed`, `column-test`, `real` (full 46-package real shipment)
+- `--full` flag for per-strip breakdown
+- `real` scenario: 46 packages placed, score 100.0, valid, ~10 000-line report
+
+### Fixed
+
+#### Duplicate-Name Bug in Gap-Filling Pass
+- `engine/auto_arrange.py`: `list.remove(x)` crashes when `x` appears multiple times in `unplaced_packages`
+- Fixed: replaced with `Counter` from `collections` for count-based tracking
+
+### Removed
+- `tests/test_auto_arrange.py` — deleted (63 test cases, called "useless")
+
+---
+
+## 2026-07-21 — Load Profile Stability Metric Fix, Floor Anchors, Local Rearrangement, Benchmark Correction
+
+### Changed
+
+#### Load Profile Stability Metric
+- **`engine/scorer.py::_score_load_profile_stability()`** — metric fixed from `sum(adjacent_diffs) / ((n-1) × H)` to `max_step / container.height`. Old metric had ~0.1 weighted-point range (negligible) and ranked concentrated towers better than gradual staircases. New metric creates a 4.15 point gap (59× improvement), correctly penalising tall isolated stacks.
+
+#### Floor Anchor Candidates
+- **`engine/candidate_points.py::generate_floor_anchors()`** — new function that finds the largest empty floor rectangles via Y-boundary sweep (O(N²) with N ≤ floor packages), generating front/center/rear positions for the top 2 regions. Augments (not replaces) extreme-point candidates to help fill empty floor regions.
+
+#### Tighten Position
+- **`engine/candidate_points.py::tighten_position()`** — new function that snaps a candidate back to its nearest extreme point after rotation, fixing candidate drift from floor anchor and right-wall candidates.
+
+#### Top-K Tighten Architecture
+- **`engine/distribution.py::find_best_for_pkg()`** — scores all candidates, tightens the top 5, then re-scores before picking the best. Replaces "tighten everything" approach that caused 20–50× runtime blowup. ~1.5–2× overhead vs original.
+- **`engine/auto_arrange.py::LargestFirstStrategy.arrange()`** — same top-K tighten applied to both main and gap-filling passes.
+
+#### Local Rearrangement
+- **`engine/distribution.py::_try_local_rearrangement()`** — when the only feasible candidate is a stack, identifies which floor packages geometrically block the floor candidate (clearance-aware AABB overlap), removes ≤3, places the current package, re-places blockers, and only accepts if floor score > stack score. Uses full snapshot/restore via `import_placements` for safe rollback. Recursion depth = max 1.
+- **Floor-count guard** — rearrangement only fires when `n_floor ≤ 10` to avoid O(N²) overhead on densely-packed large containers (prevented 3× distribution blowup from 17.8s→54.7s).
+- `_snapshot_placements()` / `_restore_placements()` — helpers for clean rollback.
+- `_find_blocking_floor_packages()` — calculates which floor packages block a candidate position.
+- `_best_floor_candidate()` — picks the best floor-level position for a given package.
+
+#### Repair Optimizer
+- **`engine/repair.py::_is_better()`** priority 3 flipped from `n_floor > o_floor` to `n_floor < o_floor` (prefer smaller empty floor regions). No impact on current dataset (always returns `Improved: False`).
+
+#### Benchmark Correction
+- **Old benchmark was wrong**: loaded 31 DB rows with no quantity expansion (vs web UI 46 instances from PACKAGES with qty). Also omitted `cargo_length_mm`/`cargo_width_mm`/`cargo_height_mm`/`payload_kg` from vinfo dict, so `_vehicle_capacity()` returned 0 for all and vehicles sorted in plate-number order (smallest first) instead of largest-first by capacity.
+- **Corrected benchmark**: 46 packages, 32 vehicles sorted by `volume × max(payload, 1)` descending. Largest = V38/V39 (9700×2370×2300mm, 52.9m³). Results: 2 vehicles (was 5), 12 stacks baseline → 9 with rearrangement. Repair remains a no-op (Improved: False).
+
+### Added
+- `_count_stacks()` and `_per_vehicle_empty_floor()` helpers in `engine/repair.py` (diagnostic utilities).
+- `scripts/benchmark_final.py` — corrected 46-package 3-config benchmark (Run A: baseline, Run B: rearrangement, Run C: rearrangement+repair).
+
+---
+
+## 2026-07-20 — Largest-Vehicle-First Fleet Distribution, Strict Unstackable Enforcement, Door-Aware Animation
+
+### Changed
+
+#### Fleet Distribution: Best-Fit Decreasing → Largest-Vehicle-First
+- **`engine/distribution.py:176`** — rewritten `distribute_across_vehicles()`:
+  - Sorts vehicles by combined capacity (volume_mm³ × payload_kg) descending
+  - For each vehicle (biggest → smallest), tries to place all remaining packages
+  - Leftovers roll over to the next (smaller) vehicle
+  - Removed waste estimation (`estimate_remaining_after` no longer called)
+  - Removed Phase 3 rear-door redirect (no longer needed)
+  - Removed per-package BFD cross-vehicle comparison
+
+#### Package Sort: Priority-Grouped → Strict Volume Descending
+- **`engine/distribution.py:192-194`**: removed `_pkg_priority()` grouping; sort is now purely `-volume`
+- **`engine/auto_arrange.py:48-51`**: same change — no more non-stackable-before-stackable grouping
+- Placement sequence within each vehicle is now strictly biggest-first, eliminating `big → small → big → small` patterns
+
+#### Strict Unstackable Enforcement
+- **`engine/support.py:60-63`**: added top-package check in `_check_stacking_rules()` — an unstackable package (`stacking_mode=NONE`) cannot be placed on top of another package
+- **`engine/package.py:33-35`**: added `__post_init__` to `Package` dataclass — auto-derives `stacking_mode` from `stackable`:
+  ```python
+  if not self.stackable and self.stacking_mode == StackingMode.NORMAL:
+      self.stacking_mode = StackingMode.NONE
+  ```
+  Previously only `Package.from_dict()` derived `stacking_mode` correctly; all direct `Package(...)` construction sites left it at the default `NORMAL`, so `stackable=False` had no effect on stacking validation.
+
+#### Door-Used Propagation (Animation)
+- **`engine/placement.py:14`**: added `door_used: str = "rear"` to `Placement` dataclass
+- **`engine/validation.py:27`**: added `door_used: str = "rear"` to `ValidationResult`
+- **`engine/validation.py:153`**: captures `door_used` from `check_door_sweep()` result
+- **`engine/planner.py:60`**: passes `result.door_used` to `append_placement()`
+- **`engine/state.py:63`**: stores `door_used` on the `Placement`
+- **`routes.py:718`**: includes `door_used` in the frontend placement dict
+- **`static/js/truck-load-planner.js:3126`**: reads `placement.door_used` and selects entry point:
+  - `"rear"` → `(d.len + pl, y, z)`
+  - `"side_right"` → `(x, y, d.wid + pw)`
+  - `"side_left"` → `(x, y, -pw)`
+
+### Removed
+- `estimate_remaining_after()` is no longer called by `distribute_across_vehicles` (kept for backward compat)
+- BFD waste estimation logic
+- Phase 3 rear-door redirect logic
+
+---
+
 ## 2026-07-19 — Dead Space Quality (Future-Packability Estimation)
 
 ### Added

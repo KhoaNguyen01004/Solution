@@ -23,6 +23,8 @@ def _to_engine_pkg(pkg) -> EnginePackage:
     """Convert a legacy Package (from models) to engine Package."""
     if isinstance(pkg, EnginePackage):
         return pkg
+    old_clr = getattr(pkg, 'clearance_mm', getattr(pkg, 'clearance', None))
+    h_clr = float(old_clr) if old_clr is not None else 10.0
     return EnginePackage(
         id=pkg.id,
         name=pkg.name,
@@ -34,12 +36,16 @@ def _to_engine_pkg(pkg) -> EnginePackage:
         allow_rotation=bool(pkg.allow_rotation),
         fragile=bool(pkg.fragile),
         color=pkg.color,
-        clearance_mm=getattr(pkg, 'clearance_mm', 10.0),
+        horizontal_clearance_mm=h_clr,
+        max_top_weight_kg=float(getattr(pkg, 'max_top_weight_kg', 0.0)),
+        max_stack_layers=int(getattr(pkg, 'max_stack_layers', 0)),
     )
 
 
 def _from_legacy_dict(d: dict) -> EnginePackage:
     """Build an engine Package from a legacy dict (underscore keys)."""
+    old_clr = d.get("clearance_mm", d.get("clearance", None))
+    h_clr = float(old_clr) if old_clr is not None else 10.0
     return EnginePackage(
         id=d.get("package_id"),
         name=d.get("_name", d.get("name", "")),
@@ -51,7 +57,9 @@ def _from_legacy_dict(d: dict) -> EnginePackage:
         allow_rotation=bool(d.get("allow_rotation", 1)),
         fragile=bool(d.get("fragile", 0)),
         color=d.get("color", "#3b82f6"),
-        clearance_mm=float(d.get("clearance_mm", d.get("clearance", 10.0))),
+        horizontal_clearance_mm=h_clr,
+        max_top_weight_kg=float(d.get("max_top_weight_kg", 0.0)),
+        max_stack_layers=int(d.get("max_stack_layers", 0)),
     )
 
 
@@ -63,6 +71,7 @@ def _engine_placement_to_dict(pl: Placement) -> dict:
         "x": pl.x, "y": pl.y, "z": pl.z,
         "rotation": pl.rotation,
         "load_sequence": pl.load_sequence,
+        "door_used": getattr(pl, "door_used", "rear"),
         "_package": pkg,
         "_name": pkg.name if pkg else "",
         "_weight_kg": pkg.weight_kg if pkg else 0,
@@ -218,7 +227,7 @@ class LoadPlanningSession:
         self,
         shipment_items: Optional[list] = None,
         packages: Optional[list[EnginePackage]] = None,
-        strategy: str = "largest_first",
+        strategy: str = "column",
         progress_callback: Optional[Callable] = None,
         cancel_callback: Optional[Callable] = None,
         debug: bool = False,

@@ -70,6 +70,8 @@
         .btn-edit:hover { background: rgba(47,140,235,0.3); }
         .btn-delete { background: rgba(239,68,68,0.12); color: #f87171; border: 1px solid rgba(239,68,68,0.2); }
         .btn-delete:hover { background: rgba(239,68,68,0.25); }
+        .selected-row { background: rgba(47,140,235,0.08) !important; }
+        .vehicle-checkbox { width: 16px; height: 16px; cursor: pointer; accent-color: #2f8ceb; }
         .btn-add { background: linear-gradient(135deg,#10b981,#059669); color: #fff; border: none; padding: 8px 18px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; box-shadow: 0 4px 12px rgba(16,185,129,0.35); }
         .btn-add:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(16,185,129,0.5); }
 
@@ -187,12 +189,16 @@
     <div class="table-section">
         <div class="table-header">
             <div class="table-title">Fleet Vehicles <span class="table-count" id="vehicle-count">0</span></div>
-            <input id="table-search" class="table-search" type="text" placeholder="Search plate…" oninput="filterTable(this.value)">
+            <div style="display:flex;gap:8px;align-items:center;">
+                <button class="btn-action btn-delete" id="btn-bulk-delete" style="display:none;" onclick="bulkDelete()">Delete Selected</button>
+                <input id="table-search" class="table-search" type="text" placeholder="Search plate…" oninput="filterTable(this.value)">
+            </div>
         </div>
         <div class="table-wrap">
             <table>
                 <thead>
                     <tr>
+                        <th style="width:36px;"><input type="checkbox" id="select-all" onchange="toggleSelectAll(this.checked)" title="Select all"></th>
                         <th>Plate Number</th>
                         <th>Vehicle Type</th>
                         <th>Current Driver</th>

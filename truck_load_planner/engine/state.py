@@ -11,6 +11,7 @@ from .placement import Placement
 from .container import Container
 from .geometry import AABB
 from .spatial import UniformGrid
+from .trace_mutations import M
 
 
 class PlanningState:
@@ -59,6 +60,7 @@ class PlanningState:
         y: float,
         z: float,
         rotation: int = 0,
+        door_used: str = "rear",
     ) -> Placement:
         """Append a new placement and update extreme points + spatial index."""
         self._sequence_counter += 1
@@ -68,22 +70,26 @@ class PlanningState:
             rotation=rotation,
             load_sequence=self._sequence_counter,
             package=package,
+            door_used=door_used,
         )
-        clearance = getattr(package, 'clearance_mm', 0)
+        h_clr = getattr(package, 'horizontal_clearance_mm', 10.0)
+        v_clr = getattr(package, 'vertical_clearance_mm', 0.0)
         aabb = AABB.from_dimensions(
             x, y, z,
             package.length_mm, package.width_mm, package.height_mm,
-            rotation, clearance=clearance,
+            rotation, clearance_xy=h_clr, clearance_z=v_clr,
         )
         self._placements.append(placement)
         self._spatial.insert(placement, aabb)
         self._extreme_points_add(package, x, y, z, rotation)
+        M.log_insert("PlanningState.append_placement", placement, "new placement")
         return placement
 
     def pop_placement(self, index: int) -> Optional[Placement]:
         """Remove the placement at *index* and rebuild extreme points + grid."""
         if 0 <= index < len(self._placements):
             pl = self._placements.pop(index)
+            M.log_remove("PlanningState.pop_placement", pl, f"idx={index}")
             self._spatial.remove(pl)
             self._rebuild_extreme_points()
             return pl
@@ -107,15 +113,17 @@ class PlanningState:
             load_sequence=load_sequence,
             package=package,
         )
-        clearance = getattr(package, 'clearance_mm', 0)
+        h_clr = getattr(package, 'horizontal_clearance_mm', 10.0)
+        v_clr = getattr(package, 'vertical_clearance_mm', 0.0)
         aabb = AABB.from_dimensions(
             x, y, z,
             package.length_mm, package.width_mm, package.height_mm,
-            rotation, clearance=clearance,
+            rotation, clearance_xy=h_clr, clearance_z=v_clr,
         )
         self._placements.insert(index, placement)
         self._spatial.insert(placement, aabb)
         self._rebuild_extreme_points()
+        M.log_insert("PlanningState.insert_placement", placement, f"idx={index}")
         return placement
 
     # ── Candidate points (extreme points) ──────────────────────────────
@@ -128,6 +136,7 @@ class PlanningState:
 
     def import_placements(self, placement_dicts: list[dict]) -> None:
         """Replace all placements from saved data and rebuild indices."""
+        old_ids = {id(pl): pl for pl in self._placements}
         self._placements.clear()
         self._spatial.clear()
         self._sequence_counter = 0
@@ -145,15 +154,19 @@ class PlanningState:
                 package=pkg,
             )
             self._placements.append(pl)
+            M.log_insert("PlanningState.import_placements", pl, "from snapshot")
             if pkg:
-                clearance = getattr(pkg, 'clearance_mm', 0)
+                h_clr = getattr(pkg, 'horizontal_clearance_mm', 10.0)
+                v_clr = getattr(pkg, 'vertical_clearance_mm', 0.0)
                 aabb = AABB.from_dimensions(
                     pl.x, pl.y, pl.z,
                     pkg.length_mm, pkg.width_mm, pkg.height_mm,
-                    pl.rotation, clearance=clearance,
+                    pl.rotation, clearance_xy=h_clr, clearance_z=v_clr,
                 )
                 self._spatial.insert(pl, aabb)
         self._rebuild_extreme_points()
+        for old_pl in old_ids.values():
+            M.log_remove("PlanningState.import_placements", old_pl, "cleared by snapshot restore")
 
     # ── Public query interface ─────────────────────────────────────────
 
@@ -183,13 +196,14 @@ class PlanningState:
         rotation: int,
     ) -> None:
         """Incrementally update extreme points after placing a package."""
-        clearance = getattr(package, 'clearance_mm', 0)
+        h_clr = getattr(package, 'horizontal_clearance_mm', 10.0)
+        v_clr = getattr(package, 'vertical_clearance_mm', 0.0)
         pkg_aabb = AABB.from_dimensions(
             x, y, z,
             package.length_mm,
             package.width_mm,
             package.height_mm,
-            rotation, clearance=clearance,
+            rotation, clearance_xy=h_clr, clearance_z=v_clr,
         )
 
         # 1. Remove extreme points inside the just-placed package's clearance zone
@@ -207,9 +221,9 @@ class PlanningState:
             w_eff = package.width_mm
 
         new_pts = [
-            (x + l_eff + 2 * clearance, y, z),   # right face
-            (x, y + w_eff + 2 * clearance, z),   # front face
-            (x, y, z + package.height_mm + 2 * clearance),  # top face
+            (x + l_eff + 2 * h_clr, y, z),   # right face (X)
+            (x, y + w_eff + 2 * h_clr, z),   # front face (Y)
+            (x, y, z + package.height_mm + 2 * v_clr),  # top face (Z)
         ]
 
         cl, cw, ch = (
@@ -227,13 +241,14 @@ class PlanningState:
             for pl in self._placements[:-1]:
                 if pl.package is None:
                     continue
-                pl_clearance = getattr(pl.package, 'clearance_mm', 0)
+                pl_h_clr = getattr(pl.package, 'horizontal_clearance_mm', 10.0)
+                pl_v_clr = getattr(pl.package, 'vertical_clearance_mm', 0.0)
                 pl_aabb = AABB.from_dimensions(
                     pl.x, pl.y, pl.z,
                     pl.package.length_mm,
                     pl.package.width_mm,
                     pl.package.height_mm,
-                    pl.rotation, clearance=pl_clearance,
+                    pl.rotation, clearance_xy=pl_h_clr, clearance_z=pl_v_clr,
                 )
                 if pl_aabb.strictly_contains_point(*pt):
                     inside = True
@@ -254,7 +269,8 @@ class PlanningState:
             pkg = pl.package
             if pkg is None:
                 continue
-            clearance = getattr(pkg, 'clearance_mm', 0)
+            h_clr = getattr(pkg, 'horizontal_clearance_mm', 10.0)
+            v_clr = getattr(pkg, 'vertical_clearance_mm', 0.0)
             if pl.rotation in (90, 270):
                 l_eff = pkg.width_mm
                 w_eff = pkg.length_mm
@@ -262,9 +278,9 @@ class PlanningState:
                 l_eff = pkg.length_mm
                 w_eff = pkg.width_mm
 
-            points.add((pl.x + l_eff + 2 * clearance, pl.y, pl.z))
-            points.add((pl.x, pl.y + w_eff + 2 * clearance, pl.z))
-            points.add((pl.x, pl.y, pl.z + pkg.height_mm + 2 * clearance))
+            points.add((pl.x + l_eff + 2 * h_clr, pl.y, pl.z))
+            points.add((pl.x, pl.y + w_eff + 2 * h_clr, pl.z))
+            points.add((pl.x, pl.y, pl.z + pkg.height_mm + 2 * v_clr))
 
         # Filter container bounds
         cl, cw, ch = (
@@ -281,13 +297,14 @@ class PlanningState:
         for pl in self._placements:
             if pl.package is None:
                 continue
-            pl_clearance = getattr(pl.package, 'clearance_mm', 0)
+            pl_h_clr = getattr(pl.package, 'horizontal_clearance_mm', 10.0)
+            pl_v_clr = getattr(pl.package, 'vertical_clearance_mm', 0.0)
             pl_aabb = AABB.from_dimensions(
                 pl.x, pl.y, pl.z,
                 pl.package.length_mm,
                 pl.package.width_mm,
                 pl.package.height_mm,
-                pl.rotation, clearance=pl_clearance,
+                pl.rotation, clearance_xy=pl_h_clr, clearance_z=pl_v_clr,
             )
             to_remove = set()
             for pt in filtered:

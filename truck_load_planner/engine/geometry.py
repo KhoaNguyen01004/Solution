@@ -19,15 +19,20 @@ class AABB:
     @classmethod
     def from_dimensions(cls, x: float, y: float, z: float,
                         length_mm: float, width_mm: float, height_mm: float,
-                        rotation: int = 0, clearance: float = 0):
+                        rotation: int = 0, clearance: float = 0,
+                        clearance_xy: float = None, clearance_z: float = None):
+        if clearance_xy is None:
+            clearance_xy = clearance
+        if clearance_z is None:
+            clearance_z = clearance
         if rotation in (90, 270):
             dx = width_mm
             dy = length_mm
         else:
             dx = length_mm
             dy = width_mm
-        return cls(x - clearance, y - clearance, z - clearance,
-                   x + dx + clearance, y + dy + clearance, z + height_mm + clearance)
+        return cls(x - clearance_xy, y - clearance_xy, z - clearance_z,
+                   x + dx + clearance_xy, y + dy + clearance_xy, z + height_mm + clearance_z)
 
     def intersects(self, other: "AABB") -> bool:
         return (

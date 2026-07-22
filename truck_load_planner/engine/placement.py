@@ -3,6 +3,14 @@ from typing import Optional
 from .package import Package
 
 
+_placement_uid_counter = [0]
+
+
+def _next_placement_uid() -> int:
+    _placement_uid_counter[0] += 1
+    return _placement_uid_counter[0]
+
+
 @dataclass
 class Placement:
     package_id: int
@@ -12,6 +20,10 @@ class Placement:
     rotation: int = 0
     load_sequence: Optional[int] = None
     package: Optional[Package] = None
+    door_used: str = "rear"
+
+    def __post_init__(self):
+        self._uid = _next_placement_uid()
 
     def to_dict(self) -> dict:
         d = asdict(self)

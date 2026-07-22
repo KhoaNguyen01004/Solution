@@ -5,11 +5,15 @@ All routes are prefixed with /api/tlp.
 
 import json
 import sqlite3
+import time
+import uuid
+import datetime
 from flask import Blueprint, jsonify, request
 
 tlp_bp = Blueprint("tlp", __name__, url_prefix="/api/tlp")
 
 DB_PATH = None
+
 
 
 def _get_db():
@@ -217,8 +221,9 @@ def create_package():
     c = conn.cursor()
     c.execute("""
         INSERT INTO tlp_packages (name, length, width, height, weight_kg,
-          allow_stacking, allow_rotation, fragile, color, default_qty)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          allow_stacking, allow_rotation, fragile, color, default_qty,
+          max_top_weight_kg, max_stack_layers)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         data["name"], data["length"], data["width"], data["height"],
         data["weight_kg"],
@@ -227,6 +232,8 @@ def create_package():
         1 if data.get("fragile") else 0,
         data.get("color", "#3b82f6"),
         data.get("default_qty", 1),
+        data.get("max_top_weight_kg", 0.0),
+        data.get("max_stack_layers", 0),
     ))
     conn.commit()
     pkg_id = c.lastrowid
@@ -246,7 +253,8 @@ def update_package(pkg_id):
     conn.execute("""
         UPDATE tlp_packages SET name=?, length=?, width=?, height=?,
           weight_kg=?, allow_stacking=?, allow_rotation=?, fragile=?,
-          color=?, default_qty=?, updated_at=CURRENT_TIMESTAMP
+          color=?, default_qty=?, max_top_weight_kg=?, max_stack_layers=?,
+          updated_at=CURRENT_TIMESTAMP
         WHERE id=?
     """, (
         data.get("name", existing["name"]),
@@ -259,6 +267,8 @@ def update_package(pkg_id):
         1 if data.get("fragile", existing["fragile"]) else 0,
         data.get("color", existing["color"]),
         data.get("default_qty", existing["default_qty"] if "default_qty" in existing.keys() else 1),
+        data.get("max_top_weight_kg", existing.get("max_top_weight_kg", 0.0)),
+        data.get("max_stack_layers", existing.get("max_stack_layers", 0)),
         pkg_id,
     ))
     conn.commit()
@@ -276,6 +286,18 @@ def delete_package(pkg_id):
     conn.close()
     if c.rowcount == 0:
         return jsonify({"error": "Package not found"}), 404
+    return jsonify({"success": True})
+
+
+@tlp_bp.route("/packages/clear", methods=["DELETE"])
+def clear_all_packages():
+    conn = _get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM tlp_placements WHERE package_id IN (SELECT id FROM tlp_packages)")
+    c.execute("DELETE FROM tlp_shipment_items WHERE package_id IN (SELECT id FROM tlp_packages)")
+    c.execute("DELETE FROM tlp_packages")
+    conn.commit()
+    conn.close()
     return jsonify({"success": True})
 
 
@@ -544,7 +566,7 @@ def get_plan(plan_id):
         ).fetchall()
         plan["features"] = [_row_to_dict(f) for f in feats]
     placements = conn.execute("""
-        SELECT pl.*, p.name AS package_name, p.length, p.width, p.height, p.weight_kg, p.allow_stacking, p.color
+        SELECT pl.*, p.name AS package_name, p.length, p.width, p.height, p.weight_kg, p.allow_stacking, p.allow_rotation, p.fragile, p.color, p.max_top_weight_kg, p.max_stack_layers
         FROM tlp_placements pl
         LEFT JOIN tlp_packages p ON p.id = pl.package_id
         WHERE pl.load_plan_id = ?
@@ -680,85 +702,12 @@ def validate_placement():
 
 # ─── Auto Arrange ────────────────────────────────────────────────
 
-def _expand_candidates(base_candidates, allow_rotation):
-    """Expand (x,y,z) tuples with rotation variants."""
-    expanded = []
-    seen = set()
-    for pos in base_candidates:
-        if isinstance(pos, dict):
-            x, y, z = pos.get("x", 0), pos.get("y", 0), pos.get("z", 0)
-        else:
-            x, y, z = pos[0], pos[1], pos[2]
-        key0 = (x, y, z, 0)
-        if key0 not in seen:
-            seen.add(key0)
-            expanded.append({"x": x, "y": y, "z": z, "rotation": 0})
-        if allow_rotation:
-            key90 = (x, y, z, 90)
-            if key90 not in seen:
-                seen.add(key90)
-                expanded.append({"x": x, "y": y, "z": z, "rotation": 90})
-    return expanded
+from truck_load_planner.engine.distribution import expand_candidates, candidate_priority, distribute_across_vehicles, find_best_for_pkg
+from truck_load_planner.optimization.vehicle_cost import compute_fleet_cost
 
-
-def _candidate_priority(pkg, pos, container):
-    """Lightweight priority score for a candidate placement position.
-
-    Higher = more promising. Used to rank candidates before expensive
-    validation so that good placements are found and accepted earlier.
-
-    Factors (most to least important):
-      1. Container surfaces touched (corner placements score highest)
-      2. Lower Z — prefer floor placements
-      3. Greater wall-contact area
-      4. Back-to-front — prefer positions closer to the back wall (x=0),
-         so loading fills from the far end toward the door
-      5. Proximity to the front-left-bottom origin
-    """
-    x, y, z = pos["x"], pos["y"], pos["z"]
-    rot = pos["rotation"]
-
-    if rot == 0:
-        dx, dy, dz = pkg.length_mm, pkg.width_mm, pkg.height_mm
-    else:
-        dx, dy, dz = pkg.width_mm, pkg.length_mm, pkg.height_mm
-
-    # 1. Touching surfaces (0-6 → score 0-60)
-    touches = 0
-    if x == 0:               touches += 1
-    if x + dx == container.length: touches += 1
-    if y == 0:               touches += 1
-    if y + dy == container.width:  touches += 1
-    if z == 0:               touches += 1
-    if z + dz == container.height: touches += 1
-    touch_score = touches * 10.0
-
-    # 2. Z-height (lower → better, score 0-15)
-    z_score = (1.0 - z / container.height) * 15.0 if container.height > 0 else 0.0
-
-    # 3. Wall-contact area (score 0-15)
-    contact = 0.0
-    if x == 0:               contact += dy * dz
-    if x + dx == container.length: contact += dy * dz
-    if y == 0:               contact += dx * dz
-    if y + dy == container.width:  contact += dx * dz
-    if z == 0:               contact += dx * dy
-    if z + dz == container.height: contact += dx * dy
-    max_contact = 2 * (dx * dy + dy * dz + dx * dz)
-    wall_score = (contact / max_contact * 15.0) if max_contact > 0 else 0.0
-
-    # 4. Back-to-front loading direction (score 0-20)
-    # Lower x = closer to back wall (far from rear door), loaded first
-    back_score = (1.0 - x / container.length) * 20.0 if container.length > 0 else 0.0
-
-    # 5. Proximity to front-center (score 0-10)
-    # Prefers innermost (low x) without Y bias toward either wall.
-    # This replaces the old origin-proximity which pulled everything to y=0.
-    fc_dist = (x**2 + (y - container.width / 2)**2 + z**2) ** 0.5
-    max_fc = (container.length**2 + (container.width / 2)**2 + container.height**2) ** 0.5
-    front_center_score = (1.0 - fc_dist / max_fc) * 10.0 if max_fc > 0 else 0.0
-
-    return touch_score + z_score + wall_score + back_score + front_center_score
+_expand_candidates = expand_candidates
+_candidate_priority = candidate_priority
+_distribute_across_vehicles = distribute_across_vehicles
 
 
 def _build_placement_dict(pl, vehicle_id=None):
@@ -769,6 +718,7 @@ def _build_placement_dict(pl, vehicle_id=None):
         "x": pl.x, "y": pl.y, "z": pl.z,
         "rotation": pl.rotation,
         "load_sequence": pl.load_sequence,
+        "door_used": getattr(pl, "door_used", "rear"),
         "_package": {
             "id": pkg.id if pkg else None,
             "name": pkg.name if pkg else "",
@@ -779,6 +729,8 @@ def _build_placement_dict(pl, vehicle_id=None):
             "color": pkg.color if pkg else "#3b82f6",
             "stackable": pkg.stackable if pkg else False,
             "allow_stacking": pkg.stackable if pkg else False,
+            "max_top_weight_kg": pkg.max_top_weight_kg if pkg else 0.0,
+            "max_stack_layers": pkg.max_stack_layers if pkg else 0,
         } if pkg else None,
         "_name": pkg.name if pkg else "",
         "_length": pkg.length_mm if pkg else 0,
@@ -801,7 +753,8 @@ def _get_packages_from_request(data, conn):
     if shipment_id:
         items = conn.execute(
             "SELECT si.*, p.name AS package_name, p.length, p.width, p.height, "
-            "p.weight_kg, p.allow_stacking, p.allow_rotation, p.fragile, p.color "
+            "p.weight_kg, p.allow_stacking, p.allow_rotation, p.fragile, p.color, "
+            "p.max_top_weight_kg, p.max_stack_layers "
             "FROM tlp_shipment_items si "
             "LEFT JOIN tlp_packages p ON p.id = si.package_id "
             "WHERE si.shipment_id = ?",
@@ -812,6 +765,8 @@ def _get_packages_from_request(data, conn):
             itd = dict(it)
             lpkg = LegacyPackage.from_row(itd)
             qty = itd.get("quantity", 1) or 1
+            old_clr = getattr(lpkg, 'clearance_mm', getattr(lpkg, 'clearance', None))
+            h_clr = float(old_clr) if old_clr is not None else 10.0
             ep = EnginePackage(
                 id=lpkg.id, name=lpkg.name,
                 length_mm=lpkg.length, width_mm=lpkg.width,
@@ -820,7 +775,9 @@ def _get_packages_from_request(data, conn):
                 allow_rotation=bool(lpkg.allow_rotation),
                 fragile=bool(lpkg.fragile),
                 color=lpkg.color,
-                clearance_mm=float(getattr(lpkg, 'clearance_mm', 10.0)),
+                horizontal_clearance_mm=h_clr,
+                max_top_weight_kg=float(getattr(lpkg, 'max_top_weight_kg', 0.0)),
+                max_stack_layers=int(getattr(lpkg, 'max_stack_layers', 0)),
             )
             for _ in range(qty):
                 pkgs.append(ep)
@@ -829,6 +786,8 @@ def _get_packages_from_request(data, conn):
     if data.get("packages"):
         pkgs = []
         for pd in data["packages"]:
+            old_clr = pd.get("clearance_mm", pd.get("clearance", None))
+            h_clr = float(old_clr) if old_clr is not None else 10.0
             pkgs.append(EnginePackage(
                 id=pd.get("package_id", pd.get("id")),
                 name=pd.get("name", ""),
@@ -840,7 +799,9 @@ def _get_packages_from_request(data, conn):
                 allow_rotation=bool(pd.get("allow_rotation", 0)),
                 fragile=bool(pd.get("fragile", 0)),
                 color=pd.get("color", "#3b82f6"),
-                clearance_mm=float(pd.get("clearance_mm", pd.get("clearance", 10.0))),
+                horizontal_clearance_mm=h_clr,
+                max_top_weight_kg=float(pd.get("max_top_weight_kg", 0.0)),
+                max_stack_layers=int(pd.get("max_stack_layers", 0)),
             ))
         return pkgs
 
@@ -886,217 +847,9 @@ def _load_vehicle_session(conn, vehicle_id):
     return session, vdata
 
 
-def _distribute_across_vehicles(packages, vehicle_sessions, debug=False):
-    """Distribute packages across multiple vehicles using best-fit-decreasing.
-
-    Minimises the number of vehicles used by filling each vehicle to capacity
-    before opening the next one. For each package, active (already-used)
-    vehicles are tried first; only when none can accommodate the package is
-    a new vehicle opened.
-
-    Uses Best-Fit Decreasing: among vehicles where the package fits, pick the
-    one where the package consumes the largest fraction of remaining capacity
-    (least waste), weighted together with placement quality.
-    """
-    sorted_pkgs = sorted(
-        packages,
-        key=lambda p: (
-            p.stackable,
-            -(p.length_mm * p.width_mm * p.height_mm),
-            -(p.length_mm * p.width_mm),
-            -p.weight_kg,
-        ),
-    )
-
-    placed = 0
-    failed = 0
-    unplaced = []
-    placed_vehicle_map = {vinfo["vehicle_id"]: [] for vinfo, _ in vehicle_sessions}
-    active_indices: list[int] = []  # indices of vehicle_sessions that already have packages
-
-    def _find_best_for_pkg(pkg, vinfo, session, remaining_pkgs=None):
-        """Return (best_score, best_pos) or (None, None) if no valid position."""
-        best_score = -1.0
-        best_pos = None
-        planner = session._planner
-        container = planner.state.container
-        candidates = list(planner.get_candidate_points())
-
-        # Add right-wall candidate for better left-right balance
-        clearance = getattr(pkg, 'clearance_mm', 10)
-        right_y = container.width - pkg.width_mm - clearance
-        if right_y > clearance:
-            right_candidate = (0, right_y, 0)
-            if right_candidate not in candidates:
-                candidates.insert(0, right_candidate)
-
-        expanded = _expand_candidates(candidates, pkg.allow_rotation)
-        # Rank by priority — more promising candidates validated first
-        # so that excellent placements are found earlier (fewer iterations)
-        prioritized = sorted(
-            expanded,
-            key=lambda pos: _candidate_priority(pkg, pos, container),
-            reverse=True,
-        )
-        for pos in prioritized:
-            vresult = planner.validate_position(
-                pkg, pos["x"], pos["y"], pos["z"], pos["rotation"],
-            )
-            if not vresult.valid:
-                continue
-            score = planner.evaluate_position(
-                pkg, pos["x"], pos["y"], pos["z"], pos["rotation"],
-                remaining_packages=remaining_pkgs,
-            )
-            if score.total > best_score:
-                best_score = score.total
-                best_pos = pos
-                if best_score >= 99.99:
-                    break
-
-        # ── Y-slide pass: if no position found, try sliding candidates left/right ──
-        if best_pos is None:
-            from truck_load_planner.engine.candidate_points import generate_slide_candidates
-            slide_cands = generate_slide_candidates(candidates, pkg, container)
-            for pos in slide_cands:
-                vresult = planner.validate_position(
-                    pkg, pos["x"], pos["y"], pos["z"], pos["rotation"],
-                )
-                if not vresult.valid:
-                    continue
-                score = planner.evaluate_position(
-                    pkg, pos["x"], pos["y"], pos["z"], pos["rotation"],
-                    remaining_packages=remaining_pkgs,
-                )
-                if score.total > best_score:
-                    best_score = score.total
-                    best_pos = pos
-                    if best_score >= 99.99:
-                        break
-
-        return best_score, best_pos
-
-    def _estimate_remaining_after(pkg, pos, session):
-        """Estimate remaining capacity % after placing pkg at pos.
-
-        Returns (vol_pct, floor_pct, payload_pct). Lower = tighter fit
-        = less waste. The *pos* is needed to determine floor consumption
-        (packages at z>0 don't consume floor footprint).
-        """
-        planner = session._planner
-        container = planner.state.container
-        stats = planner.get_statistics()
-
-        total_vol_mm3 = container.length * container.width * container.height
-        used_vol_mm3 = stats.get("volume_used_m3", 0) * 1_000_000_000
-        rem_vol = max(0.0, total_vol_mm3 - used_vol_mm3
-                      - pkg.length_mm * pkg.width_mm * pkg.height_mm)
-
-        total_floor_mm2 = container.length * container.width
-        used_floor_pct = stats.get("floor_used_pct", 0) / 100.0
-        used_floor_mm2 = used_floor_pct * total_floor_mm2
-        floor_footprint = pkg.length_mm * pkg.width_mm if pos["z"] == 0 else 0
-        rem_floor = max(0.0, total_floor_mm2 - used_floor_mm2 - floor_footprint)
-
-        rem_payload = max(0.0, stats.get("weight_remaining_kg",
-                          container.payload_kg) - pkg.weight_kg)
-
-        vol_pct = rem_vol / total_vol_mm3 * 100 if total_vol_mm3 > 0 else 0.0
-        floor_pct = (rem_floor / total_floor_mm2 * 100
-                     if total_floor_mm2 > 0 else 0.0)
-        payload_pct = (rem_payload / container.payload_kg * 100
-                       if container.payload_kg > 0 else 0.0)
-        return vol_pct, floor_pct, payload_pct
-
-    for i, pkg in enumerate(sorted_pkgs):
-        remaining_pkgs = sorted_pkgs[i + 1:]
-        best_waste = float("inf")
-        best_score = -1.0
-        best_session = None
-        best_pos = None
-        best_vinfo = None
-
-        def _is_better(waste, score):
-            """Primary: less remaining capacity (tighter fit).
-            Secondary: higher placement score (tiebreaker)."""
-            nonlocal best_waste, best_score
-            return (waste < best_waste - 1e-9
-                    or (abs(waste - best_waste) < 1e-9 and score > best_score))
-
-        # Phase 1: try active (already-used) vehicles first
-        for idx in active_indices:
-            vinfo, session = vehicle_sessions[idx]
-            score, pos = _find_best_for_pkg(pkg, vinfo, session, remaining_pkgs)
-            if pos is not None:
-                rv, rf, rp = _estimate_remaining_after(pkg, pos, session)
-                waste = rv + rf + rp
-                if _is_better(waste, score):
-                    best_waste = waste
-                    best_score = score
-                    best_session = session
-                    best_pos = pos
-                    best_vinfo = vinfo
-                    if score >= 99.99:
-                        break
-
-        # Phase 2: if no active vehicle works, try the next unused vehicle
-        if best_pos is None:
-            new_active = None
-            for idx, (vinfo, session) in enumerate(vehicle_sessions):
-                if idx in active_indices:
-                    continue
-                score, pos = _find_best_for_pkg(pkg, vinfo, session, remaining_pkgs)
-                if pos is not None:
-                    rv, rf, rp = _estimate_remaining_after(pkg, pos, session)
-                    waste = rv + rf + rp
-                    if _is_better(waste, score):
-                        best_waste = waste
-                        best_score = score
-                        best_session = session
-                        best_pos = pos
-                        best_vinfo = vinfo
-                        new_active = idx
-                        if score >= 99.99:
-                            break
-            if new_active is not None:
-                active_indices.append(new_active)
-
-        # Phase 3: if the package literally touches the rear wall, redirect to
-        # the last vehicle unconditionally (if it can accommodate). The last
-        # vehicle has the most unused space, and rear-wall packages unload first.
-        if best_pos is not None and len(vehicle_sessions) > 1:
-            last_idx = len(vehicle_sessions) - 1
-            last_vinfo, last_session = vehicle_sessions[last_idx]
-            if last_vinfo["vehicle_id"] != best_vinfo["vehicle_id"]:
-                container = best_session._planner.state.container
-                dx = pkg.length_mm if best_pos["rotation"] == 0 else pkg.width_mm
-                gap = container.length - (best_pos["x"] + dx)
-                if gap <= 0:  # touches rear wall
-                    last_score, last_pos = _find_best_for_pkg(pkg, last_vinfo, last_session, remaining_pkgs)
-                    if last_pos is not None:
-                        rv, rf, rp = _estimate_remaining_after(pkg, last_pos, last_session)
-                        last_waste = rv + rf + rp
-                        best_waste, best_score = last_waste, last_score
-                        best_session, best_pos = last_session, last_pos
-                        best_vinfo = last_vinfo
-                        if last_idx not in active_indices:
-                            active_indices.append(last_idx)
-
-        if best_session and best_pos:
-            p_result = best_session._planner.place_package(
-                pkg, best_pos["x"], best_pos["y"], best_pos["z"], best_pos["rotation"],
-            )
-            if p_result.valid:
-                placed += 1
-                placed_vehicle_map[best_vinfo["vehicle_id"]].append(pkg.name)
-            else:
-                failed += 1
-                unplaced.append(pkg.name)
-        else:
-            failed += 1
-            unplaced.append(pkg.name)
-
-    return placed, failed, unplaced, placed_vehicle_map
+def _distribute_across_vehicles(packages, vehicle_sessions, debug=False, profile=None):
+    """Delegate to engine.distribution.distribute_across_vehicles."""
+    return distribute_across_vehicles(packages, vehicle_sessions, debug=debug, profile=profile)
 
 
 @tlp_bp.route("/auto-arrange", methods=["POST"])
@@ -1112,13 +865,16 @@ def auto_arrange():
     """
     data = request.json or {}
     vehicle_id = data.get("vehicle_id")
-    strategy = data.get("strategy", "largest_first")
+    strategy = data.get("strategy", "column")
     debug = bool(data.get("debug", False))
+
+    from truck_load_planner.engine.profile import PROFILES
+    profile_name = data.get("profile", "balanced")
+    profile = PROFILES.get(profile_name, PROFILES["balanced"])
 
     conn = _get_db()
 
     if vehicle_id:
-        # ── Single-vehicle path ──
         session, vdata = _load_vehicle_session(conn, vehicle_id)
         if not session:
             conn.close()
@@ -1130,6 +886,8 @@ def auto_arrange():
         if not packages:
             return jsonify({"error": "No packages to arrange"}), 400
 
+        if profile and profile.candidate_limit and session._planner:
+            session._planner._candidate_limit = profile.candidate_limit
         result = session.auto_arrange(
             packages=packages,
             strategy=strategy,
@@ -1138,8 +896,9 @@ def auto_arrange():
 
         placements_out = [_build_placement_dict(pl) for pl in session._planner.placements]
 
-        return jsonify({
+        response_data = {
             "multi_vehicle": False,
+            "profile": profile_name,
             "vehicle_id": vehicle_id,
             "success": result.failed_packages == 0 or result.placed_packages > 0,
             "summary": {
@@ -1153,16 +912,20 @@ def auto_arrange():
             "placements": placements_out,
             "statistics": session.get_status(),
             "debug_log": result.debug_log if debug else [],
-        })
+        }
+
+        return jsonify(response_data)
 
     # ── Multi-vehicle path ──
     # Load all vehicles that have container configs
     vrows = conn.execute("""
         SELECT v.id AS vehicle_id, v.plate_number, v.vehicle_type, v.current_driver,
                cc.id AS cc_id, cc.name AS container_name,
-               cc.cargo_length_mm, cc.cargo_width_mm, cc.cargo_height_mm, cc.payload_kg
+               cc.cargo_length_mm, cc.cargo_width_mm, cc.cargo_height_mm, cc.payload_kg,
+               fvp.normal_l_per_100km
         FROM vehicles v
         INNER JOIN container_configs cc ON cc.id = v.container_config_id
+        LEFT JOIN fuel_vehicle_profile fvp ON fvp.license_plate = v.plate_number
         ORDER BY v.plate_number
     """).fetchall()
 
@@ -1175,6 +938,8 @@ def auto_arrange():
         vinfo = dict(vr)
         session, _ = _load_vehicle_session(conn, vinfo["vehicle_id"])
         if session:
+            if profile and profile.candidate_limit and session._planner:
+                session._planner._candidate_limit = profile.candidate_limit
             vehicle_sessions.append((vinfo, session))
 
     packages = _get_packages_from_request(data, conn)
@@ -1185,9 +950,67 @@ def auto_arrange():
     if not vehicle_sessions:
         return jsonify({"error": "No vehicles with valid container configs"}), 404
 
-    placed, failed, unplaced, vehicle_map = _distribute_across_vehicles(
-        packages, vehicle_sessions, debug=debug,
+    dist_start = time.time()
+    placed, failed, unplaced, vehicle_map, dist_stats = _distribute_across_vehicles(
+        packages, vehicle_sessions, debug=debug, profile=profile,
     )
+    dist_time_ms = int((time.time() - dist_start) * 1000)
+
+    # ── Repair phase: fleet-level Destroy-and-Repair ──────────────
+    placed_ids = set()
+    for _, session in vehicle_sessions:
+        for pl in session._planner.placements:
+            if pl.package is not None:
+                placed_ids.add(id(pl.package))
+    unplaced_pkg_objects = [p for p in packages if id(p) not in placed_ids]
+
+    from truck_load_planner.engine.repair import optimize_layout
+    repair_start = time.time()
+    vehicle_sessions, repair_improved, repair_stats = optimize_layout(
+        vehicle_sessions, packages,
+        unplaced_packages=unplaced_pkg_objects,
+        max_passes=3,
+        debug=debug,
+        profile=profile,
+    )
+    repair_time_ms = int((time.time() - repair_start) * 1000)
+
+    # ── Consolidation phase: eliminate near-empty vehicles ────────
+    from truck_load_planner.engine.consolidation import consolidate_fleet
+    consol_start = time.time()
+    vehicle_sessions, eliminated_count = consolidate_fleet(
+        vehicle_sessions, packages, max_iterations=10,
+    )
+    consol_time_ms = int((time.time() - consol_start) * 1000)
+
+    # ── Fleet balance pass: even out load profiles ──────────────
+    from truck_load_planner.engine.distribution import balance_fleet_profiles
+    balance_start = time.time()
+    vehicle_sessions, balance_moves = balance_fleet_profiles(
+        vehicle_sessions, max_moves=10,
+    )
+    balance_time_ms = int((time.time() - balance_start) * 1000)
+
+    # ── Final deepen pass: push every package as deep as possible ────
+    from truck_load_planner.engine.distribution import compact_placements, compact_stacks
+    deepen_start = time.time()
+    cmp_passes = profile.compact_passes if profile else 2
+    cmp_step = profile.compact_step_mm if profile else 50.0
+    for _, session in vehicle_sessions:
+        compact_placements(session._planner, passes=cmp_passes, step=cmp_step)
+        if profile.enable_stack_compaction:
+            compact_stacks(session._planner, step=cmp_step)
+    deepen_time_ms = int((time.time() - deepen_start) * 1000)
+
+    # Recompute counts after repair
+    placed = sum(len(s._planner.placements) for _, s in vehicle_sessions)
+
+    placed_vehicle_map = {vinfo["vehicle_id"]: [] for vinfo, _ in vehicle_sessions}
+    for vinfo, session in vehicle_sessions:
+        vid = vinfo["vehicle_id"]
+        for pl in session._planner.placements:
+            if pl.package:
+                placed_vehicle_map[vid].append(pl.package.name)
 
     # Build per-vehicle placements and statistics
     per_vehicle = []
@@ -1200,7 +1023,7 @@ def auto_arrange():
                 "vehicle_id": vinfo["vehicle_id"],
                 "plate_number": vinfo["plate_number"],
                 "package_count": len(v_placements),
-                "packages": vehicle_map.get(vinfo["vehicle_id"], []),
+                "packages": placed_vehicle_map.get(vinfo["vehicle_id"], []),
                 "statistics": session.get_status(),
             })
         all_placements.extend(v_placements)
@@ -1210,18 +1033,37 @@ def auto_arrange():
         stats = pv.get("statistics", {})
         total_util += stats.get("volume_used_pct", 0) if stats.get("volume_used_pct", 0) != 0 else 0
     avg_util = round(total_util / len(per_vehicle), 1) if per_vehicle else 0.0
+    failed = len(packages) - placed
+    fleet_cost = round(compute_fleet_cost(vehicle_sessions), 1)
 
-    return jsonify({
+    total_time_ms = dist_time_ms + repair_time_ms + consol_time_ms + balance_time_ms
+    response_data = {
         "multi_vehicle": True,
+        "profile": profile_name,
         "success": placed > 0,
         "summary": {
             "placed_packages": placed,
             "failed_packages": failed,
             "utilization": avg_util,
+            "fleet_cost": fleet_cost,
             "warnings": [],
             "unplaced_packages": unplaced,
         },
         "per_vehicle": per_vehicle,
         "placements": all_placements,
         "debug_log": [],
-    })
+        "profile_stats": {
+            "profile": profile_name,
+            "distribution_time_ms": dist_time_ms,
+            "repair_time_ms": repair_time_ms,
+            "consolidation_time_ms": consol_time_ms,
+            "balance_time_ms": balance_time_ms,
+            "total_time_ms": total_time_ms,
+            "repair_passes": repair_stats.get("repair_passes", 0),
+            "repair_improved": repair_improved,
+            "rearrangement_attempts": dist_stats.get("rearrangement_attempts", 0),
+            "balance_moves": balance_moves,
+        },
+    }
+
+    return jsonify(response_data)

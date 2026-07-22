@@ -731,6 +731,9 @@ class LoadPlannerApp {
     const dim2 = d.dim2;
     const view = this.currentView;
 
+    // ── Instrument: Representation 5 — canvas rendering coordinates ────
+    const _renderedCoords = [];
+
     for (let i = 0; i < this.placements.length; i++) {
       const p = this.placements[i];
       const pkg = p._package || p;
@@ -750,6 +753,18 @@ class LoadPlannerApp {
         if (p.rotation === 90 || p.rotation === 270) { let t = dw; dw = dh; dh = t; }
         dy = dim2 - (p.z || 0) - dh;
       }
+
+      _renderedCoords.push({
+        package_id: p.package_id,
+        name: p._name || "",
+        x_mm: dx, y_mm: dy, w_mm: dw, h_mm: dh,
+        z_mm: p.z || 0,
+        view: view,
+        canvas_x: this._mmToStage(dx, dy).x,
+        canvas_y: this._mmToStage(dx, dy).y,
+        canvas_w: Math.max(dw * this._getCurrentScale(), 2),
+        canvas_h: Math.max(dh * this._getCurrentScale(), 2),
+      });
 
       const color = p._color || (p._package && p._package.color) || "#3b82f6";
       const pos = this._mmToStage(dx, dy);
@@ -883,6 +898,18 @@ class LoadPlannerApp {
         }));
       }
     }
+
+    // ── Instrument: Representation 5 — canvas rendering coordinates ────
+    console.log("=== INSTRUMENT REP 5: Canvas rendering coordinates ===");
+    console.log(JSON.stringify({
+      trace_id: "frontend-" + Date.now(),
+      rep: 5,
+      label: "canvas-rendered-coordinates",
+      view: this.currentView,
+      vehicle_id: this.currentVehicle ? this.currentVehicle.vehicle_id : null,
+      container_mm: { dim1: d.dim1, dim2: d.dim2 },
+      packages: _renderedCoords,
+    }, null, 2));
   }
 
   /* ═══════════════════════ PREVIEW (drag from palette) ═══════════════════════ */
@@ -1344,6 +1371,7 @@ class LoadPlannerApp {
             height: item.height,
             weight_kg: item.weight_kg,
             color: item.color || "#3b82f6",
+            allow_stacking: item.allow_stacking,
           });
         }
       }
@@ -1359,6 +1387,7 @@ class LoadPlannerApp {
             height: pkg.height,
             weight_kg: pkg.weight_kg,
             color: pkg.color || "#3b82f6",
+            allow_stacking: pkg.allow_stacking,
           });
         }
       }
@@ -1369,8 +1398,13 @@ class LoadPlannerApp {
       return;
     }
 
+    // Read selected optimization profile
+    const profileSelect = document.getElementById("profile-select");
+    const profileName = profileSelect ? profileSelect.value : "balanced";
+
     const payload = {
       strategy: "largest_first",
+      profile: profileName,
     };
 
     if (this.currentShipment && this.currentShipment.id) {
@@ -1382,6 +1416,17 @@ class LoadPlannerApp {
     const btn = document.querySelector('[onclick*="autoArrange"]');
     if (btn) { btn.disabled = true; btn.textContent = "Arranging..."; }
 
+    // Show optimization status
+    const statusEl = document.getElementById("optimization-status");
+    if (statusEl) {
+      const labels = { fast: "\u26a1 Fast", balanced: "\u2696 Balanced", maximum_quality: "\ud83c\udfaf Maximum Quality" };
+      statusEl.textContent = "Optimization: " + (labels[profileName] || profileName);
+      statusEl.style.display = "";
+    }
+
+    const labels = { fast: "Fast", balanced: "Balanced", maximum_quality: "Maximum Quality" };
+    this.showProgressModal("Arranging " + packages.length + " packages", labels[profileName] || profileName);
+
     try {
       const resp = await fetch("/api/tlp/auto-arrange", {
         method: "POST",
@@ -1391,9 +1436,34 @@ class LoadPlannerApp {
       const data = await resp.json().catch(() => null);
 
       if (!resp.ok || !data || data.error) {
+        this.hideProgressModal();
         toast((data && data.error) || `Auto Arrange failed (HTTP ${resp.status})`, "error");
         return;
       }
+
+      // ── Instrument: Representation 4 — JSON received by frontend ────
+      console.log("=== INSTRUMENT REP 4: JSON received from auto-arrange ===");
+      console.log(JSON.stringify({
+        trace_id: "frontend-" + Date.now(),
+        rep: 4,
+        label: "json-received-by-frontend",
+        multi_vehicle: data.multi_vehicle,
+        placements: (data.placements || []).map(p => ({
+          package_id: p.package_id,
+          x: p.x, y: p.y, z: p.z,
+          rotation: p.rotation,
+          load_sequence: p.load_sequence,
+          vehicle_id: p.vehicle_id,
+          _name: p._name,
+          _length: p._length, _width: p._width, _height: p._height,
+          _color: p._color,
+        })),
+        per_vehicle: (data.per_vehicle || []).map(v => ({
+          vehicle_id: v.vehicle_id,
+          plate_number: v.plate_number,
+          package_count: v.package_count,
+        })),
+      }, null, 2));
 
       this.selectedIndex = -1;
       this._arrangePlacements = data.placements || [];
@@ -1443,6 +1513,17 @@ class LoadPlannerApp {
       const msg = `Distributed: ${s.placed_packages} placed, ${s.failed_packages} failed — ${parts.join(", ")}`;
       toast(msg, s.failed_packages > 0 ? "warning" : "success");
 
+      // Show profile statistics if available
+      if (data.profile_stats) {
+        const ps = data.profile_stats;
+        if (statusEl) {
+          const labels = { fast: "\u26a1 Fast", balanced: "\u2696 Balanced", maximum_quality: "\ud83c\udfaf Maximum Quality" };
+          statusEl.textContent = (labels[ps.profile] || ps.profile)
+            + " \u2014 " + (ps.total_time_ms / 1000).toFixed(1) + "s"
+            + (ps.repair_passes > 0 ? " \u00b7 " + ps.repair_passes + " repair passes" : "");
+        }
+      }
+
       if (data.debug_log && data.debug_log.length) {
         console.log("Auto Arrange debug log:", data.debug_log);
       }
@@ -1450,7 +1531,9 @@ class LoadPlannerApp {
       console.error("Auto Arrange failed:", e);
       const msg = e instanceof TypeError ? "Network error — is the server running?" : "Auto Arrange request failed";
       toast(msg, "error");
+      if (statusEl) { statusEl.style.display = "none"; }
     } finally {
+      this.hideProgressModal();
       if (btn) { btn.disabled = false; btn.textContent = "\u2728 Auto Arrange"; }
     }
   }
@@ -2307,6 +2390,23 @@ class LoadPlannerApp {
     }
   }
 
+  async clearAllPackages() {
+    if (!confirm("Delete ALL packages? This will also remove all placements and shipment items.")) return;
+    try {
+      const res = await fetch("/api/tlp/packages/clear", { method: "DELETE" });
+      if (!res.ok) { const err = await res.json().catch(() => ({})); toast(err.error || "Failed to clear", "error"); return; }
+      this.packages = await API.packages();
+      this.placements = [];
+      this.filterPackages();
+      this.renderCanvas();
+      this.updateStatus();
+      toast("All packages cleared", "success");
+    } catch (e) {
+      console.error("Clear packages failed:", e);
+      toast("Failed to clear packages", "error");
+    }
+  }
+
   /* ═══════════════════════ VEHICLE SELECTOR ═══════════════════════ */
 
   populateVehicleList() {
@@ -2673,6 +2773,16 @@ class LoadPlannerApp {
       })),
     };
 
+    // ── Instrument: placements being sent to DB save ────
+    console.log("=== INSTRUMENT: Placements sent to save/create_plan ===");
+    console.log(JSON.stringify({
+      trace_id: "frontend-" + Date.now(),
+      label: "placements-sent-for-save",
+      planId: this.planId,
+      is_update: !!(this.planId && document.getElementById("save-modal-title").textContent !== "Save Plan As"),
+      payload_placements: payload.placements,
+    }, null, 2));
+
     try {
       let result;
       if (this.planId && document.getElementById("save-modal-title").textContent !== "Save Plan As") {
@@ -2693,6 +2803,31 @@ class LoadPlannerApp {
 
   closeModal(id) {
     document.getElementById(id).classList.remove("open");
+  }
+
+  showProgressModal(title, subtitle) {
+    const el = document.getElementById("arrange-progress-modal");
+    if (!el) return;
+    const titleEl = el.querySelector(".modal-body > div:nth-child(2)");
+    const modeEl = document.getElementById("arrange-progress-mode");
+    const timeEl = document.getElementById("arrange-progress-time");
+    if (titleEl) titleEl.textContent = title || "Arranging packages...";
+    if (modeEl) modeEl.textContent = subtitle || "Optimizing placement";
+    el.classList.add("open");
+    this._progressStart = Date.now();
+    if (this._progressTimer) clearInterval(this._progressTimer);
+    this._progressTimer = setInterval(() => {
+      const s = Math.floor((Date.now() - this._progressStart) / 1000);
+      const m = Math.floor(s / 60);
+      const sec = s % 60;
+      if (timeEl) timeEl.textContent = "Elapsed: " + (m > 0 ? m + "m " : "") + sec + "s";
+    }, 200);
+  }
+
+  hideProgressModal() {
+    const el = document.getElementById("arrange-progress-modal");
+    if (el) el.classList.remove("open");
+    if (this._progressTimer) { clearInterval(this._progressTimer); this._progressTimer = null; }
   }
 
   exportPlan() {
@@ -3043,11 +3178,19 @@ class LoadPlannerApp {
       (placement.z || 0) + ph / 2,
       (placement.y || 0) + pw / 2,
     );
-    const startPos = new THREE.Vector3(
-      d.len + pl,  // start outside the rear door
-      endPos.y,
-      endPos.z,
-    );
+    let startPos;
+    const door = placement.door_used || "rear";
+    if (door === "rear") {
+      startPos = new THREE.Vector3(d.len + pl, endPos.y, endPos.z);
+    } else if (door === "side_right") {
+      // Enter at raised height so package clears any packages blocking
+      // the lower part of the side door opening, then lower to final Z.
+      startPos = new THREE.Vector3(endPos.x, d.hei, d.wid + pw);
+    } else if (door === "side_left") {
+      startPos = new THREE.Vector3(endPos.x, d.hei, -pw);
+    } else {
+      startPos = new THREE.Vector3(d.len + pl, endPos.y, endPos.z);
+    }
 
     this._stepAnimState = this._stepCreateAnimMesh(placement, startPos, endPos);
     if (this._stepAnimState) {
@@ -3276,6 +3419,33 @@ class LoadPlannerApp {
         this._threeMeshes.push(label);
       }
     }
+
+    // ── Instrument: Representation 5 — 3D scene positions ────
+    const _3dPositions = [];
+    for (const p of this.placements) {
+      _3dPositions.push({
+        package_id: p.package_id,
+        name: p._name || "",
+        x_mm: p.x || 0,
+        y_mm: p.y || 0,
+        z_mm: p.z || 0,
+        length_mm: p._length || (p._package && p._package.length) || 0,
+        width_mm: p._width || (p._package && p._package.width) || 0,
+        height_mm: p._height || (p._package && p._package.height) || 0,
+        rotation: p.rotation || 0,
+        three_x: (p.x || 0) + (p._length || 100) / 2,
+        three_y: (p.z || 0) + (p._height || 100) / 2,
+        three_z: (p.y || 0) + (p._width || 100) / 2,
+      });
+    }
+    console.log("=== INSTRUMENT REP 5: 3D scene positions ===");
+    console.log(JSON.stringify({
+      trace_id: "frontend-" + Date.now(),
+      rep: 5,
+      label: "3d-scene-positions",
+      vehicle_id: this.currentVehicle ? this.currentVehicle.vehicle_id : null,
+      packages: _3dPositions,
+    }, null, 2));
 
     // Adjust camera target to container center
     if (this._threeControls) {

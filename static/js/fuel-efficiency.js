@@ -18,7 +18,7 @@ let allVehicles = [];
 // ── Init ───────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
     await populateMonthSelect();
-    loadVehicles();
+    await loadVehicles();
     loadProfiles();
     onMonthChange();
     setDefaultTime();
@@ -236,6 +236,20 @@ function filterTable(q) {
     document.getElementById('entry-count').textContent = filteredEntries.length;
 }
 
+// ── Click row to filter by vehicle (All Time) ──────────────────
+async function filterByVehicle(vehicleId, plate) {
+    if (!vehicleId) return;
+    selectedChartVehicleId = vehicleId;
+    document.getElementById('month-select').value = '';
+    selectedDay = '';
+    populateDaySelect();
+    await loadDashboard();
+    const input = document.getElementById('table-search');
+    input.value = plate;
+    updateFilterLabel();
+    renderSearchDropdown(plate);
+}
+
 // ── Table ──────────────────────────────────────────────────────
 function renderTable() {
     const tbody = document.getElementById('table-body');
@@ -265,7 +279,7 @@ function renderTable() {
             anomalyBadge = '<span style="color:#4ade80;font-size:11px;">✓ Normal</span>';
         }
         const rowClass = anomaly ? 'anomaly-row' : noKm ? 'no-km-row' : '';
-        return `<tr class="${rowClass}">
+        return `<tr class="${rowClass}" data-vehicle-id="${e.vehicle_id || ''}" data-vehicle-plate="${escHtml(e.license_plate)}">
             <td>${formatDate(e.log_date)}</td>
             <td>${escHtml(e.log_time || '—')}</td>
             <td>${escHtml(e.gas_store || '—')}</td>
@@ -278,8 +292,8 @@ function renderTable() {
             <td>${anomalyBadge}</td>
             <td>
                 <div style="display:flex;gap:6px;">
-                    <button class="btn-action btn-edit" onclick="openModal(${e.id})">✏️</button>
-                    <button class="btn-action btn-delete" onclick="deleteEntry(${e.id})">🗑</button>
+                    <button class="btn-action btn-edit" onclick="event.stopPropagation();openModal(${e.id})">✏️</button>
+                    <button class="btn-action btn-delete" onclick="event.stopPropagation();deleteEntry(${e.id})">🗑</button>
                 </div>
             </td>
         </tr>`;
@@ -493,8 +507,10 @@ function renderSearchDropdown(q) {
     if (!trimmed) {
         matches = modeVehicles;
     } else {
+        const lower = trimmed.toLowerCase();
         matches = modeVehicles.filter(v =>
-            v.plate_number.toLowerCase().includes(trimmed.toLowerCase())
+            v.plate_number.toLowerCase().includes(lower)
+            || (v.current_driver || '').toLowerCase().includes(lower)
         );
     }
     const limited = matches.slice(0, 10);
@@ -851,6 +867,20 @@ async function clearNormal(plate) {
 
 // ── Tooltip hide on scroll ─────────────────────────────────────
 document.addEventListener('scroll', hideAnomalyTooltip);
+
+// ── Row click: filter by vehicle ───────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('table-body').addEventListener('click', (e) => {
+        const tr = e.target.closest('tr');
+        if (!tr) return;
+        if (e.target.closest('button')) return;
+        const vehicleId = tr.dataset.vehicleId;
+        const plate = tr.dataset.vehiclePlate;
+        if (vehicleId) {
+            filterByVehicle(parseInt(vehicleId), plate);
+        }
+    });
+});
 
 // ── Utilities ──────────────────────────────────────────────────
 function formatDate(iso) {

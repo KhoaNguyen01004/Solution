@@ -13,9 +13,8 @@ from .container import Container
 
 
 def _extract_doors(features: list) -> dict:
-    """Extract rear_door and side_door dicts from features list."""
+    """Extract rear_door from features list (side doors ignored)."""
     rear = None
-    sides = []
     for f in features:
         if isinstance(f, dict):
             ftype = f.get("feature_type", "")
@@ -30,9 +29,7 @@ def _extract_doors(features: list) -> dict:
                 geo = {}
         if ftype == "rear_door":
             rear = geo
-        elif ftype == "side_door":
-            sides.append(geo)
-    return {"rear_door": rear, "side_doors": sides}
+    return {"rear_door": rear, "side_doors": []}
 
 
 def _sweep_intersects(
@@ -53,14 +50,15 @@ def _sweep_intersects(
     for pl in placements:
         if pl.package is None:
             continue
-        pl_clearance = getattr(pl.package, 'clearance_mm', 0)
+        ph_clr = getattr(pl.package, 'horizontal_clearance_mm', 10.0)
+        pv_clr = getattr(pl.package, 'vertical_clearance_mm', 0.0)
         paabb = AABB.from_dimensions(
             pl.x, pl.y, pl.z,
             pl.package.length_mm,
             pl.package.width_mm,
             pl.package.height_mm,
             pl.rotation,
-            clearance=pl_clearance,
+            clearance_xy=ph_clr, clearance_z=pv_clr,
         )
         if sweep_aabb.intersects(paabb):
             return True
@@ -162,11 +160,9 @@ def check_door_fit(
     features: list,
     rotation: int = 0,
 ) -> dict:
-    """Cheap check (no sweep): does the package fit through any door opening?
+    """Cheap check (no sweep): does the package fit through the rear door?
 
-    Returns:
-        {"fits": True,  "doors": {...}}  — extracted door features for later sweep
-        {"fits": False, "reasons": [...]}
+    Side doors are ignored; all containers use a single rear door.
     """
     if not features:
         return {"fits": True, "doors": {}}
@@ -182,18 +178,9 @@ def check_door_fit(
             if pkg_w <= door_w and pkg_h <= door_h:
                 return {"fits": True, "doors": doors}
 
-    for sd in doors["side_doors"]:
-        door_w = sd.get("width_mm", 0)
-        door_h = sd.get("height_mm", 0)
-        if door_w > 0 and door_h > 0:
-            pkg_l = package.length_mm if rotation % 180 != 90 else package.width_mm
-            pkg_h = package.height_mm
-            if pkg_l <= door_w and pkg_h <= door_h:
-                return {"fits": True, "doors": doors}
-
     return {
         "fits": False,
-        "reasons": ["Package does not fit through any door opening"],
+        "reasons": ["Package does not fit through rear door opening"],
     }
 
 
@@ -206,33 +193,17 @@ def check_door_sweep(
     rotation: int = 0,
     query_aabb_fn: Optional[Callable] = None,
 ) -> dict:
-    """Expensive check (sweep only): can the package reach its position?
-
-    *doors* must be the dict returned by ``check_door_fit`` (or from
-    ``_extract_doors``).  This function runs the sweep-against-placements
-    checks and should be called **after** all cheaper validations pass.
-
-    Returns:
-        {"valid": True,  "door_used": "rear"|"side_left"|"side_right"}
-        {"valid": False, "door_used": None, "reasons": [...]}
+    """Simplified door check — only rear door matters.
+    Side doors are ignored; all containers use a single rear door.
     """
-    if not doors.get("rear_door") and not doors.get("side_doors"):
+    if not doors.get("rear_door"):
         return {"valid": True, "door_used": "none"}
-
-    if doors.get("rear_door"):
-        if check_rear_door(placements, package, aabb, container, doors["rear_door"], rotation=rotation, query_aabb_fn=query_aabb_fn):
-            return {"valid": True, "door_used": "rear"}
-
-    for sd in doors.get("side_doors", []):
-        if check_side_door(placements, package, aabb, container, sd, right_side=True, rotation=rotation, query_aabb_fn=query_aabb_fn):
-            return {"valid": True, "door_used": "side_right"}
-        if check_side_door(placements, package, aabb, container, sd, right_side=False, rotation=rotation, query_aabb_fn=query_aabb_fn):
-            return {"valid": True, "door_used": "side_left"}
-
+    if check_rear_door(placements, package, aabb, container, doors["rear_door"], rotation=rotation, query_aabb_fn=query_aabb_fn):
+        return {"valid": True, "door_used": "rear"}
     return {
         "valid": False,
         "door_used": None,
-        "reasons": ["Package cannot reach position through any door"],
+        "reasons": ["Package cannot reach position through rear door"],
     }
 
 

@@ -1,12 +1,16 @@
 # Environment variables (contains secrets!)
 .env
+credentials.json
 
 # Database files
 *.db
 
-# Sample/ log files
+# Runtime data / logs
 log.json
+instrument_trace.jsonl
 *.log
+browserlogs.txt
+manual_locations.json
 
 # Python
 __pycache__/
@@ -46,3 +50,4 @@ env/
 # Temporary files
 *.tmp
 *.bak
+

@@ -7,6 +7,7 @@ let allVehicles = [];
 let filteredVehicles = [];
 let allTypes = [];
 let editingId = null;
+let selectedIds = new Set();
 
 
 const diagram = { currentVehicleId: null };
@@ -57,8 +58,10 @@ function renderTable() {
     document.getElementById('vehicle-count').textContent = filteredVehicles.length;
     if (!filteredVehicles.length) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
     empty.style.display = 'none';
-    tbody.innerHTML = filteredVehicles.map(v => `
-        <tr>
+    tbody.innerHTML = filteredVehicles.map(v => {
+        const checked = selectedIds.has(v.id) ? 'checked' : '';
+        return `<tr class="${checked ? 'selected-row' : ''}">
+            <td><input type="checkbox" class="vehicle-checkbox" data-id="${v.id}" ${checked} onchange="toggleVehicle(${v.id}, this.checked)"></td>
             <td><span class="plate-badge">${escHtml(v.plate_number)}</span></td>
             <td>${v.vehicle_type ? `<span class="type-badge">${escHtml(v.vehicle_type)}</span>` : '<span style="color:#94a3b8;">—</span>'}</td>
             <td>${v.current_driver ? escHtml(v.current_driver) : '<span style="color:#94a3b8;">—</span>'}</td>
@@ -67,8 +70,9 @@ function renderTable() {
                 <button class="btn-action btn-edit" onclick="openModal('${escHtml(v.plate_number)}')">&#9998; Edit</button>
                 <button class="btn-action btn-delete" onclick="deleteVehicle(${v.id}, '${escHtml(v.plate_number)}')">&#128465;</button>
             </div></td>
-        </tr>
-    `).join('');
+        </tr>`;
+    }).join('');
+    updateBulkDeleteButton();
 }
 
 function filterTable(q) {
@@ -252,7 +256,56 @@ async function deleteVehicle(id, plate) {
     if (!confirm(`Delete vehicle ${plate}?`)) return;
     try {
         await apiFetch(`/api/fleet/vehicles/${id}`, { method: 'DELETE' });
+        selectedIds.delete(id);
         showToast('success', `Vehicle ${plate} deleted`);
+        await loadVehicles();
+    } catch (err) { showToast('error', err.message); }
+}
+
+function toggleVehicle(id, checked) {
+    if (checked) selectedIds.add(id);
+    else selectedIds.delete(id);
+    document.getElementById('select-all').checked = selectedIds.size === filteredVehicles.length;
+    const row = document.querySelector(`.vehicle-checkbox[data-id="${id}"]`)?.closest('tr');
+    if (row) row.classList.toggle('selected-row', checked);
+    updateBulkDeleteButton();
+}
+
+function toggleSelectAll(checked) {
+    for (const v of filteredVehicles) {
+        if (checked) selectedIds.add(v.id);
+        else selectedIds.delete(v.id);
+    }
+    for (const cb of document.querySelectorAll('.vehicle-checkbox')) {
+        cb.checked = checked;
+        const row = cb.closest('tr');
+        if (row) row.classList.toggle('selected-row', checked);
+    }
+    updateBulkDeleteButton();
+}
+
+function updateBulkDeleteButton() {
+    const btn = document.getElementById('btn-bulk-delete');
+    const count = selectedIds.size;
+    if (count > 0) {
+        btn.textContent = `Delete Selected (${count})`;
+        btn.style.display = 'inline-flex';
+    } else {
+        btn.style.display = 'none';
+    }
+}
+
+async function bulkDelete() {
+    const count = selectedIds.size;
+    if (count === 0) return;
+    if (!confirm(`Delete ${count} selected vehicle(s)? This will unlink their fuel log entries.`)) return;
+    try {
+        const result = await apiFetch('/api/fleet/vehicles/bulk-delete', {
+            method: 'POST',
+            body: JSON.stringify({ ids: [...selectedIds] }),
+        });
+        selectedIds.clear();
+        showToast('success', result.message || `${count} vehicle(s) deleted`);
         await loadVehicles();
     } catch (err) { showToast('error', err.message); }
 }

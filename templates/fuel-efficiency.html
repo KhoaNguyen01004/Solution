@@ -87,6 +87,7 @@
         .fe-table th { padding: 11px 14px; text-align: left; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #b0bec9; white-space: nowrap; border-bottom: 1px solid rgba(255,255,255,0.06); cursor: pointer; user-select: none; }
         .fe-table th:hover { color: #f8fafc; }
         .fe-table td { padding: 12px 14px; color: #cbd5e1; border-bottom: 1px solid rgba(255,255,255,0.04); vertical-align: middle; }
+        .fe-table tbody tr { cursor: pointer; }
         .fe-table tbody tr:hover { background: rgba(255,255,255,0.03); }
         .fe-table tbody tr.anomaly-row { background: rgba(239,68,68,0.08); border-left: 3px solid #ef4444; }
         .fe-table tbody tr.anomaly-row:hover { background: rgba(239,68,68,0.15); }
@@ -173,6 +174,12 @@
             <a href="/fuel-container" class="btn-nav" style="height:34px;padding:0 14px;font-size:13px;display:inline-flex;align-items:center;border-radius:8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.07);color:#e6edf3;text-decoration:none;font-weight:500;">Container</a>
             {% endif %}
             <button class="btn-export" onclick="exportCsv()" title="Export CSV"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export</button>
+            <button id="btn-sync-sheet" class="btn-export" onclick="triggerSync()" title="Sync from Google Sheets" style="border-color:rgba(16,185,129,0.3);color:#34d399;">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                Sync Google Sheet
+                <span id="sync-indicator" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#94a3b8;margin-left:2px;"></span>
+                <span id="sync-badge" style="font-size:11px;font-weight:500;color:#94a3b8;margin-left:2px;">Never</span>
+            </button>
             <button class="btn-add" onclick="openModal()">+ Add Entry</button>
         </nav>
     </header>
@@ -384,6 +391,7 @@
     <div id="toast-container"></div>
 
     <script src="/static/js/fuel-efficiency.js"></script>
+    <script src="/static/js/fuel-sync.js"></script>
     <script>document.addEventListener('click',e=>{if(!e.target.closest('.nav-dropdown'))document.querySelectorAll('.fleet-dropdown').forEach(d=>d.style.display='none')});</script>
 </body>
 </html>
