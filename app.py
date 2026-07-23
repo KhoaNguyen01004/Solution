@@ -2,8 +2,10 @@ import json
 import os
 import time
 import math
+import logging
 import sqlite3
 import threading
+from pathlib import Path
 from flask import Flask, jsonify, render_template, request, Response
 import requests
 from dotenv import load_dotenv
@@ -11,10 +13,16 @@ from truck_load_planner.db import init_tlp_tables
 import truck_load_planner.routes as tlp_routes
 
 # --------------------------
+# Logging Setup
+# --------------------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+# --------------------------
 # Load Configuration
 # --------------------------
 load_dotenv()
-BASE_DIR = os.path.dirname(__file__)
+BASE_DIR = Path(__file__).resolve().parent
 
 # Validate required environment variables
 required_env_vars = [
@@ -45,8 +53,8 @@ TTAS_HEADERS = {
 }
 
 # Database & File Paths
-DB_PATH = os.path.join(BASE_DIR, os.getenv("DB_PATH", "routing_system.db"))
-MANUAL_LOCATIONS_FILE = os.path.join(BASE_DIR, os.getenv("MANUAL_LOCATIONS_FILE", "manual_locations.json"))
+DB_PATH = str(BASE_DIR / os.getenv("DB_PATH", "routing_system.db"))
+MANUAL_LOCATIONS_FILE = str(BASE_DIR / os.getenv("MANUAL_LOCATIONS_FILE", "manual_locations.json"))
 
 # Application Configuration
 DEFAULT_RADIUS_KM = float(os.getenv("DEFAULT_RADIUS_KM", "3"))
@@ -798,7 +806,7 @@ def load_last_json_document(content):
 
 
 def load_sample_data():
-    sample_path = os.path.join(BASE_DIR, "log.json")
+    sample_path = BASE_DIR / "log.json"
     if not os.path.exists(sample_path):
         return []
     try:
@@ -1189,9 +1197,21 @@ def start_route_refresh_thread():
     thread.start()
 
 # --------------------------
+# Database Initialization
+# --------------------------
+# Run at module level so it executes once per process under Gunicorn.
+# (Each Gunicorn worker runs this during import — exactly once per worker.)
+try:
+    init_db()
+except Exception:
+    logger.exception("Fatal error during database initialization — aborting startup")
+    raise
+
+# --------------------------
 # Initialize & Setup Flask
 # --------------------------
 app = Flask(__name__, static_folder='static', template_folder='templates')
+app.secret_key = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
 KNOWN_LOCATIONS = load_known_locations()
 fleet_session = create_fleet_session()
 
@@ -1854,7 +1874,7 @@ from datetime import date as _date, timedelta as _timedelta, datetime as _dateti
 from bs4 import BeautifulSoup as _BeautifulSoup
 from main import fetch_report as _playwright_fetch_report
 
-TTAS_REPORT_URL = "https://dinhvihopquy.vn/baocao/ttas_baocao_tonghop_theongay.aspx"
+TTAS_REPORT_URL = os.getenv("TTAS_REPORT_PAGE_URL", "https://dinhvihopquy.vn/baocao/ttas_baocao_tonghop_theongay.aspx")
 
 
 def _fetch_ttas_report_page(session, plate: str, from_date_ddmmyyyy: str, to_date_ddmmyyyy: str) -> str:
@@ -3484,7 +3504,7 @@ def api_fuel_sync():
     try:
         from services.google_sheet_service import GoogleSheetService
 
-        svc = GoogleSheetService()
+        svc = GoogleSheetService(db_path=DB_PATH)
         result = svc.sync_to_database()
 
         conn = sqlite3.connect(DB_PATH)
@@ -3565,6 +3585,17 @@ def api_fuel_sync_last():
 
 
 if __name__ == "__main__":
-    init_db()
+    # Background route polling thread — local development only.
+    #
+    # Under Gunicorn this is intentionally NOT started because:
+    #   - Multiple workers would each spawn their own polling thread,
+    #     causing duplicate ORS API calls and cache conflicts.
+    #   - The shared route_data_cache would suffer race conditions.
+    #
+    # Production alternatives:
+    #   a) Run Gunicorn with --workers=1 --threads=N if background
+    #      polling is essential (single-process, concurrent requests).
+    #   b) Use an external scheduler (cron, Celery beat, APScheduler)
+    #      that calls POST /api/refresh-routes periodically.
     start_route_refresh_thread()
     app.run(host=FLASK_HOST, port=FLASK_PORT, debug=FLASK_DEBUG, use_reloader=False)
