@@ -227,7 +227,7 @@ class LoadPlanningSession:
         self,
         shipment_items: Optional[list] = None,
         packages: Optional[list[EnginePackage]] = None,
-        strategy: str = "column",
+        strategy: str = "optimized",
         progress_callback: Optional[Callable] = None,
         cancel_callback: Optional[Callable] = None,
         debug: bool = False,

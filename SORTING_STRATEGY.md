@@ -2,7 +2,7 @@
 
 ## 1. Package Sort Order (Pre-Processing)
 
-All packages are sorted by **non-stackable first, then descending volume, then descending weight, then descending footprint area** before any placement logic runs. The same sort is used in both single-vehicle and multi-vehicle paths.
+All packages are sorted by **non-stackable first, then descending width, then descending length, then descending volume, then descending weight** before any placement logic runs. The same sort is used in both single-vehicle and multi-vehicle paths.
 
 **Source**: `engine/auto_arrange.py` → `LargestFirstStrategy`, `engine/distribution.py` → `distribute_across_vehicles()`
 
@@ -10,17 +10,18 @@ All packages are sorted by **non-stackable first, then descending volume, then d
 sorted_packages = sorted(
     packages,
     key=lambda p: (
-        p.stackable,                                        # non-stackable (False = 0) first
+        0 if not p.stackable else 1,                        # non-stackable first
+        -p.width_mm,                                        # width desc
+        -p.length_mm,                                       # length desc
         -(p.length_mm * p.width_mm * p.height_mm),          # volume desc
         -p.weight_kg,                                       # weight desc
-        -(p.length_mm * p.width_mm),                        # footprint desc
     ),
 )
 ```
 
 ### Rationale
 
-Non-stackable packages must go on the floor — placing them first ensures they get floor space before stackable packages consume it. After that, largest and heaviest packages are the hardest to fit, so placing them first maximises the chance they find a spot. This is a standard greedy bin-packing heuristic.
+Non-stackable packages must go on the floor — placing them first ensures they get floor space before stackable packages consume it. After that, the widest packages come first so the X-slice filling heuristic can pack the full container width as early as possible, reducing blocking. Length, volume, and weight are secondary tie-breakers.
 
 ---
 
@@ -36,7 +37,7 @@ When no single `vehicle_id` is specified, packages are distributed across all av
 Input:  packages[], vehicle_sessions[]
 Output: { placed, failed, unplaced, vehicle_map }
 
-1. Sort packages by volume DESC (biggest first)
+1. Sort packages by width DESC, length DESC, volume DESC, weight DESC (non-stackable first)
 2. Sort vehicles by combined capacity (volume × payload) DESC
 3. For each vehicle (biggest → smallest):
      For each remaining package (biggest → smallest):
@@ -78,7 +79,8 @@ For each package p in sorted_packages:
     if p.allow_rotation:
       expanded.add({x, y, z, rotation=90})
 
-  // Step 3 — Score and pick best
+  // Step 3 — Score (x_slice_completion, package_contact, floor_contact, y_balance)
+  //        and pick best
   best = null
   for each pos in expanded:
     if validate(p, pos) is valid:
@@ -99,28 +101,30 @@ No post-processing, no repair, no gap-filling, no compaction. The first valid pl
 
 **Source**: `engine/scorer.py` → `score_placement()`
 
-### Weight Distribution (4 terms, unclamped)
+### Priority Order & Weights
 
-| Category | Weight | Calculation | Why |
-|----------|--------|-------------|-----|
-| Package Contact | 1000 | Sum of coincident-face overlap areas (mm²) across all neighbors | Maximise contact density |
-| X Preference | 200 | `max(0, container.length − xmin)` | Push deep into container |
-| Floor Contact | 100 | `container.width × container.length` if z=0, else 0 | Prefer floor for stability |
-| Y Balance | 50 | Y-COG proximity to container.width/2 | Even weight distribution |
+| Priority | Category | Weight | Calculation | Why |
+|----------|----------|--------|-------------|-----|
+| 1 | X-Slice Completion | 10000 | Fraction of remaining width filled at the current front X | Fill one cross-section before advancing |
+| 2 | Package Contact | 1000 | Sum of coincident-face overlap areas (mm²) ÷ max possible | Maximise contact density |
+| 3 | Floor Contact | 100 | 1 if z=0, else 0 | Prefer floor for stability |
+| 4 | Y Balance | 50 | Y-COG proximity to container.width/2 | Even weight distribution |
+
+### X-Slice Completion
+
+The algorithm tracks `front_x` = the maximum X (deepest point) reached by any placed package. A candidate scores highly only if it starts at `front_x` — meaning it fills the current cross-section. The score is:
+
+```
+remaining_width = container.width − sum of Y intervals occupied at front_x
+score = min(1.0, candidate_width / remaining_width)
+```
+
+This completes one Y-slice at the current X before pushing deeper into the container, reducing blocking behavior.
 
 ### Y-Balance Algorithm
 
 ```python
-total_weight = candidate.weight
-weighted_y = candidate.cy × candidate.weight
-for each existing package:
-    weighted_y += existing.cy × existing.weight
-    total_weight += existing.weight
-
-center_y = weighted_y / total_weight
-ideal = container.width / 2
-dist = |center_y − ideal|
-score = max(0, 1 − dist / ideal)      # [0, 1]
+score = max(0, 1 − |y_cog − container.width/2| / (container.width/2))
 ```
 
 ---
@@ -192,7 +196,7 @@ The `door_used` value is stored in `Placement` and used by the 3D animation for 
 ```
 Packages (unsorted)
     ▼
-Sort: non-stackable first, volume DESC, weight DESC, footprint DESC
+Sort: non-stackable first, width DESC, length DESC, volume DESC, weight DESC
     ▼
 Multi-vehicle: sort vehicles by capacity DESC
     ▼
@@ -212,7 +216,7 @@ Done — no post-processing passes
 
 | Parameter | Location | Default | Description |
 |-----------|----------|---------|-------------|
-| `SCORING_WEIGHTS` | `engine/scorer.py` | `{package_contact:1000, x_preference:200, floor_contact:100, y_balance:50}` | 4-term scoring |
+| `SCORING_WEIGHTS` | `engine/scorer.py` | `{x_slice_completion:10000, package_contact:1000, floor_contact:100, y_balance:50}` | 4-term scoring |
 | `horizontal_clearance_mm` | `engine/package.py` | 10.0 | Safety gap (mm) |
 | `vertical_clearance_mm` | `engine/package.py` | 0.0 | Vertical safety gap (mm) |
 | `max_top_weight_kg` | `engine/package.py` | 0.0 | Max weight above (0=unlimited) |

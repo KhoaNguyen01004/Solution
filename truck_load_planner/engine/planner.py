@@ -310,7 +310,7 @@ class Planner:
     def auto_arrange(
         self,
         packages: list[Package],
-        strategy: str = "largest_first",
+        strategy: str = "optimized",
         progress_callback: Optional[Callable] = None,
         cancel_callback: Optional[Callable] = None,
         debug: bool = False,

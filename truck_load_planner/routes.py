@@ -205,7 +205,7 @@ def delete_feature(feat_id):
 @tlp_bp.route("/packages", methods=["GET"])
 def list_packages():
     conn = _get_db()
-    rows = conn.execute("SELECT * FROM tlp_packages ORDER BY name").fetchall()
+    rows = conn.execute("SELECT * FROM tlp_packages ORDER BY weight_kg DESC, (length * width * height) DESC").fetchall()
     conn.close()
     return jsonify([_row_to_dict(r) for r in rows])
 
@@ -702,11 +702,9 @@ def validate_placement():
 
 # ─── Auto Arrange ────────────────────────────────────────────────
 
-from truck_load_planner.engine.distribution import expand_candidates, candidate_priority, distribute_across_vehicles, find_best_for_pkg
+from truck_load_planner.engine.distribution import distribute_across_vehicles, find_best_for_pkg
 from truck_load_planner.optimization.vehicle_cost import compute_fleet_cost
 
-_expand_candidates = expand_candidates
-_candidate_priority = candidate_priority
 _distribute_across_vehicles = distribute_across_vehicles
 
 
@@ -865,7 +863,7 @@ def auto_arrange():
     """
     data = request.json or {}
     vehicle_id = data.get("vehicle_id")
-    strategy = data.get("strategy", "largest_first")
+    strategy = data.get("strategy", "optimized")
     debug = bool(data.get("debug", False))
 
     from truck_load_planner.engine.profile import PROFILES

@@ -19,16 +19,17 @@ Input:  [Package A, ..., Package N], [Vehicle 1, ..., Vehicle M]
 Output: { placed_packages, failed_packages, per_vehicle: [{ vehicle_id, plate_number, package_count }] }
 
 Algorithm:
-1. Sort vehicles by combined capacity (volume_mm³ × payload_kg) DESC
-2. For each vehicle (biggest → smallest):
+1. Sort packages by width DESC, length DESC, volume DESC, weight DESC (non-stackable first)
+2. Sort vehicles by combined capacity (volume_mm³ × payload_kg) DESC
+3. For each vehicle (biggest → smallest):
       For each remaining package (biggest → smallest):
         a. Generate candidate points (origin + corners of placed boxes)
         b. Expand with 0° / 90° rotations
-        c. Score candidates (4-term: contact, x-preference, floor, y-balance)
+        c. Score candidates (4-term: x-slice-completion, contact, floor, y-balance)
         d. Validate (boundary, weight, collision, support, door access)
         e. If valid: place_package() → door_used stored
         f. If not: keep for next vehicle
-3. Return { placed, failed, unplaced, vehicle_map }
+4. Return { placed, failed, unplaced, vehicle_map }
 ```
 
 **Why Largest-Vehicle-First?**
@@ -42,10 +43,10 @@ Algorithm:
 Once a vehicle is selected, the strategy places packages one-by-one:
 
 ```
-For each package (sorted: non-stackable first, volume DESC, weight DESC, footprint DESC):
+For each package (sorted: non-stackable first, width DESC, length DESC, volume DESC, weight DESC):
   1. Generate candidate points = {(0,0,0)} ∪ {right-corner, front-corner, top-corner of each placed package}
   2. For each (x,y,z), try rotation=0 and (if allow_rotation) rotation=90
-  3. Score all candidates (4-term: package_contact, x_preference, floor_contact, y_balance)
+  3. Score all candidates (4-term: x_slice_completion, package_contact, floor_contact, y_balance)
   4. Validate: check_boundary(), check_weight(), check_collision(), check_support(), check_door_access()
   5. Pick the highest-scoring valid position → place_package()
   6. If none found → mark as unplaced
@@ -83,27 +84,22 @@ Every valid candidate position receives a score. The scorer never validates — 
 
 ### Scoring Categories (4 terms)
 
-| Category | Weight | Calculation |
-|----------|--------|-------------|
-| `package_contact` | 1000 | Sum of coincident-face overlap areas (mm²) across all neighboring packages |
-| `x_preference` | 200 | `max(0, container.length − xmin)` — push deep into container |
-| `floor_contact` | 100 | `container.width × container.length` if `z==0`, else 0 — prefer floor |
-| `y_balance` | 50 | Y-COG proximity to `container.width/2` — even weight distribution |
+| Priority | Category | Weight | Calculation |
+|----------|----------|--------|-------------|
+| 1 | `x_slice_completion` | 10000 | Fraction of remaining container width filled at the current front X |
+| 2 | `package_contact` | 1000 | Sum of coincident-face overlap areas (mm²) across all neighbors |
+| 3 | `floor_contact` | 100 | 1 if `z==0`, else 0 |
+| 4 | `y_balance` | 50 | Y-COG proximity to `container.width/2` |
 
-### Design Principles
-- No clamping — raw contact area and length values compete naturally
-- `SCORING_WEIGHTS` dict at module top for global rebalancing
-- `debug=True` prints per-category breakdown for analysis
+### X-Slice Completion
+
+Tracks `front_x` = the maximum X (deepest point) among placed packages. A candidate only scores here if it starts at `front_x`. Score = `min(1.0, candidate_width / remaining_width_at_front)`. This fills one Y cross-section before advancing the front, minimizing blocking behavior.
 
 ### Y-Balance Details
-
-Computes Y-centre-of-gravity of all packages (existing + candidate) using actual `weight_kg`:
 
 ```
 score = max(0, 1 − |y_cog − container.width/2| / (container.width/2))
 ```
-
-1.0 when perfectly centred, 0.0 at either wall.
 
 ---
 

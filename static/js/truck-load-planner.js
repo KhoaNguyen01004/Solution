@@ -5,21 +5,21 @@
  */
 
 const API = {
-  vehicles:       () => fetch("/api/tlp/vehicle-containers").then(r => r.json()),
-  packages:       () => fetch("/api/tlp/packages").then(r => r.json()),
-  shipments:      () => fetch("/api/tlp/shipments").then(r => r.json()),
-  getShipment:    (id) => fetch(`/api/tlp/shipments/${id}`).then(r => r.json()),
-  saveShipment:   (data) => fetch("/api/tlp/shipments", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(data) }).then(r => r.json()),
-  updateShipment: (id, data) => fetch(`/api/tlp/shipments/${id}`, { method: "PUT", headers: {"Content-Type":"application/json"}, body: JSON.stringify(data) }).then(r => r.json()),
+  vehicles: () => fetch("/api/tlp/vehicle-containers").then(r => r.json()),
+  packages: () => fetch("/api/tlp/packages").then(r => r.json()),
+  shipments: () => fetch("/api/tlp/shipments").then(r => r.json()),
+  getShipment: (id) => fetch(`/api/tlp/shipments/${id}`).then(r => r.json()),
+  saveShipment: (data) => fetch("/api/tlp/shipments", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(r => r.json()),
+  updateShipment: (id, data) => fetch(`/api/tlp/shipments/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(r => r.json()),
   deleteShipment: (id) => fetch(`/api/tlp/shipments/${id}`, { method: "DELETE" }).then(r => r.json()),
-  updateShipmentItem: (id, data) => fetch(`/api/tlp/shipment-items/${id}`, { method: "PUT", headers: {"Content-Type":"application/json"}, body: JSON.stringify(data) }).then(r => r.json()),
+  updateShipmentItem: (id, data) => fetch(`/api/tlp/shipment-items/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(r => r.json()),
   deleteShipmentItem: (id) => fetch(`/api/tlp/shipment-items/${id}`, { method: "DELETE" }).then(r => r.json()),
-  plans:          () => fetch("/api/tlp/plans").then(r => r.json()),
-  getPlan:        (id) => fetch(`/api/tlp/plans/${id}`).then(r => r.json()),
-  savePlan:       (data) => fetch("/api/tlp/plans", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(data) }).then(r => r.json()),
-  updatePlan:     (id, data) => fetch(`/api/tlp/plans/${id}`, { method: "PUT", headers: {"Content-Type":"application/json"}, body: JSON.stringify(data) }).then(r => r.json()),
-  validate:       (data) => fetch("/api/tlp/session/validate", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(data) }).then(r => r.json()),
-  container:      (id) => fetch(`/api/tlp/container-configs/${id}`).then(r => r.json()),
+  plans: () => fetch("/api/tlp/plans").then(r => r.json()),
+  getPlan: (id) => fetch(`/api/tlp/plans/${id}`).then(r => r.json()),
+  savePlan: (data) => fetch("/api/tlp/plans", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(r => r.json()),
+  updatePlan: (id, data) => fetch(`/api/tlp/plans/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(r => r.json()),
+  validate: (data) => fetch("/api/tlp/session/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(r => r.json()),
+  container: (id) => fetch(`/api/tlp/container-configs/${id}`).then(r => r.json()),
 };
 
 function toast(msg, type = "info") {
@@ -808,8 +808,8 @@ class LoadPlannerApp {
             const pkgH = pkg.height || pkg._height || 0;
             const desiredZ = dim2 - snappedY - pkgH;
             if (view === "back") {
-                const pw = pkg.width || pkg._width || 0;
-                horiz = dim1 - snappedX - pw;
+              const pw = pkg.width || pkg._width || 0;
+              horiz = dim1 - snappedX - pw;
             }
             const valid = this._findValidPosition(pkg, horiz, desiredZ);
             this._showMeasurement(view === "back" ? horiz : snappedX, valid != null ? valid.z : 0);
@@ -1189,7 +1189,7 @@ class LoadPlannerApp {
       })),
     }).then(result => {
       this.lastValidResult = result;
-    }).catch(() => {});
+    }).catch(() => { });
   }
 
   async _onDrop(e) {
@@ -1351,7 +1351,7 @@ class LoadPlannerApp {
     this.renderCanvas();
     this.updateStatus();
     if (this._show3D) this.update3DScene();
-      toast("Rotated to " + r + "&deg;", "info");
+    toast("Rotated to " + r + "&deg;", "info");
   }
 
   /* ═══════════════════════ AUTO ARRANGE ═══════════════════════ */
@@ -1359,7 +1359,7 @@ class LoadPlannerApp {
   async autoArrange() {
     // Gather packages from shipment items, or fall back to all packages
     let packages = [];
-      if (this.currentShipment && this.currentShipment.items && this.currentShipment.items.length) {
+    if (this.currentShipment && this.currentShipment.items && this.currentShipment.items.length) {
       for (const item of this.currentShipment.items) {
         const qty = item.quantity || 1;
         for (let i = 0; i < qty; i++) {
@@ -1403,7 +1403,7 @@ class LoadPlannerApp {
     const profileName = profileSelect ? profileSelect.value : "balanced";
 
     const payload = {
-      strategy: "largest_first",
+      strategy: "optimized",
       profile: profileName,
     };
 
@@ -1723,8 +1723,8 @@ class LoadPlannerApp {
         const a = this.placements[i];
         const b = this.placements[j];
         if (a.x < b.x + (b._length || 0) && a.x + (a._length || 0) > b.x &&
-            a.y < b.y + (b._width || 0) && a.y + (a._width || 0) > b.y &&
-            (a.z || 0) < (b.z || 0) + (b._height || 0) && (a.z || 0) + (a._height || 0) > (b.z || 0)) {
+          a.y < b.y + (b._width || 0) && a.y + (a._width || 0) > b.y &&
+          (a.z || 0) < (b.z || 0) + (b._height || 0) && (a.z || 0) + (a._height || 0) > (b.z || 0)) {
           collisionOk = false;
         }
       }
@@ -1833,7 +1833,7 @@ class LoadPlannerApp {
     // Placement order
     this._updateSequence();
 
-        // Package cards (update placed counts)
+    // Package cards (update placed counts)
     this.filterPackages();
 
     // Vehicle remaining
@@ -2047,8 +2047,15 @@ class LoadPlannerApp {
       pool = pool.filter(p => p.name.toLowerCase().includes(search));
     }
 
-    const unplaced = pool.filter(p => !placedCounts[p.id] || placedCounts[p.id] < this._getMaxQty(p.id));
-    const placed = pool.filter(p => placedCounts[p.id] > 0 && placedCounts[p.id] >= this._getMaxQty(p.id));
+    const sortByWeightAndSize = (a, b) => {
+      const volA = (a.length || 0) * (a.width || 0) * (a.height || 0);
+      const volB = (b.length || 0) * (b.width || 0) * (b.height || 0);
+      if (b.weight_kg !== a.weight_kg) return b.weight_kg - a.weight_kg;
+      return volB - volA;
+    };
+
+    const unplaced = pool.filter(p => !placedCounts[p.id] || placedCounts[p.id] < this._getMaxQty(p.id)).sort(sortByWeightAndSize);
+    const placed = pool.filter(p => placedCounts[p.id] > 0 && placedCounts[p.id] >= this._getMaxQty(p.id)).sort(sortByWeightAndSize);
 
     if (tab === "unplaced") this._populatePackageList(unplaced, placedCounts);
     else this._populatePackageList(placed, placedCounts);
@@ -2092,7 +2099,7 @@ class LoadPlannerApp {
       const pname = card.dataset.packageName;
       const isSelected = this.placements[this.selectedIndex] &&
         (this.placements[this.selectedIndex].package_id == pid ||
-         this.placements[this.selectedIndex]._name === pname);
+          this.placements[this.selectedIndex]._name === pname);
       card.classList.toggle("selected", isSelected);
     }
   }
@@ -2229,8 +2236,10 @@ class LoadPlannerApp {
         ? '<span style="font-size:9px;color:var(--accent);display:block;">\u26FD ' + [...vehiclePlates].join(", ") + '</span>'
         : "";
 
+      const stackingLabel = pkg.allow_stacking ? '<span class="tlp-stack-badge stackable">Stackable</span>' : '<span class="tlp-stack-badge non-stackable">Non-stackable</span>';
+
       info.innerHTML = `
-        <div class="tlp-pkg-name">${pkg.name}</div>
+        <div class="tlp-pkg-name">${pkg.name} ${stackingLabel}</div>
         <div class="tlp-pkg-dims">${pkg.length}\u00D7${pkg.width}\u00D7${pkg.height} mm &middot; ${pkg.weight_kg} kg</div>
         ${vehicleStr}
       `;
@@ -2344,7 +2353,7 @@ class LoadPlannerApp {
     try {
       if (editId) {
         const res = await fetch(`/api/tlp/packages/${editId}`, {
-          method: "PUT", headers: {"Content-Type":"application/json"},
+          method: "PUT", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
         if (!res.ok) {
@@ -2355,7 +2364,7 @@ class LoadPlannerApp {
         toast("Package updated", "success");
       } else {
         const res = await fetch("/api/tlp/packages", {
-          method: "POST", headers: {"Content-Type":"application/json"},
+          method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
         if (!res.ok) {
@@ -2716,11 +2725,11 @@ class LoadPlannerApp {
       this.redoStack = [];
       this.selectedIndex = -1;
 
-    document.getElementById("btn-deselect-vehicle").style.display = "";
-    this.viewOffsetX = 0;
-    this.viewOffsetY = 0;
-    this.viewScale = 1;
-    this.renderCanvas();
+      document.getElementById("btn-deselect-vehicle").style.display = "";
+      this.viewOffsetX = 0;
+      this.viewOffsetY = 0;
+      this.viewScale = 1;
+      this.renderCanvas();
       this.updateStatus();
       if (this._show3D) this.update3DScene();
       toast("Plan loaded: " + (plan.name || "Unnamed"), "success");
