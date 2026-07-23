@@ -201,9 +201,17 @@ class GoogleSheetService:
         """Return a :class:`gspread.Worksheet`, caching it after the first call."""
         if self._worksheet is not None:
             return self._worksheet
-        creds = Credentials.from_service_account_file(
-            self.credentials_path, scopes=SCOPES
-        )
+
+        creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+        if creds_json:
+            import json
+            creds = Credentials.from_service_account_info(
+                json.loads(creds_json), scopes=SCOPES
+            )
+        else:
+            creds = Credentials.from_service_account_file(
+                self.credentials_path, scopes=SCOPES
+            )
         client = gspread.authorize(creds)
         workbook = client.open_by_key(self.spreadsheet_id)
         self._worksheet = workbook.worksheet(self.worksheet_name)
