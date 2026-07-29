@@ -1,6 +1,6 @@
 # Fleet Fuel Management — AI Context
 
-Flask-based fleet management for a real trucking fleet (~110 box trucks, 36 containers):
+Flask-based fleet management for a real trucking fleet (36 box trucks, 4 large container vehicles):
 GPS trip tracking, fuel/oil monitoring, a 3D/2D truck load (bin-packing) planner, and a
 delivery plan management module. Solo-developed, deployed to Render via Gunicorn.
 
