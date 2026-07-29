@@ -1,6 +1,6 @@
 from dataclasses import dataclass, asdict
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 
 class StackingMode(Enum):
@@ -92,4 +92,58 @@ class Package:
             max_top_weight_kg=float(data.get("max_top_weight_kg", 0.0)),
             max_stack_layers=int(data.get("max_stack_layers", 0)),
             stacking_mode=mode,
+        )
+
+    @classmethod
+    def from_legacy(cls, source, *, prefix: str = "") -> "Package":
+        """Single factory for legacy-to-engine Package conversions.
+
+        Accepts either:
+          - a dict with plain keys (``name``, ``length``, ``allow_stacking``, ...)
+            or underscore-prefixed keys (``_name``, ``_length``, ...) when
+            ``prefix="_"`` is passed — matches the shape produced by
+            ``_engine_placement_to_dict``/``_build_placement_dict``; or
+          - a legacy Package-like object with attribute access
+            (``truck_load_planner.models.Package`` instances).
+
+        Unlike ``from_dict`` (which reconstructs a Package from its own
+        ``to_dict()`` output, including ``stacking_mode``), this is for the
+        simpler legacy shapes used by ``session.py`` and ``routes.py``.
+        """
+        is_dict = isinstance(source, dict)
+
+        def _val(*keys: str, default: Any = None) -> Any:
+            for k in keys:
+                if is_dict:
+                    v = source.get(prefix + k)
+                    if v is None:
+                        v = source.get(k)
+                else:
+                    v = getattr(source, k, None)
+                if v is not None:
+                    return v
+            return default
+
+        if is_dict:
+            pkg_id = source.get("package_id", source.get("id"))
+        else:
+            pkg_id = getattr(source, "id", None)
+
+        old_clr = _val("clearance_mm", "clearance")
+        h_clr = float(old_clr) if old_clr is not None else 10.0
+
+        return cls(
+            id=pkg_id,
+            name=_val("name", default=""),
+            length_mm=_val("length_mm", "length", default=0),
+            width_mm=_val("width_mm", "width", default=0),
+            height_mm=_val("height_mm", "height", default=0),
+            weight_kg=_val("weight_kg", default=0),
+            stackable=bool(_val("stackable", "allow_stacking", default=False)),
+            allow_rotation=bool(_val("allow_rotation", default=False)),
+            fragile=bool(_val("fragile", default=False)),
+            color=_val("color", default="#3b82f6"),
+            horizontal_clearance_mm=h_clr,
+            max_top_weight_kg=float(_val("max_top_weight_kg", default=0.0)),
+            max_stack_layers=int(_val("max_stack_layers", default=0)),
         )

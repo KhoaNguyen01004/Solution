@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dispatch Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="/static/css/delivery-dashboard.css">
+</head>
+<body>
+    <div class="dashboard-shell">
+        <!-- Header -->
+        <header class="top-header dashboard-header">
+            <div class="header-left">
+                <a href="/" class="btn-nav">Back to Map</a>
+                <h1>Dispatch Dashboard</h1>
+            </div>
+            <nav class="header-nav">
+                <a href="/" class="btn-nav">Map</a>
+                <div class="nav-dropdown" style="position:relative;">
+                    <button class="btn-nav" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='block'?'none':'block'" style="cursor:pointer;background:none;border:none;font-family:inherit;font-size:13px;color:#c9d1d9;font-weight:500;padding:0 14px;height:34px;display:inline-flex;align-items:center;gap:4px;">Trips &#9662;</button>
+                    <div style="display:none;position:absolute;top:100%;right:0;background:#161b22;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:6px;min-width:170px;box-shadow:0 12px 40px rgba(0,0,0,0.5);z-index:200;" class="fleet-dropdown">
+                        <a href="/manage-trips" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Trip Management</a>
+                        <a href="/trip-history" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Trip History</a>
+                    </div>
+                </div>
+                <div class="nav-dropdown" style="position:relative;">
+                    <button class="btn-nav" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='block'?'none':'block'" style="cursor:pointer;background:none;border:none;font-family:inherit;font-size:13px;color:#c9d1d9;font-weight:500;padding:0 14px;height:34px;display:inline-flex;align-items:center;gap:4px;">Delivery &#9662;</button>
+                    <div style="display:none;position:absolute;top:100%;right:0;background:#161b22;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:6px;min-width:170px;box-shadow:0 12px 40px rgba(0,0,0,0.5);z-index:200;" class="fleet-dropdown">
+                        <a href="/delivery/new" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Plan Builder</a>
+                        <a href="/delivery/dashboard" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Dispatch</a>
+                    </div>
+                </div>
+                <a href="/locations" class="btn-nav">Locations</a>
+                <a href="/truck-load-planner" class="btn-nav">Load Planner</a>
+                <div class="nav-dropdown" style="position:relative;">
+                    <button class="btn-nav" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='block'?'none':'block'" style="cursor:pointer;background:none;border:none;font-family:inherit;font-size:13px;color:#c9d1d9;font-weight:500;padding:0 14px;height:34px;display:inline-flex;align-items:center;gap:4px;">Fleet &#9662;</button>
+                    <div style="display:none;position:absolute;top:100%;right:0;background:#161b22;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:6px;min-width:170px;box-shadow:0 12px 40px rgba(0,0,0,0.5);z-index:200;" class="fleet-dropdown">
+                        <a href="/oil-change" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Oil Change</a>
+                        <a href="/vehicle-management" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Vehicles</a>
+                        <a href="/fuel-efficiency" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Fuel</a>
+                        <a href="/fuel-container" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Container</a>
+                    </div>
+                </div>
+            </nav>
+            <div class="dashboard-filters">
+                <div class="filter-group">
+                    <label for="filterPlan">Plan</label>
+                    <select id="filterPlan"><option value="">All Plans</option></select>
+                </div>
+                <div class="filter-group">
+                    <label for="filterDate">Date</label>
+                    <input type="date" id="filterDate">
+                </div>
+                <div class="filter-group">
+                    <label for="filterVehicle">Vehicle</label>
+                    <input type="text" id="filterVehicle" placeholder="Search plate...">
+                </div>
+                <div class="filter-group">
+                    <label for="filterDriver">Driver</label>
+                    <input type="text" id="filterDriver" placeholder="Search driver...">
+                </div>
+                <div class="filter-group">
+                    <label for="filterStatus">Status</label>
+                    <select id="filterStatus">
+                        <option value="">All</option>
+                        <option value="draft">Draft</option>
+                        <option value="confirmed">Confirmed</option>
+                        <option value="executing">Executing</option>
+                        <option value="completed">Completed</option>
+                        <option value="cancelled">Cancelled</option>
+                    </select>
+                </div>
+            </div>
+            <div class="header-right">
+                <span id="pollStatus" class="poll-status"></span>
+                <button class="btn-nav" id="refreshNowBtn" title="Refresh now">&#x21bb;</button>
+                <button class="btn-nav timeline-toggle" id="timelineToggleBtn" title="Toggle timeline">&#x2630;</button>
+                <a href="/delivery/new" class="btn-nav">+ New Plan</a>
+            </div>
+        </header>
+
+        <!-- Left Panel: Vehicle List -->
+        <aside class="dashboard-left" id="leftPanel">
+            <div class="panel-header">
+                <h2>Vehicles</h2>
+                <span id="vehicleCount" class="panel-count"></span>
+            </div>
+            <div class="vehicle-list" id="vehicleList">
+                <div class="empty-state">Loading vehicles...</div>
+            </div>
+        </aside>
+
+        <!-- Center Panel: Map -->
+        <main class="dashboard-center" id="centerPanel">
+            <div id="dashboardMap" class="dashboard-map"></div>
+
+            <!-- Map controls overlay -->
+            <div class="map-controls">
+                <button class="btn-nav map-control-btn" id="zoomToVehicleBtn" title="Zoom to vehicle" style="display:none;">&#8982; Zoom Vehicle</button>
+                <button class="btn-nav map-control-btn" id="openGmapsBtn" title="Open in Google Maps" style="display:none;">&#x2197; Google Maps</button>
+                <button class="btn-nav map-control-btn" id="refreshGPSBtn" title="Refresh GPS">&#x21bb; GPS</button>
+            </div>
+
+            <!-- Vehicle info bar -->
+            <div class="vehicle-info-bar" id="vehicleInfoBar" style="display:none;">
+                <div class="vibar-left">
+                    <strong id="vibarVehicle"></strong>
+                    <span id="vibarDriver"></span>
+                    <span class="status-badge" id="vibarStatus"></span>
+                </div>
+                <div class="vibar-right">
+                    <span id="vibarProgress"></span>
+                    <span id="vibarEta"></span>
+                    <span id="vibarGpsTime"></span>
+                </div>
+            </div>
+        </main>
+
+        <!-- Right Panel: Timeline -->
+        <aside class="dashboard-right" id="rightPanel">
+            <div class="panel-header">
+                <h2>Timeline</h2>
+                <span id="stopCount" class="panel-count"></span>
+                <button class="btn-nav timeline-close" id="timelineCloseBtn" title="Close timeline" style="display:none;">&#x2715;</button>
+            </div>
+            <div class="timeline" id="timeline">
+                <div class="empty-state">Select a vehicle to view stops</div>
+            </div>
+        </aside>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/static/js/dashboard/api.js"></script>
+    <script src="/static/js/dashboard/polling.js"></script>
+    <script src="/static/js/dashboard/vehicle-list.js"></script>
+    <script src="/static/js/dashboard/map.js"></script>
+    <script src="/static/js/dashboard/timeline.js"></script>
+    <script src="/static/js/dashboard/main.js"></script>
+</body>
+</html>

@@ -32,18 +32,13 @@ function setDefaultTime() {
     if (t) t.value = String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0');
 }
 
-function todayISO() {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-}
-
 // ── Month Selector ─────────────────────────────────────────────
 async function populateMonthSelect() {
     const sel = document.getElementById('month-select');
     sel.innerHTML = '';
     let months = [];
     try {
-        const data = await apiFetch(`/api/fuel-log/months?mode=${PAGE_MODE}`);
+        const data = await ApiClient.fetch(`/fuel-log/months?mode=${PAGE_MODE}`);
         months = data.data || [];
     } catch (_) {}
     const allOpt = document.createElement('option');
@@ -76,7 +71,7 @@ async function populateDaySelect() {
     if (!month) { sel.disabled = true; return; }
     sel.disabled = false;
     try {
-        const data = await apiFetch(`/api/fuel-log/days?month=${month}&mode=${PAGE_MODE}`);
+        const data = await ApiClient.fetch(`/fuel-log/days?month=${month}&mode=${PAGE_MODE}`);
         availableDays = data.data || [];
     } catch (_) {}
     for (const day of availableDays) {
@@ -126,23 +121,13 @@ function onMonthChange() {
     loadDashboard();
 }
 
-// ── API ────────────────────────────────────────────────────────
-async function apiFetch(url, opts = {}) {
-    const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
-    opts.headers = headers;
-    const resp = await fetch(url, opts);
-    const data = await resp.json();
-    if (!data.success) throw new Error(data.message || 'Unknown error');
-    return data;
-}
-
 // ── Load Dashboard ─────────────────────────────────────────────
 async function loadDashboard() {
     const month = getSelectedMonth();
     try {
         const [listData, summaryData] = await Promise.all([
-            apiFetch(`/api/fuel-log?month=${month}&mode=${PAGE_MODE}`),
-            apiFetch(`/api/fuel-log/summary?month=${month}`),
+            ApiClient.fetch(`/fuel-log?month=${month}&mode=${PAGE_MODE}`),
+            ApiClient.fetch(`/fuel-log/summary?month=${month}`),
         ]);
         allEntries = (listData.data || []).filter(e => {
             const isContainer = (e.vehicle_type || '').toLowerCase().includes('container');
@@ -155,7 +140,7 @@ async function loadDashboard() {
         document.getElementById('entry-count').textContent = filteredEntries.length;
         loadProfiles();
     } catch (err) {
-        showToast('error', `Failed to load: ${err.message}`);
+        UI.toast(`Failed to load: ${err.message}`, 'error');
     }
 }
 
@@ -279,15 +264,15 @@ function renderTable() {
             anomalyBadge = '<span style="color:#4ade80;font-size:11px;">✓ Normal</span>';
         }
         const rowClass = anomaly ? 'anomaly-row' : noKm ? 'no-km-row' : '';
-        return `<tr class="${rowClass}" data-vehicle-id="${e.vehicle_id || ''}" data-vehicle-plate="${escHtml(e.license_plate)}">
+        return `<tr class="${rowClass}" data-vehicle-id="${e.vehicle_id || ''}" data-vehicle-plate="${UI.escapeHtml(e.license_plate)}">
             <td>${formatDate(e.log_date)}</td>
-            <td>${escHtml(e.log_time || '—')}</td>
-            <td>${escHtml(e.gas_store || '—')}</td>
-            <td><span class="plate-badge">${escHtml(e.license_plate)}</span></td>
+            <td>${UI.escapeHtml(e.log_time || '—')}</td>
+            <td>${UI.escapeHtml(e.gas_store || '—')}</td>
+            <td><span class="plate-badge">${UI.escapeHtml(e.license_plate)}</span></td>
             <td>${dist !== '—' ? `<span class="fuel-value">${dist}</span> <span class="fuel-muted">km</span>` : '<span class="fuel-muted">—</span>'}</td>
             <td><span class="fuel-value">${e.liters.toFixed(1)}</span> <span class="fuel-muted">L</span></td>
             <td><span class="fuel-value">${l100}</span></td>
-            <td>${escHtml(e.driver_name || '—')}</td>
+            <td>${UI.escapeHtml(e.driver_name || '—')}</td>
             <td>${PAGE_MODE === 'container' ? (e.is_full_tank ? '<span style="color:#4ade80;font-size:11px;">Full</span>' : '<span style="color:#f59e0b;font-size:11px;">Partial</span>') : ''}</td>
             <td>${anomalyBadge}</td>
             <td>
@@ -491,7 +476,7 @@ function isContainerV(vt) {
 
 async function loadVehicles() {
     try {
-        const data = await apiFetch('/api/fleet/vehicles');
+        const data = await ApiClient.fetch('/fleet/vehicles');
         allVehicles = data.data || [];
         updateFilterLabel();
     } catch (_) {}
@@ -516,14 +501,14 @@ function renderSearchDropdown(q) {
     const limited = matches.slice(0, 10);
 
     if (limited.length === 0) {
-        dropdown.innerHTML = `<div class="autocomplete-item" style="color:#f87171;cursor:default;">No vehicle found for "${escHtml(trimmed)}"</div>`;
+        dropdown.innerHTML = `<div class="autocomplete-item" style="color:#f87171;cursor:default;">No vehicle found for "${UI.escapeHtml(trimmed)}"</div>`;
     } else {
         dropdown.innerHTML = `
             <div class="autocomplete-item ${!selectedChartVehicleId ? 'selected' : ''}" onclick="selectSearchVehicle(null, '')">All vehicles (${modeVehicles.length})</div>
             ${limited.map(v => `
-                <div class="autocomplete-item ${selectedChartVehicleId === v.id ? 'selected' : ''}" onclick="selectSearchVehicle(${v.id}, '${escHtml(v.plate_number)}')">
-                    ${escHtml(v.plate_number)}
-                    <span class="sub">${v.vehicle_type || ''}${v.current_driver ? ' — ' + escHtml(v.current_driver) : ''}</span>
+                <div class="autocomplete-item ${selectedChartVehicleId === v.id ? 'selected' : ''}" onclick="selectSearchVehicle(${v.id}, '${UI.escapeHtml(v.plate_number)}')">
+                    ${UI.escapeHtml(v.plate_number)}
+                    <span class="sub">${v.vehicle_type || ''}${v.current_driver ? ' — ' + UI.escapeHtml(v.current_driver) : ''}</span>
                 </div>
             `).join('')}
         `;
@@ -599,9 +584,9 @@ function onVehicleInput(q) {
     ).slice(0, 8);
     if (matches.length === 0) { dropdown.classList.remove('open'); return; }
     dropdown.innerHTML = matches.map(v =>
-        `<div class="autocomplete-item" onclick="selectVehicle(${v.id}, '${escHtml(v.plate_number)}', '${escHtml(v.vehicle_type || '')}', '${escHtml(v.current_driver || '')}')">
-            ${escHtml(v.plate_number)}
-            <span class="sub">${v.vehicle_type || ''} ${v.current_driver ? '— ' + escHtml(v.current_driver) : ''}</span>
+        `<div class="autocomplete-item" onclick="selectVehicle(${v.id}, '${UI.escapeHtml(v.plate_number)}', '${UI.escapeHtml(v.vehicle_type || '')}', '${UI.escapeHtml(v.current_driver || '')}')">
+            ${UI.escapeHtml(v.plate_number)}
+            <span class="sub">${v.vehicle_type || ''} ${v.current_driver ? '— ' + UI.escapeHtml(v.current_driver) : ''}</span>
         </div>`
     ).join('');
     dropdown.classList.add('open');
@@ -616,7 +601,7 @@ async function selectVehicle(id, plate, vtype, driver) {
     document.getElementById('vehicle-dropdown').classList.remove('open');
     if (editingId) return; // don't auto-fill on edit
     try {
-        const data = await apiFetch(`/api/fuel-log/last-km?plate=${encodeURIComponent(plate)}`);
+        const data = await ApiClient.fetch(`/fuel-log/last-km?plate=${encodeURIComponent(plate)}`);
         const km = data.new_km || 0;
         document.getElementById('field-old-km').value = km > 0 ? km : '';
     } catch (_) {}
@@ -698,11 +683,11 @@ async function saveEntry() {
     const price = document.getElementById('field-price').value.trim();
     const notes = document.getElementById('field-notes').value.trim();
 
-    if (!plate) return showToast('warning', 'Select a vehicle.');
-    if (!date) return showToast('warning', 'Date is required.');
-    if (!time && PAGE_MODE !== 'container') return showToast('warning', 'Time is required.');
-    if (isNaN(liters) || liters <= 0) return showToast('warning', 'Liters must be > 0.');
-    if (newKm > 0 && oldKm > 0 && newKm < oldKm) return showToast('warning', 'New KM must be >= Old KM.');
+    if (!plate) return UI.toast('Select a vehicle.', 'warning');
+    if (!date) return UI.toast('Date is required.', 'warning');
+    if (!time && PAGE_MODE !== 'container') return UI.toast('Time is required.', 'warning');
+    if (isNaN(liters) || liters <= 0) return UI.toast('Liters must be > 0.', 'warning');
+    if (newKm > 0 && oldKm > 0 && newKm < oldKm) return UI.toast('New KM must be >= Old KM.', 'warning');
     if (newKm - oldKm > 2000 && !confirm('Distance exceeds 2000 km — are you sure?')) return;
 
     const isFullTank = document.getElementById('field-fulltank')?.checked !== false;
@@ -722,19 +707,19 @@ async function saveEntry() {
 
     try {
         if (editingId) {
-            const result = await apiFetch(`/api/fuel-log/${editingId}`, { method: 'PUT', body: JSON.stringify(payload) });
-            if (result.warnings) result.warnings.forEach(w => showToast('warning', w, 6000));
-            showToast('success', 'Entry updated.');
+            const result = await ApiClient.fetch(`/fuel-log/${editingId}`, { method: 'PUT', body: JSON.stringify(payload) });
+            if (result.warnings) result.warnings.forEach(w => UI.toast(w, 'warning', 6000));
+            UI.toast('Entry updated.', 'success');
         } else {
-            const result = await apiFetch('/api/fuel-log', { method: 'POST', body: JSON.stringify(payload) });
-            if (result.warnings) result.warnings.forEach(w => showToast('warning', w, 6000));
-            showToast('success', 'Entry created.');
+            const result = await ApiClient.fetch('/fuel-log', { method: 'POST', body: JSON.stringify(payload) });
+            if (result.warnings) result.warnings.forEach(w => UI.toast(w, 'warning', 6000));
+            UI.toast('Entry created.', 'success');
         }
         closeModal();
         await loadDashboard();
         await loadProfiles();
     } catch (err) {
-        showToast('error', err.message);
+        UI.toast(err.message, 'error');
     } finally {
         btn.disabled = false;
         btn.textContent = editingId ? 'Save Changes' : 'Save Entry';
@@ -747,12 +732,12 @@ async function deleteEntry(id) {
     const label = entry ? `${entry.license_plate} on ${entry.log_date}` : `#${id}`;
     if (!confirm(`Delete entry for ${label}?`)) return;
     try {
-        await apiFetch(`/api/fuel-log/${id}`, { method: 'DELETE' });
-        showToast('success', 'Entry deleted.');
+        await ApiClient.fetch(`/fuel-log/${id}`, { method: 'DELETE' });
+        UI.toast('Entry deleted.', 'success');
         await loadDashboard();
         await loadProfiles();
     } catch (err) {
-        showToast('error', err.message);
+        UI.toast(err.message, 'error');
     }
 }
 
@@ -770,7 +755,7 @@ function exportCsv() {
 // ── Vehicle Baselines ──────────────────────────────────────────
 async function loadProfiles() {
     try {
-        const data = await apiFetch('/api/fuel-log/profiles');
+        const data = await ApiClient.fetch('/fuel-log/profiles');
         renderProfiles(data.data || []);
     } catch (_) {}
 }
@@ -794,7 +779,7 @@ function renderProfiles(profiles) {
 
     const sorted = [...filtered].sort((a, b) => a.license_plate.localeCompare(b.license_plate));
     tbody.innerHTML = sorted.map(p => {
-        const pid = escHtml(p.license_plate);
+        const pid = UI.escapeHtml(p.license_plate);
         const normal = p.normal_l_per_100km || 0;
         const mult = p.anomaly_multiplier || (PAGE_MODE === 'container' ? 1.5 : 1.2);
         const updated = p.updated_at ? formatDateTime(p.updated_at) : '—';
@@ -821,7 +806,7 @@ function renderProfiles(profiles) {
 }
 
 function editNormal(plate) {
-    const sid = escHtml(plate);
+    const sid = UI.escapeHtml(plate);
     document.getElementById(`nd-${sid}`).style.display = 'none';
     document.getElementById(`ni-${sid}`).style.display = 'inline-block';
     document.getElementById(`md-${sid}`).style.display = 'none';
@@ -832,36 +817,36 @@ function editNormal(plate) {
 }
 
 async function saveNormal(plate) {
-    const pid = escHtml(plate);
+    const pid = UI.escapeHtml(plate);
     const normalVal = parseFloat(document.getElementById(`ni-${pid}`)?.value);
     const multVal = parseFloat(document.getElementById(`mi-${pid}`)?.value);
     const body = {};
     if (!isNaN(normalVal) && normalVal > 0) body.normal_l_per_100km = normalVal;
-    if (isNaN(normalVal) || normalVal <= 0) return showToast('warning', 'Enter a valid L/100km > 0.');
+    if (isNaN(normalVal) || normalVal <= 0) return UI.toast('Enter a valid L/100km > 0.', 'warning');
     if (!isNaN(multVal) && multVal >= 1.0) body.anomaly_multiplier = multVal;
     try {
-        await apiFetch(`/api/fuel-log/profiles/${encodeURIComponent(plate)}`, {
+        await ApiClient.fetch(`/fuel-log/profiles/${encodeURIComponent(plate)}`, {
             method: 'PUT', body: JSON.stringify(body)
         });
         const parts = [`Normal: ${normalVal.toFixed(2)} L/100km`];
         if (body.anomaly_multiplier) parts.push(`Multiplier: ${multVal.toFixed(2)}x`);
-        showToast('success', `${plate} — ${parts.join(', ')}`);
+        UI.toast(`${plate} — ${parts.join(', ')}`, 'success');
         await loadProfiles();
         await loadDashboard();
     } catch (err) {
-        showToast('error', err.message);
+        UI.toast(err.message, 'error');
     }
 }
 
 async function clearNormal(plate) {
     if (!confirm(`Clear normal for ${plate}? Will revert to computed baseline.`)) return;
     try {
-        await apiFetch(`/api/fuel-log/profiles/${encodeURIComponent(plate)}`, { method: 'DELETE' });
-        showToast('success', `Normal for ${plate} cleared.`);
+        await ApiClient.fetch(`/fuel-log/profiles/${encodeURIComponent(plate)}`, { method: 'DELETE' });
+        UI.toast(`Normal for ${plate} cleared.`, 'success');
         await loadProfiles();
         await loadDashboard();
     } catch (err) {
-        showToast('error', err.message);
+        UI.toast(err.message, 'error');
     }
 }
 
@@ -883,38 +868,10 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ── Utilities ──────────────────────────────────────────────────
-function formatDate(iso) {
-    if (!iso) return '—';
-    const [y, m, d] = iso.split('-');
-    return `${d}/${m}/${y}`;
-}
-
 function formatDateTime(iso) {
     if (!iso) return '—';
     try {
         const d = new Date(iso);
         return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
     } catch { return iso; }
-}
-
-function escHtml(s) {
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-function fmtNum(n) {
-    return (n == null || isNaN(n)) ? '0' : Number(n).toLocaleString('en-US');
-}
-
-function showToast(type, message, duration = 4500) {
-    const container = document.getElementById('toast-container');
-    const toast = document.createElement('div');
-    toast.className = `toast ${type}`;
-    toast.innerHTML = `<span class="toast-msg">${escHtml(message)}</span>`;
-    container.appendChild(toast);
-    setTimeout(() => {
-        toast.style.transition = 'opacity 0.4s, transform 0.4s';
-        toast.style.opacity = '0';
-        toast.style.transform = 'translateX(100%)';
-        setTimeout(() => toast.remove(), 400);
-    }, duration);
 }

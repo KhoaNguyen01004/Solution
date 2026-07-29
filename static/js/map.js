@@ -41,25 +41,6 @@ const state = {
     hasInitialFocused: false // tracks whether the focusVehicle query-param focus has already fired
 };
 
-function normalizeText(value) {
-    return String(value || "")
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .replace(/đ/g, "d")
-        .replace(/Đ/g, "D")
-        .toLowerCase();
-}
-
-function escapeHtml(value) {
-    return String(value || "").replace(/[&<>"']/g, (char) => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        "\"": "&quot;",
-        "'": "&#39;"
-    })[char]);
-}
-
 function updateSourceStatus(sourceInfo = {}) {
     const element = document.getElementById("source-status");
     if (!element) return;
@@ -112,10 +93,10 @@ map.on('click', (e) => {
         
         if (state.customLocationMarker) {
             state.customLocationMarker.setLatLng([lat, lng]);
-            state.customLocationMarker.setPopupContent(`<strong>Custom Location:</strong><br>${escapeHtml(state.customLocation.name)}`);
+            state.customLocationMarker.setPopupContent(`<strong>Custom Location:</strong><br>${UI.escapeHtml(state.customLocation.name)}`);
         } else {
             state.customLocationMarker = L.marker([lat, lng]).addTo(map);
-            state.customLocationMarker.bindPopup(`<strong>Custom Location:</strong><br>${escapeHtml(state.customLocation.name)}`);
+            state.customLocationMarker.bindPopup(`<strong>Custom Location:</strong><br>${UI.escapeHtml(state.customLocation.name)}`);
         }
         state.customLocationMarker.openPopup();
         
@@ -169,7 +150,7 @@ function renderAllLocations() {
                         font-size: 14px;
                         color: #111827;
                         white-space: nowrap;
-                    ">${escapeHtml(name)}</div>`,
+                    ">${UI.escapeHtml(name)}</div>`,
                     iconSize: [null, null],
                     iconAnchor: [0, 0]
                 })
@@ -202,7 +183,7 @@ function createIcon(vehicle) {
     const label = vehicle.device_name || vehicle.id || vehicle.vehicle_type || "V";
     const bgColor = STATUS_COLORS[vehicle.vehicle_status] || STATUS_COLORS.unknown;
     return L.divIcon({
-        html: `<div class="vehicle-icon" style="background-color: ${bgColor}; padding: 4px 8px; border-radius: 4px; white-space: nowrap; font-size: 11px; font-weight: bold; color: white; text-shadow: 1px 1px 2px rgba(0,0,0,0.5);">${escapeHtml(label)}</div>`,
+        html: `<div class="vehicle-icon" style="background-color: ${bgColor}; padding: 4px 8px; border-radius: 4px; white-space: nowrap; font-size: 11px; font-weight: bold; color: white; text-shadow: 1px 1px 2px rgba(0,0,0,0.5);">${UI.escapeHtml(label)}</div>`,
         className: "",
         iconSize: [80, 24],
         iconAnchor: [40, 12]
@@ -240,20 +221,20 @@ async function forceAdvanceTrip(vehicleId) {
         });
         const data = await res.json();
         if (data.success) {
-            showToast(data.message || 'Trip advanced', 'success');
+            UI.toast(data.message || 'Trip advanced', 'success');
             fetchVehicles();
         } else {
-            showToast(data.message || 'Failed to advance trip', 'error');
+            UI.toast(data.message || 'Failed to advance trip', 'error');
         }
     } catch (err) {
-        showToast('Error advancing trip', 'error');
+        UI.toast('Error advancing trip', 'error');
     }
 }
 
 async function forceCompleteTrip(vehicleId) {
     const trip = getActiveTripForVehicle(vehicleId);
     if (!trip) return;
-    if (!confirm(`Force complete trip for ${escapeHtml(trip.vehicle_name)}?`)) return;
+    if (!confirm(`Force complete trip for ${UI.escapeHtml(trip.vehicle_name)}?`)) return;
     try {
         const res = await fetch('/api/advance-trip', {
             method: 'POST',
@@ -262,13 +243,13 @@ async function forceCompleteTrip(vehicleId) {
         });
         const data = await res.json();
         if (data.success) {
-            showToast(data.message || 'Trip completed', 'success');
+            UI.toast(data.message || 'Trip completed', 'success');
             fetchVehicles();
         } else {
-            showToast(data.message || 'Failed to complete trip', 'error');
+            UI.toast(data.message || 'Failed to complete trip', 'error');
         }
     } catch (err) {
-        showToast('Error completing trip', 'error');
+        UI.toast('Error completing trip', 'error');
     }
 }
 
@@ -285,13 +266,13 @@ async function cancelTripFromMap(vehicleId) {
         });
         const data = await res.json();
         if (data.success) {
-            showToast('Trip canceled', 'success');
+            UI.toast('Trip canceled', 'success');
             fetchVehicles();
         } else {
-            showToast(data.message || 'Failed to cancel trip', 'error');
+            UI.toast(data.message || 'Failed to cancel trip', 'error');
         }
     } catch (err) {
-        showToast('Error canceling trip', 'error');
+        UI.toast('Error canceling trip', 'error');
     }
 }
 
@@ -303,7 +284,7 @@ function buildPopup(vehicle) {
     let pickupText = "N/A";
     let destinationText = "N/A";
     let phaseText = "N/A";
-    let driverText = escapeHtml(vehicle.driver_name);
+    let driverText = UI.escapeHtml(vehicle.driver_name);
     let durationText = "";
     let tripStatus = "";
     
@@ -330,7 +311,7 @@ function buildPopup(vehicle) {
         customerText = trip.customer_name || "N/A";
         pickupText = trip.pickup_name || "N/A";
         destinationText = trip.destination_name || "N/A";
-        driverText = trip.driver_name || escapeHtml(vehicle.driver_name);
+        driverText = trip.driver_name || UI.escapeHtml(vehicle.driver_name);
         tripStatus = trip.status || "";
         
         // Duration display
@@ -372,7 +353,7 @@ function buildPopup(vehicle) {
         customerText = anyTrip.customer_name || "N/A";
         pickupText = anyTrip.pickup_name || "N/A";
         destinationText = anyTrip.destination_name || "N/A";
-        driverText = anyTrip.driver_name || escapeHtml(vehicle.driver_name);
+        driverText = anyTrip.driver_name || UI.escapeHtml(vehicle.driver_name);
         tripStatus = anyTrip.status || "";
         if (anyTrip.status === 'queued') {
             phaseText = `Queued (#${anyTrip.queue_order || 0})`;
@@ -394,52 +375,24 @@ function buildPopup(vehicle) {
 
     return `
         <div style="min-width: 240px;">
-            <strong>${escapeHtml(vehicle.device_name)}</strong><br />
-            <small>${escapeHtml(vehicle.car_type || vehicle.vehicle_type || "Unknown")}</small>
+            <strong>${UI.escapeHtml(vehicle.device_name)}</strong><br />
+            <small>${UI.escapeHtml(vehicle.car_type || vehicle.vehicle_type || "Unknown")}</small>
             <hr style="margin:8px 0; border:none; height:1px; background:#ddd;" />
             <div><strong>Driver:</strong> ${driverText}</div>
-            <div><strong>Speed:</strong> ${escapeHtml(vehicle.speed_status)}</div>
-            <div><strong>Status:</strong> ${escapeHtml(statusLabel)}</div>
-            <div><strong>Customer:</strong> ${escapeHtml(customerText)}</div>
-            <div><strong>Pickup:</strong> ${escapeHtml(pickupText)}</div>
-            <div><strong>Destination:</strong> ${escapeHtml(destinationText)}</div>
-            <div><strong>Phase:</strong> ${escapeHtml(phaseText)}</div>
-            <div><strong>Distance:</strong> ${escapeHtml(distanceText)}</div>
-            <div><strong>ETA:</strong> ${escapeHtml(etaText)}</div>
-            ${durationText ? `<div><strong>Trip Time:</strong> ${escapeHtml(durationText)}</div>` : ''}
-            <div><strong>Updated:</strong> ${escapeHtml(vehicle.last_update)}</div>
-            <div><strong>Location:</strong> ${escapeHtml(vehicle.position)}</div>
+            <div><strong>Speed:</strong> ${UI.escapeHtml(vehicle.speed_status)}</div>
+            <div><strong>Status:</strong> ${UI.escapeHtml(statusLabel)}</div>
+            <div><strong>Customer:</strong> ${UI.escapeHtml(customerText)}</div>
+            <div><strong>Pickup:</strong> ${UI.escapeHtml(pickupText)}</div>
+            <div><strong>Destination:</strong> ${UI.escapeHtml(destinationText)}</div>
+            <div><strong>Phase:</strong> ${UI.escapeHtml(phaseText)}</div>
+            <div><strong>Distance:</strong> ${UI.escapeHtml(distanceText)}</div>
+            <div><strong>ETA:</strong> ${UI.escapeHtml(etaText)}</div>
+            ${durationText ? `<div><strong>Trip Time:</strong> ${UI.escapeHtml(durationText)}</div>` : ''}
+            <div><strong>Updated:</strong> ${UI.escapeHtml(vehicle.last_update)}</div>
+            <div><strong>Location:</strong> ${UI.escapeHtml(vehicle.position)}</div>
             ${actionButtons}
         </div>
     `;
-}
-
-function getDistanceMeters(lat1, lon1, lat2, lon2) {
-    const toRad = (deg) => (deg * Math.PI) / 180;
-    const R = 6371000;
-    const dLat = toRad(lat2 - lat1);
-    const dLon = toRad(lon2 - lon1);
-    const a = Math.sin(dLat / 2) ** 2 +
-        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-}
-
-function isPointInPolygon(lat, lng, polygonCorners) {
-    if (!polygonCorners || polygonCorners.length < 3) return false;
-    let x = lng;
-    let y = lat;
-    let inside = false;
-    for (let i = 0, j = polygonCorners.length - 1; i < polygonCorners.length; j = i++) {
-        let xi = polygonCorners[i][1];
-        let yi = polygonCorners[i][0];
-        let xj = polygonCorners[j][1];
-        let yj = polygonCorners[j][0];
-        let intersect = ((yi > y) !== (yj > y)) &&
-            (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi);
-        if (intersect) inside = !inside;
-    }
-    return inside;
 }
 
 function countVehiclesInLocation(location) {
@@ -698,8 +651,8 @@ function updateVehicleList(vehicles) {
             <div style="display:flex; align-items:center; gap:10px;">
                 <div style="width:12px; height:12px; border-radius:50%; background:${color}; flex-shrink:0;"></div>
                 <div>
-                    <strong style="color:var(--panel-text);">${escapeHtml(vehicle.device_name || vehicle.driver_name || vehicle.vehicle_type || "Vehicle")}</strong>
-                    <div style="color:var(--muted);">${escapeHtml(vehicle.car_type || vehicle.vehicle_type || "Unknown type")}</div>
+                    <strong style="color:var(--panel-text);">${UI.escapeHtml(vehicle.device_name || vehicle.driver_name || vehicle.vehicle_type || "Vehicle")}</strong>
+                    <div style="color:var(--muted);">${UI.escapeHtml(vehicle.car_type || vehicle.vehicle_type || "Unknown type")}</div>
                 </div>
             </div>
         `;
@@ -935,7 +888,7 @@ function setupLocationAutocomplete() {
         filteredKnown.forEach(name => {
             const item = document.createElement("div");
             item.className = "autocomplete-item";
-            item.innerHTML = `<span class="autocomplete-icon">📍</span> <strong>${escapeHtml(name)}</strong> <small class="autocomplete-type">(Saved)</small>`;
+            item.innerHTML = `<span class="autocomplete-icon">📍</span> <strong>${UI.escapeHtml(name)}</strong> <small class="autocomplete-type">(Saved)</small>`;
             item.addEventListener("mousedown", (e) => {
                 e.preventDefault(); // prevent input blur before click fires
                 locationSearch.value = name;
@@ -977,7 +930,7 @@ function setupLocationAutocomplete() {
                     data.results.forEach(result => {
                         const item = document.createElement("div");
                         item.className = "autocomplete-item";
-                        item.innerHTML = `<span class="autocomplete-icon">🔍</span> <span>${escapeHtml(result.name)}</span> <small class="autocomplete-type">(Address)</small>`;
+                        item.innerHTML = `<span class="autocomplete-icon">🔍</span> <span>${UI.escapeHtml(result.name)}</span> <small class="autocomplete-type">(Address)</small>`;
                         item.addEventListener("mousedown", (e) => {
                             e.preventDefault();
                             locationSearch.value = result.name;
@@ -991,10 +944,10 @@ function setupLocationAutocomplete() {
 
                             if (state.customLocationMarker) {
                                 state.customLocationMarker.setLatLng([result.lat, result.lng]);
-                                state.customLocationMarker.setPopupContent(`<strong>Custom Location:</strong><br>${escapeHtml(result.name)}`);
+                                state.customLocationMarker.setPopupContent(`<strong>Custom Location:</strong><br>${UI.escapeHtml(result.name)}`);
                             } else {
                                 state.customLocationMarker = L.marker([result.lat, result.lng]).addTo(map);
-                                state.customLocationMarker.bindPopup(`<strong>Custom Location:</strong><br>${escapeHtml(result.name)}`);
+                                state.customLocationMarker.bindPopup(`<strong>Custom Location:</strong><br>${UI.escapeHtml(result.name)}`);
                             }
                             state.customLocationMarker.openPopup();
 
@@ -1075,7 +1028,7 @@ function setupLocationPinButton() {
             pinBtn.classList.add("active");
             pinBtn.textContent = "Cancel Pinning";
             map.getContainer().style.cursor = "crosshair";
-            showToast("Click on the map to set a custom location", "info");
+            UI.toast("Click on the map to set a custom location", "info");
         } else {
             pinBtn.classList.remove("active");
             pinBtn.textContent = "Pin on Map";

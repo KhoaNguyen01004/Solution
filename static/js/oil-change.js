@@ -21,26 +21,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (dateField) dateField.value = todayISO();
 });
 
-// ── API Helpers ────────────────────────────────────────────────
-async function apiFetch(url, opts = {}) {
-    const defaultHeaders = { 'Content-Type': 'application/json' };
-    opts.headers = { ...defaultHeaders, ...(opts.headers || {}) };
-    const resp = await fetch(url, opts);
-    const data = await resp.json();
-    if (!data.success) throw new Error(data.message || 'Unknown error');
-    return data;
-}
-
 // ── Load Vehicles ──────────────────────────────────────────────
 async function loadVehicles() {
     try {
-        const data = await apiFetch('/api/oil-maintenance');
+        const data = await ApiClient.fetch('/oil-maintenance');
         allVehicles = data.data || [];
         filteredVehicles = [...allVehicles];
         renderKPIs();
         renderTable();
     } catch (err) {
-        showToast('error', '', `Failed to load vehicles: ${err.message}`);
+        UI.toast(`Failed to load vehicles: ${err.message}`, 'error');
     }
 }
 
@@ -85,8 +75,8 @@ function renderTable() {
             : '';
 
         return `
-        <tr data-plate="${escHtml(v.license_plate)}">
-            <td><span class="plate-badge">${escHtml(v.license_plate)}</span></td>
+        <tr data-plate="${UI.escapeHtml(v.license_plate)}">
+            <td><span class="plate-badge">${UI.escapeHtml(v.license_plate)}</span></td>
             <td>${formatDate(v.last_oil_change_date)}</td>
             <td><span class="km-value">${fmtNum(v.maintenance_interval)}</span> <span class="km-muted">km</span></td>
             <td><span class="km-value">${fmtNum(v.total_km_since_change)}</span> <span class="km-muted">km</span></td>
@@ -105,11 +95,11 @@ function renderTable() {
             <td>
                 <div style="display:flex; gap:6px;">
                     <button class="btn-action btn-edit"
-                            onclick="openModal('${escHtml(v.license_plate)}')">✏️ Edit</button>
+                            onclick="openModal('${UI.escapeHtml(v.license_plate)}')">✏️ Edit</button>
                     <button class="btn-action btn-maintenance"
-                            onclick="markMaintenance('${escHtml(v.license_plate)}')">🔧 Maintenance</button>
+                            onclick="markMaintenance('${UI.escapeHtml(v.license_plate)}')">🔧 Maintenance</button>
                     <button class="btn-action btn-delete"
-                            onclick="deleteVehicle('${escHtml(v.license_plate)}')">🗑</button>
+                            onclick="deleteVehicle('${UI.escapeHtml(v.license_plate)}')">🗑</button>
                 </div>
             </td>
         </tr>`;
@@ -171,6 +161,41 @@ function filterTable(query) {
     document.getElementById('vehicle-count').textContent = filteredVehicles.length;
 }
 
+// ── Vehicle Search Autocomplete ────────────────────────────────
+let searchTimeout = null;
+
+function onVehicleInput(q) {
+    const dropdown = document.getElementById('vehicle-dropdown');
+    if (editingPlate) { dropdown.classList.remove('open'); return; }
+    if (!q.trim()) { dropdown.classList.remove('open'); return; }
+
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(async () => {
+        try {
+            const resp = await fetch(`/api/fleet/vehicles/search?q=${encodeURIComponent(q.trim())}`);
+            const data = await resp.json();
+            if (!data.success || !data.data.length) {
+                dropdown.classList.remove('open');
+                return;
+            }
+            dropdown.innerHTML = data.data.map(v =>
+                `<div class="autocomplete-item" onclick="selectVehicle(${v.id}, '${UI.escapeHtml(v.plate_number)}', '${UI.escapeHtml(v.vehicle_type || '')}', '${UI.escapeHtml(v.current_driver || '')}')">
+                    ${UI.escapeHtml(v.plate_number)}
+                    <span class="sub">${v.vehicle_type || ''}${v.current_driver ? ' — ' + UI.escapeHtml(v.current_driver) : ''}</span>
+                </div>`
+            ).join('');
+            dropdown.classList.add('open');
+        } catch (_) {
+            dropdown.classList.remove('open');
+        }
+    }, 200);
+}
+
+function selectVehicle(id, plate, vtype, driver) {
+    document.getElementById('field-plate').value = plate;
+    document.getElementById('vehicle-dropdown').classList.remove('open');
+}
+
 // ── Modal ──────────────────────────────────────────────────────
 function openModal(plate = null) {
     editingPlate = plate;
@@ -202,6 +227,7 @@ function openModal(plate = null) {
 
 function closeModal() {
     document.getElementById('modal-overlay').classList.remove('open');
+    document.getElementById('vehicle-dropdown').classList.remove('open');
     editingPlate = null;
 }
 
@@ -219,10 +245,10 @@ async function saveVehicle() {
     const date     = document.getElementById('field-date').value.trim();
     const interval = parseInt(document.getElementById('field-interval').value, 10);
 
-    if (!plate)          return showToast('warning', '', 'License plate is required.');
-    if (!date)           return showToast('warning', '', 'Last oil change date is required.');
+    if (!plate)          return UI.toast('License plate is required.', 'warning');
+    if (!date)           return UI.toast('Last oil change date is required.', 'warning');
     if (isNaN(interval) || interval < 100)
-                         return showToast('warning', '', 'Maintenance interval must be >= 100 km.');
+                         return UI.toast('Maintenance interval must be >= 100 km.', 'warning');
 
     const payload = {
         license_plate:        plate,
@@ -236,22 +262,22 @@ async function saveVehicle() {
 
     try {
         if (editingPlate) {
-            await apiFetch(`/api/oil-maintenance/${encodeURIComponent(editingPlate)}`, {
+            await ApiClient.fetch(`/oil-maintenance/${encodeURIComponent(editingPlate)}`, {
                 method: 'PUT',
                 body: JSON.stringify(payload),
             });
-            showToast('success', '', `Vehicle ${plate} updated.`);
+            UI.toast(`Vehicle ${plate} updated.`, 'success');
         } else {
-            await apiFetch('/api/oil-maintenance', {
+            await ApiClient.fetch('/oil-maintenance', {
                 method: 'POST',
                 body: JSON.stringify(payload),
             });
-            showToast('success', '', `Vehicle ${plate} added.`);
+            UI.toast(`Vehicle ${plate} added.`, 'success');
         }
         closeModal();
         await loadVehicles();
     } catch (err) {
-        showToast('error', '', err.message);
+        UI.toast(err.message, 'error');
     } finally {
         btn.disabled = false;
         btn.textContent = editingPlate ? 'Save Changes' : 'Add Vehicle';
@@ -263,11 +289,11 @@ async function deleteVehicle(plate) {
     if (!confirm(`Remove ${plate} from the oil change tracker?\n\nAll cached KM data for this vehicle will also be deleted.`)) return;
 
     try {
-        await apiFetch(`/api/oil-maintenance/${encodeURIComponent(plate)}`, { method: 'DELETE' });
-        showToast('success', '', `Vehicle ${plate} removed.`);
+        await ApiClient.fetch(`/oil-maintenance/${encodeURIComponent(plate)}`, { method: 'DELETE' });
+        UI.toast(`Vehicle ${plate} removed.`, 'success');
         await loadVehicles();
     } catch (err) {
-        showToast('error', '', err.message);
+        UI.toast(err.message, 'error');
     }
 }
 
@@ -336,23 +362,23 @@ async function markMaintenance(plate) {
     try {
         // Step 1: Mark maintenance as done (quick DB update)
         statusEl.textContent = `Marking maintenance for ${plate}...`;
-        await apiFetch(`/api/oil-maintenance/${encodeURIComponent(plate)}/maintenance`, { method: 'POST' });
+        await ApiClient.fetch(`/oil-maintenance/${encodeURIComponent(plate)}/maintenance`, { method: 'POST' });
 
         // Step 2: Fetch updated KM data from TTAS with progress tracking
         setTimeout(pollProgress, 300);
-        const data = await apiFetch('/api/oil-maintenance/fetch-km', { method: 'POST' });
+        const data = await ApiClient.fetch('/oil-maintenance/fetch-km', { method: 'POST' });
         polling = false;
 
-        showToast('success', '', `Oil change marked as done for ${plate}. KM data refreshed.`);
+        UI.toast(`Oil change marked as done for ${plate}. KM data refreshed.`, 'success');
 
         if (data.errors && data.errors.length) {
-            data.errors.forEach(e => showToast('warning', '', e, 8000));
+            data.errors.forEach(e => UI.toast(e, 'warning', 8000));
         }
 
         await loadVehicles();
     } catch (err) {
         polling = false;
-        showToast('error', '', `Maintenance failed: ${err.message}`, 8000);
+        UI.toast(`Maintenance failed: ${err.message}`, 'error', 8000);
     } finally {
         overlay.classList.remove('active');
         fetchBtn.disabled = false;
@@ -421,22 +447,22 @@ async function fetchKmData() {
     setTimeout(pollProgress, 300);
 
     try {
-        const data = await apiFetch('/api/oil-maintenance/fetch-km', { method: 'POST' });
+        const data = await ApiClient.fetch('/oil-maintenance/fetch-km', { method: 'POST' });
 
         polling = false;
         overlay.classList.remove('active');
 
-        showToast('success', '', data.message);
+        UI.toast(data.message, 'success');
 
         if (data.errors && data.errors.length) {
-            data.errors.forEach(e => showToast('warning', '', e, 8000));
+            data.errors.forEach(e => UI.toast(e, 'warning', 8000));
         }
 
         await loadVehicles();
     } catch (err) {
         polling = false;
         overlay.classList.remove('active');
-        showToast('error', '', `KM fetch failed: ${err.message}`, 8000);
+        UI.toast(`KM fetch failed: ${err.message}`, 'error', 8000);
     } finally {
         btn.disabled      = false;
         icon.textContent  = '';
@@ -454,47 +480,3 @@ function exportCsv() {
     document.body.removeChild(a);
 }
 
-// ── Toast Notifications ────────────────────────────────────────
-function showToast(type, _icon, message, duration = 4500) {
-    const container = document.getElementById('toast-container');
-    const toast     = document.createElement('div');
-    toast.className = `toast ${type}`;
-    toast.innerHTML = `<span class="toast-msg">${escHtml(message)}</span>`;
-    container.appendChild(toast);
-
-    setTimeout(() => {
-        toast.style.transition = 'opacity 0.4s, transform 0.4s';
-        toast.style.opacity    = '0';
-        toast.style.transform  = 'translateX(100%)';
-        setTimeout(() => toast.remove(), 400);
-    }, duration);
-}
-
-// ── Utilities ──────────────────────────────────────────────────
-function escHtml(str) {
-    return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
-
-function fmtNum(n) {
-    if (n == null || isNaN(n)) return '0';
-    return Number(n).toLocaleString('en-US');
-}
-
-function formatDate(isoStr) {
-    if (!isoStr) return '—';
-    const [y, m, d] = isoStr.split('-');
-    return `${d}/${m}/${y}`;
-}
-
-function todayISO() {
-    const d = new Date();
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
-}

@@ -1,32 +1,89 @@
 
-// Toast notification utilities
-let toastContainer;
+// ── API_BASE & ApiClient ─────────────────────────────────────────
+const API_BASE = '/api';
 
-function initToasts() {
-    if (!toastContainer) {
-        toastContainer = document.createElement('div');
-        toastContainer.className = 'toast-container';
-        document.body.appendChild(toastContainer);
-    }
+const ApiClient = {
+    BASE: API_BASE,
+
+    async fetch(url, opts = {}) {
+        const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+        const resp = await fetch(this.BASE + url, { ...opts, headers });
+        const data = await resp.json();
+        if (!data.success) throw new Error(data.message || 'Unknown error');
+        return data;
+    },
+
+    async get(path) { return this.fetch(path, { method: 'GET' }); },
+    async post(path, body) { return this.fetch(path, { method: 'POST', body: JSON.stringify(body) }); },
+    async put(path, body) { return this.fetch(path, { method: 'PUT', body: JSON.stringify(body) }); },
+    async del(path) { return this.fetch(path, { method: 'DELETE' }); },
+};
+
+// ── UI namespace: toast notifications & HTML escaping ────────────
+const UI = {
+    /**
+     * Show a toast notification. Reuses the page's `#toast-container`
+     * element if present (adding the `.toast-container` class needed
+     * for fixed positioning), otherwise creates one on first use.
+     */
+    toast(message, type = 'info', duration = 3000) {
+        let container = document.getElementById('toast-container');
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'toast-container';
+            document.body.appendChild(container);
+        }
+        // Only apply the shared positioning class if the page hasn't already
+        // given this element its own fixed-position styling (e.g. a
+        // page-specific `#toast-container` CSS rule) — avoids mixing a
+        // `top` from the shared class with a page-specific `bottom`.
+        if (getComputedStyle(container).position !== 'fixed') {
+            container.classList.add('toast-container');
+        }
+
+        const el = document.createElement('div');
+        el.className = `toast ${type}`;
+        el.textContent = message;
+        container.appendChild(el);
+
+        setTimeout(() => {
+            el.style.transition = 'opacity 0.35s ease, transform 0.35s ease';
+            el.style.opacity = '0';
+            el.style.transform = 'translateX(100%)';
+            setTimeout(() => el.remove(), 350);
+        }, duration);
+    },
+
+    /**
+     * Escape a value for safe insertion into HTML (text or attribute context).
+     */
+    escapeHtml(value) {
+        const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+        return String(value == null ? '' : value).replace(/[&<>"']/g, (ch) => map[ch]);
+    },
+};
+
+// ── Backward-compatible global aliases ────────────────────────────
+// Kept for pages not yet migrated to the UI namespace (locations.js,
+// trip-history.js, manage-trips.js call the bare global `showToast`).
+function showToast(message, type = 'info', duration = 3000) {
+    UI.toast(message, type, duration);
 }
 
-function showToast(message, type = 'info', duration = 3000) {
-    initToasts();
+// ── Shared date/number formatting utilities ───────────────────────
+function todayISO() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 
-    const toast = document.createElement('div');
-    toast.className = `toast ${type}`;
-    toast.textContent = message;
+function formatDate(iso) {
+    if (!iso) return '—';
+    const [y, m, d] = iso.split('-');
+    return `${d}/${m}/${y}`;
+}
 
-    toastContainer.appendChild(toast);
-
-    setTimeout(() => {
-        toast.style.animation = 'slideIn 0.3s ease reverse';
-        setTimeout(() => {
-            if (toastContainer.contains(toast)) {
-                toastContainer.removeChild(toast);
-            }
-        }, 300);
-    }, duration);
+function fmtNum(n) {
+    return (n == null || isNaN(n)) ? '0' : Number(n).toLocaleString('en-US');
 }
 
 /**

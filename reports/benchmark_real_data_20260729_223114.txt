@@ -1,0 +1,12 @@
+Loaded 31 packages (8 stackable, 23 non-stackable)
+Loaded 32 vehicles
+
+floor_contact = 25:
+  Vehicles: 2 | Placed: 31 | Failed: 0
+  Stacks: 2 | NS floor: 23 | S floor: 6
+  Vol util: 2.2% | Time: 4.974s
+
+floor_contact = 5:
+  Vehicles: 2 | Placed: 31 | Failed: 0
+  Stacks: 2 | NS floor: 23 | S floor: 6
+  Vol util: 2.2% | Time: 5.016s

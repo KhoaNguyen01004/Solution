@@ -22,15 +22,6 @@ const API = {
   container: (id) => fetch(`/api/tlp/container-configs/${id}`).then(r => r.json()),
 };
 
-function toast(msg, type = "info") {
-  const c = document.getElementById("toast-container");
-  const t = document.createElement("div");
-  t.className = "toast " + type;
-  t.textContent = msg;
-  c.appendChild(t);
-  setTimeout(() => { t.style.opacity = "0"; setTimeout(() => t.remove(), 300); }, 3000);
-}
-
 class LoadPlannerApp {
   constructor() {
     // Data
@@ -139,7 +130,7 @@ class LoadPlannerApp {
       this.plans = plans;
     } catch (e) {
       console.error("Failed to load data:", e);
-      toast("Failed to load data", "error");
+      UI.toast("Failed to load data", "error");
     }
   }
 
@@ -1199,9 +1190,9 @@ class LoadPlannerApp {
       const first = this.vehicles.find(v => v.cc_id);
       if (first) {
         await this._selectVehicle(first.vehicle_id);
-        toast("Auto-selected vehicle: " + (first.plate_number || first.vehicle_id), "info");
+        UI.toast("Auto-selected vehicle: " + (first.plate_number || first.vehicle_id), "info");
       } else {
-        toast("No vehicle with a container config available", "warning");
+        UI.toast("No vehicle with a container config available", "warning");
         this._cancelPaletteDrag();
         return;
       }
@@ -1245,7 +1236,7 @@ class LoadPlannerApp {
       || (this.currentVehicle && this.currentVehicle.payload_kg) || 0;
     const currentWeight = this.placements.reduce((s, p) => s + (p._weight_kg || 0), 0);
     if (payload > 0 && currentWeight + (pkg.weight_kg || 0) > payload) {
-      toast("Cannot place — adding " + pkg.name + " would exceed " + payload + " kg payload", "error");
+      UI.toast("Cannot place — adding " + pkg.name + " would exceed " + payload + " kg payload", "error");
       this._cancelPaletteDrag();
       return;
     }
@@ -1285,12 +1276,12 @@ class LoadPlannerApp {
         this.renderCanvas();
         this.updateStatus();
         if (this._show3D) this.update3DScene();
-        toast(pkg.name + " placed", "success");
+        UI.toast(pkg.name + " placed", "success");
       } else {
-        toast((result.errors || []).join(", "), "error");
+        UI.toast((result.errors || []).join(", "), "error");
       }
     } catch (e) {
-      toast("Failed to validate placement", "error");
+      UI.toast("Failed to validate placement", "error");
     }
 
     this._cancelPaletteDrag();
@@ -1336,7 +1327,7 @@ class LoadPlannerApp {
     this.updateStatus();
     this._hideInspector();
     if (this._show3D) this.update3DScene();
-    toast("Package removed", "info");
+    UI.toast("Package removed", "info");
   }
 
   rotateSelected(dir) {
@@ -1351,7 +1342,7 @@ class LoadPlannerApp {
     this.renderCanvas();
     this.updateStatus();
     if (this._show3D) this.update3DScene();
-    toast("Rotated to " + r + "&deg;", "info");
+    UI.toast("Rotated to " + r + "&deg;", "info");
   }
 
   /* ═══════════════════════ AUTO ARRANGE ═══════════════════════ */
@@ -1394,7 +1385,7 @@ class LoadPlannerApp {
     }
 
     if (packages.length === 0) {
-      toast("No packages to arrange. Add packages or select a shipment first.", "warning");
+      UI.toast("No packages to arrange. Add packages or select a shipment first.", "warning");
       return;
     }
 
@@ -1437,7 +1428,7 @@ class LoadPlannerApp {
 
       if (!resp.ok || !data || data.error) {
         this.hideProgressModal();
-        toast((data && data.error) || `Auto Arrange failed (HTTP ${resp.status})`, "error");
+        UI.toast((data && data.error) || `Auto Arrange failed (HTTP ${resp.status})`, "error");
         return;
       }
 
@@ -1511,7 +1502,7 @@ class LoadPlannerApp {
       this._pushUndo();
       const parts = perV.map(v => `${v.plate_number || "Veh#" + v.vehicle_id}: ${v.package_count} pkgs`);
       const msg = `Distributed: ${s.placed_packages} placed, ${s.failed_packages} failed — ${parts.join(", ")}`;
-      toast(msg, s.failed_packages > 0 ? "warning" : "success");
+      UI.toast(msg, s.failed_packages > 0 ? "warning" : "success");
 
       // Show profile statistics if available
       if (data.profile_stats) {
@@ -1530,7 +1521,7 @@ class LoadPlannerApp {
     } catch (e) {
       console.error("Auto Arrange failed:", e);
       const msg = e instanceof TypeError ? "Network error — is the server running?" : "Auto Arrange request failed";
-      toast(msg, "error");
+      UI.toast(msg, "error");
       if (statusEl) { statusEl.style.display = "none"; }
     } finally {
       this.hideProgressModal();
@@ -1640,7 +1631,7 @@ class LoadPlannerApp {
     this.updateStatus();
     this._showInspector(this.selectedIndex);
     if (this._show3D) this.update3DScene();
-    toast("Package duplicated", "success");
+    UI.toast("Package duplicated", "success");
   }
 
   /* ═══════════════════════ UNDO / REDO ═══════════════════════ */
@@ -1659,7 +1650,7 @@ class LoadPlannerApp {
     this.selectedIndex = -1;
     this.renderCanvas();
     this.updateStatus();
-    toast("Undo", "info");
+    UI.toast("Undo", "info");
   }
 
   redo() {
@@ -1670,7 +1661,7 @@ class LoadPlannerApp {
     this.selectedIndex = -1;
     this.renderCanvas();
     this.updateStatus();
-    toast("Redo", "info");
+    UI.toast("Redo", "info");
   }
 
   /* ═══════════════════════ VALIDATION ═══════════════════════ */
@@ -2016,7 +2007,7 @@ class LoadPlannerApp {
   toggleSnap() {
     this.snapEnabled = !this.snapEnabled;
     document.getElementById("btn-toggle-snap").style.opacity = this.snapEnabled ? "1" : "0.4";
-    toast("Snap " + (this.snapEnabled ? "ON" : "OFF"), "info");
+    UI.toast("Snap " + (this.snapEnabled ? "ON" : "OFF"), "info");
   }
 
   /* ═══════════════════════ PACKAGE LIST ═══════════════════════ */
@@ -2161,7 +2152,7 @@ class LoadPlannerApp {
       }
     }
 
-    toast("Package not found in any vehicle", "warning");
+    UI.toast("Package not found in any vehicle", "warning");
   }
 
   _focusOnPackage(placement) {
@@ -2343,9 +2334,9 @@ class LoadPlannerApp {
     const stackable = document.getElementById("pkg-edit-stackable").checked;
     const qty = parseInt(document.getElementById("pkg-edit-qty").value, 10) || 1;
 
-    if (!name) { toast("Package name required", "warning"); return; }
-    if (!l || !w || !h) { toast("Length, width, height required", "warning"); return; }
-    if (!weight) { toast("Weight required", "warning"); return; }
+    if (!name) { UI.toast("Package name required", "warning"); return; }
+    if (!l || !w || !h) { UI.toast("Length, width, height required", "warning"); return; }
+    if (!weight) { UI.toast("Weight required", "warning"); return; }
 
     const editId = document.getElementById("pkg-save-btn").dataset.editId;
     const payload = { name, length: l, width: w, height: h, weight_kg: weight, color, allow_rotation: 1, allow_stacking: stackable ? 1 : 0, default_qty: qty };
@@ -2358,10 +2349,10 @@ class LoadPlannerApp {
         });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
-          toast(err.error || "Failed to update package", "error");
+          UI.toast(err.error || "Failed to update package", "error");
           return;
         }
-        toast("Package updated", "success");
+        UI.toast("Package updated", "success");
       } else {
         const res = await fetch("/api/tlp/packages", {
           method: "POST", headers: { "Content-Type": "application/json" },
@@ -2369,11 +2360,11 @@ class LoadPlannerApp {
         });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
-          toast(err.error || "Failed to create package", "error");
+          UI.toast(err.error || "Failed to create package", "error");
           return;
         }
         const created = await res.json();
-        toast("Package created: " + (created.name || name), "success");
+        UI.toast("Package created: " + (created.name || name), "success");
       }
       // Reload packages and refresh UI
       this.packages = await API.packages();
@@ -2381,7 +2372,7 @@ class LoadPlannerApp {
       this.filterPackages();
     } catch (e) {
       console.error("Save package failed:", e);
-      toast("Failed to save package", "error");
+      UI.toast("Failed to save package", "error");
     }
   }
 
@@ -2389,13 +2380,13 @@ class LoadPlannerApp {
     if (!confirm(`Delete package "${name}"? This will also remove all its placements.`)) return;
     try {
       const res = await fetch(`/api/tlp/packages/${id}`, { method: "DELETE" });
-      if (!res.ok) { const err = await res.json().catch(() => ({})); toast(err.error || "Failed to delete", "error"); return; }
+      if (!res.ok) { const err = await res.json().catch(() => ({})); UI.toast(err.error || "Failed to delete", "error"); return; }
       this.packages = await API.packages();
       this.filterPackages();
-      toast(`Package "${name}" deleted`, "success");
+      UI.toast(`Package "${name}" deleted`, "success");
     } catch (e) {
       console.error("Delete package failed:", e);
-      toast("Failed to delete package", "error");
+      UI.toast("Failed to delete package", "error");
     }
   }
 
@@ -2403,16 +2394,16 @@ class LoadPlannerApp {
     if (!confirm("Delete ALL packages? This will also remove all placements and shipment items.")) return;
     try {
       const res = await fetch("/api/tlp/packages/clear", { method: "DELETE" });
-      if (!res.ok) { const err = await res.json().catch(() => ({})); toast(err.error || "Failed to clear", "error"); return; }
+      if (!res.ok) { const err = await res.json().catch(() => ({})); UI.toast(err.error || "Failed to clear", "error"); return; }
       this.packages = await API.packages();
       this.placements = [];
       this.filterPackages();
       this.renderCanvas();
       this.updateStatus();
-      toast("All packages cleared", "success");
+      UI.toast("All packages cleared", "success");
     } catch (e) {
       console.error("Clear packages failed:", e);
-      toast("Failed to clear packages", "error");
+      UI.toast("Failed to clear packages", "error");
     }
   }
 
@@ -2454,7 +2445,7 @@ class LoadPlannerApp {
     this.renderCanvas();
     this.updateStatus();
     if (this._show3D) this.update3DScene();
-    toast("Vehicle deselected — Auto Arrange will distribute across all vehicles", "info");
+    UI.toast("Vehicle deselected — Auto Arrange will distribute across all vehicles", "info");
   }
 
   deselectVehicle() { this._deselectVehicle(); }
@@ -2489,7 +2480,7 @@ class LoadPlannerApp {
     this.renderCanvas();
     this.updateStatus();
     if (this._show3D) this.update3DScene();
-    toast("Vehicle selected: " + (this.currentVehicle ? this.currentVehicle.plate_number : ""), "success");
+    UI.toast("Vehicle selected: " + (this.currentVehicle ? this.currentVehicle.plate_number : ""), "success");
   }
 
   /* ═══════════════════════ SHIPMENT SELECTOR ═══════════════════════ */
@@ -2530,7 +2521,7 @@ class LoadPlannerApp {
 
       // Sync package list
       this.filterPackages();
-      toast("Shipment loaded: " + this.currentShipment.customer_name, "success");
+      UI.toast("Shipment loaded: " + this.currentShipment.customer_name, "success");
     }
   }
 
@@ -2634,7 +2625,7 @@ class LoadPlannerApp {
 
   async saveShipment() {
     const customer = document.getElementById("s-edit-customer").value.trim();
-    if (!customer) { toast("Customer name is required", "warning"); return; }
+    if (!customer) { UI.toast("Customer name is required", "warning"); return; }
     const ref = document.getElementById("s-edit-ref").value.trim();
     const notes = document.getElementById("s-edit-notes").value.trim();
     const items = this._editItems.map(i => ({ package_id: i.package_id, quantity: i.quantity }));
@@ -2642,10 +2633,10 @@ class LoadPlannerApp {
     try {
       if (this._editingShipment && this._editingShipment.id) {
         await API.updateShipment(this._editingShipment.id, { customer_name: customer, reference_number: ref, notes, items });
-        toast("Shipment updated", "success");
+        UI.toast("Shipment updated", "success");
       } else {
         const result = await API.saveShipment({ customer_name: customer, reference_number: ref, notes, items });
-        toast("Shipment created", "success");
+        UI.toast("Shipment created", "success");
       }
       this._editingShipment = null;
       this._editItems = [];
@@ -2658,7 +2649,7 @@ class LoadPlannerApp {
       if (match) this._selectShipment(match.id);
     } catch (e) {
       console.error("Save shipment failed:", e);
-      toast("Failed to save shipment", "error");
+      UI.toast("Failed to save shipment", "error");
     }
   }
 
@@ -2732,10 +2723,10 @@ class LoadPlannerApp {
       this.renderCanvas();
       this.updateStatus();
       if (this._show3D) this.update3DScene();
-      toast("Plan loaded: " + (plan.name || "Unnamed"), "success");
+      UI.toast("Plan loaded: " + (plan.name || "Unnamed"), "success");
     } catch (e) {
       console.error("Failed to load plan:", e);
-      toast("Failed to load plan", "error");
+      UI.toast("Failed to load plan", "error");
     }
   }
 
@@ -2743,7 +2734,7 @@ class LoadPlannerApp {
 
   savePlan() {
     if (!this.currentVehicle) {
-      toast("Select a vehicle first", "warning");
+      UI.toast("Select a vehicle first", "warning");
       return;
     }
     if (this.planId) {
@@ -2755,7 +2746,7 @@ class LoadPlannerApp {
 
   saveAsPlan() {
     if (!this.currentVehicle) {
-      toast("Select a vehicle first", "warning");
+      UI.toast("Select a vehicle first", "warning");
       return;
     }
     document.getElementById("save-modal-title").textContent = "Save Plan";
@@ -2796,17 +2787,17 @@ class LoadPlannerApp {
       let result;
       if (this.planId && document.getElementById("save-modal-title").textContent !== "Save Plan As") {
         result = await API.updatePlan(this.planId, payload);
-        toast("Plan updated", "success");
+        UI.toast("Plan updated", "success");
       } else {
         result = await API.savePlan(payload);
         this.planId = result.id;
-        toast("Plan saved", "success");
+        UI.toast("Plan saved", "success");
       }
       this.closeModal("save-modal");
       this.plans = await API.plans();
     } catch (e) {
       console.error("Save failed:", e);
-      toast("Failed to save plan", "error");
+      UI.toast("Failed to save plan", "error");
     }
   }
 
@@ -2841,7 +2832,7 @@ class LoadPlannerApp {
 
   exportPlan() {
     if (!this.currentVehicle) {
-      toast("Select a vehicle first", "warning");
+      UI.toast("Select a vehicle first", "warning");
       return;
     }
     const data = {
@@ -2865,13 +2856,13 @@ class LoadPlannerApp {
     a.download = "load-plan-export.json";
     a.click();
     URL.revokeObjectURL(url);
-    toast("Plan exported", "success");
+    UI.toast("Plan exported", "success");
   }
 
   /* ═══════════════════════ HELP ═══════════════════════ */
 
   openHelp() {
-    toast("Shortcuts: Del=Remove, Ctrl+Z=Undo, Ctrl+Shift+Z=Redo, Esc=Cancel", "info");
+    UI.toast("Shortcuts: Del=Remove, Ctrl+Z=Undo, Ctrl+Shift+Z=Redo, Esc=Cancel", "info");
   }
 
   /* ═══════════════════════ THREE.JS 3D PREVIEW ═══════════════════════ */

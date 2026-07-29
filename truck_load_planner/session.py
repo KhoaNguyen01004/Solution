@@ -23,44 +23,12 @@ def _to_engine_pkg(pkg) -> EnginePackage:
     """Convert a legacy Package (from models) to engine Package."""
     if isinstance(pkg, EnginePackage):
         return pkg
-    old_clr = getattr(pkg, 'clearance_mm', getattr(pkg, 'clearance', None))
-    h_clr = float(old_clr) if old_clr is not None else 10.0
-    return EnginePackage(
-        id=pkg.id,
-        name=pkg.name,
-        length_mm=pkg.length,
-        width_mm=pkg.width,
-        height_mm=pkg.height,
-        weight_kg=pkg.weight_kg,
-        stackable=bool(pkg.allow_stacking),
-        allow_rotation=bool(pkg.allow_rotation),
-        fragile=bool(pkg.fragile),
-        color=pkg.color,
-        horizontal_clearance_mm=h_clr,
-        max_top_weight_kg=float(getattr(pkg, 'max_top_weight_kg', 0.0)),
-        max_stack_layers=int(getattr(pkg, 'max_stack_layers', 0)),
-    )
+    return EnginePackage.from_legacy(pkg)
 
 
 def _from_legacy_dict(d: dict) -> EnginePackage:
     """Build an engine Package from a legacy dict (underscore keys)."""
-    old_clr = d.get("clearance_mm", d.get("clearance", None))
-    h_clr = float(old_clr) if old_clr is not None else 10.0
-    return EnginePackage(
-        id=d.get("package_id"),
-        name=d.get("_name", d.get("name", "")),
-        length_mm=d.get("_length", d.get("length", 0)),
-        width_mm=d.get("_width", d.get("width", 0)),
-        height_mm=d.get("_height", d.get("height", 0)),
-        weight_kg=d.get("_weight_kg", d.get("weight_kg", 0)),
-        stackable=bool(d.get("stackable", d.get("allow_stacking", 0))),
-        allow_rotation=bool(d.get("allow_rotation", 1)),
-        fragile=bool(d.get("fragile", 0)),
-        color=d.get("color", "#3b82f6"),
-        horizontal_clearance_mm=h_clr,
-        max_top_weight_kg=float(d.get("max_top_weight_kg", 0.0)),
-        max_stack_layers=int(d.get("max_stack_layers", 0)),
-    )
+    return EnginePackage.from_legacy(d, prefix="_")
 
 
 def _engine_placement_to_dict(pl: Placement) -> dict:

@@ -76,8 +76,30 @@ def fetch_report(plate: str, start_date: str, end_date: str):
         page.wait_for_load_state("networkidle", timeout=15000)
 
         # Step 3: Select vehicle plate using the native <select> element (select2 wraps it)
-        # select_option works even on select2-hidden elements
-        page.select_option("#ttasbaocao_drpchonxe", label=plate)
+        # Use JS to find the matching option (fuzzy clean-text matching) and trigger select2
+        selected = page.evaluate(f"""(plate) => {{
+            const select = document.querySelector('#ttasbaocao_drpchonxe');
+            if (!select) return false;
+            const cleanTarget = plate.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+            for (const opt of select.options) {{
+                const cleanText = opt.text.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+                if (cleanText === cleanTarget) {{
+                    select.value = opt.value;
+                    select.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    if (typeof $ !== 'undefined' && $.fn && $.fn.select2) {{
+                        $(select).trigger('change.select2');
+                    }}
+                    return true;
+                }}
+            }}
+            return false;
+        }}""", plate)
+        if not selected:
+            # Fallback: try Playwright's select_option with value matching
+            try:
+                page.select_option("#ttasbaocao_drpchonxe", label=plate)
+            except Exception:
+                print(f"[fetch_report] Could not select plate '{plate}' in dropdown")
         page.wait_for_timeout(500)
 
         # Step 4: Fill date range (clear first, then type to avoid datepicker conflicts)

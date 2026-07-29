@@ -28,11 +28,13 @@
             background: linear-gradient(135deg, #111827 0%, #1a2332 100%);
             border-bottom: 1px solid rgba(255,255,255,0.08);
             padding: 0 28px;
-            height: 64px;
+            min-height: 64px;
             display: flex;
             align-items: center;
             justify-content: space-between;
             box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+            flex-wrap: wrap;
+            gap: 8px;
         }
 
         .oc-header-left {
@@ -571,6 +573,14 @@
             cursor: not-allowed;
         }
 
+        .field-autocomplete { position: relative; }
+        .autocomplete-dropdown { position: absolute; top: 100%; left: 0; right: 0; background: #1c2333; border: 1px solid rgba(255,255,255,0.1); border-radius: 0 0 10px 10px; max-height: 200px; overflow-y: auto; z-index: 10; display: none; }
+        .autocomplete-dropdown.open { display: block; }
+        .autocomplete-item { padding: 10px 14px; cursor: pointer; font-size: 13px; color: #cbd5e1; border-bottom: 1px solid rgba(255,255,255,0.04); }
+        .autocomplete-item:last-child { border-bottom: none; }
+        .autocomplete-item:hover { background: rgba(47,140,235,0.15); color: #f8fafc; }
+        .autocomplete-item .sub { font-size: 11px; color: #94a3b8; margin-left: 8px; }
+
         .field-hint {
             font-size: 11.5px;
             color: #cbd5e1;
@@ -683,14 +693,33 @@
         }
 
         /* ── Responsive ── */
+        @media (max-width: 1100px) {
+            .oc-header { padding: 0 16px; }
+        }
+
         @media (max-width: 900px) {
             .kpi-row { grid-template-columns: 1fr 1fr; }
             .oc-logo h1 { display: none; }
+            .oc-header { padding: 0 12px; gap: 6px; }
+            .oc-header .header-nav .btn-nav,
+            .oc-header .header-nav .nav-dropdown > .btn-nav { padding: 0 10px; font-size: 12px; height: 30px; }
+        }
+
+        @media (max-width: 768px) {
+            .oc-header { padding: 6px 10px; }
+            .oc-header .header-nav { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; flex: 1; }
+            .oc-header .header-nav::-webkit-scrollbar { display: none; }
+            .oc-header > div:last-child { margin-left: 0; }
         }
 
         @media (max-width: 600px) {
             .kpi-row { grid-template-columns: 1fr; }
             .oc-page { padding: 16px; }
+        }
+
+        @media (max-width: 480px) {
+            .oc-header { padding: 4px 8px; }
+            .oc-page { padding: 10px; }
         }
     </style>
 </head>
@@ -704,19 +733,35 @@
                 <h1>Oil Change Tracker</h1>
             </div>
         </div>
-        <nav class="oc-nav">
+        <nav class="header-nav">
             <a href="/" class="btn-nav">Map</a>
+            <div class="nav-dropdown" style="position:relative;">
+                <button class="btn-nav" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='block'?'none':'block'" style="cursor:pointer;background:none;border:none;font-family:inherit;font-size:13px;color:#c9d1d9;font-weight:500;padding:0 14px;height:34px;display:inline-flex;align-items:center;gap:4px;">Trips &#9662;</button>
+                <div style="display:none;position:absolute;top:100%;right:0;background:#161b22;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:6px;min-width:170px;box-shadow:0 12px 40px rgba(0,0,0,0.5);z-index:200;" class="fleet-dropdown">
+                    <a href="/manage-trips" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Trip Management</a>
+                    <a href="/trip-history" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Trip History</a>
+                </div>
+            </div>
+            <div class="nav-dropdown" style="position:relative;">
+                <button class="btn-nav" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='block'?'none':'block'" style="cursor:pointer;background:none;border:none;font-family:inherit;font-size:13px;color:#c9d1d9;font-weight:500;padding:0 14px;height:34px;display:inline-flex;align-items:center;gap:4px;">Delivery &#9662;</button>
+                <div style="display:none;position:absolute;top:100%;right:0;background:#161b22;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:6px;min-width:170px;box-shadow:0 12px 40px rgba(0,0,0,0.5);z-index:200;" class="fleet-dropdown">
+                    <a href="/delivery/new" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Plan Builder</a>
+                    <a href="/delivery/dashboard" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Dispatch</a>
+                </div>
+            </div>
             <a href="/locations" class="btn-nav">Locations</a>
-            <a href="/manage-trips" class="btn-nav">Trips</a>
-            <a href="/trip-history" class="btn-nav">History</a>
+            <a href="/truck-load-planner" class="btn-nav">Load Planner</a>
             <div class="nav-dropdown" style="position:relative;">
                 <button class="btn-nav" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='block'?'none':'block'" style="cursor:pointer;background:none;border:none;font-family:inherit;font-size:13px;color:#c9d1d9;font-weight:500;padding:0 14px;height:34px;display:inline-flex;align-items:center;gap:4px;">Fleet &#9662;</button>
                 <div style="display:none;position:absolute;top:100%;right:0;background:#161b22;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:6px;min-width:170px;box-shadow:0 12px 40px rgba(0,0,0,0.5);z-index:200;" class="fleet-dropdown">
+                    <a href="/oil-change" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Oil Change</a>
                     <a href="/vehicle-management" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Vehicles</a>
                     <a href="/fuel-efficiency" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Fuel</a>
                     <a href="/fuel-container" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Container</a>
                 </div>
             </div>
+        </nav>
+        <div style="display:flex;align-items:center;gap:8px;margin-left:auto;">
             <button id="btn-fetch-km" class="btn-fetch" onclick="fetchKmData()">
                 <span id="fetch-icon"></span>
                 <span id="fetch-label">Refresh KM Data</span>
@@ -728,7 +773,7 @@
             <button class="btn-add" onclick="openModal()">
                 + Add Vehicle
             </button>
-        </nav>
+        </div>
     </header>
 
     <!-- ── Page ── -->
@@ -804,10 +849,13 @@
             <div class="modal-body">
                 <div class="field-group">
                     <label class="field-label" for="field-plate">License Plate</label>
-                    <input id="field-plate" class="field-input" type="text"
-                           placeholder="e.g. 50E18463" autocomplete="off" maxlength="12"
-                           oninput="this.value = this.value.toUpperCase()">
-                    <span class="field-hint">Enter plate exactly as it appears in the TTAS system.</span>
+                    <div class="field-autocomplete">
+                        <input id="field-plate" class="field-input" type="text"
+                               placeholder="Type plate to search…" autocomplete="off" maxlength="12"
+                               oninput="onVehicleInput(this.value)" onblur="setTimeout(function(){document.getElementById('vehicle-dropdown').classList.remove('open')},200)">
+                        <div class="autocomplete-dropdown" id="vehicle-dropdown"></div>
+                    </div>
+                    <span class="field-hint">Search for a vehicle or type a new plate number.</span>
                 </div>
                 <div class="field-group">
                     <label class="field-label" for="field-date">Last Oil Change Date</label>
@@ -849,6 +897,7 @@
         </div>
     </div>
 
+    <script src="/static/js/utils.js"></script>
     <script src="/static/js/oil-change.js"></script>
     <script>document.addEventListener('click',e=>{if(!e.target.closest('.nav-dropdown'))document.querySelectorAll('.fleet-dropdown').forEach(d=>d.style.display='none')});</script>
 </body>

@@ -1,0 +1,326 @@
+// ================================================================
+// Dispatch Dashboard — Main Orchestrator
+// ================================================================
+window.DASH = window.DASH || {};
+
+(function () {
+  'use strict';
+
+  // ── State ──────────────────────────────────────────────────
+  const state = {
+    plans: [],
+    allAssignments: [],  // unfiltered from API
+    filteredAssignments: [],
+    selectedAssignmentId: null,
+    selectedStops: [],
+    selectedAssignmentDetail: null,
+    selectedEta: null,
+    filters: {
+      plan: '',
+      date: '',
+      vehicle: '',
+      driver: '',
+      status: '',
+    },
+  };
+
+  DASH.state = state;
+
+  // ── Filter logic ───────────────────────────────────────────
+  function applyFilters() {
+    const f = state.filters;
+    state.filteredAssignments = state.allAssignments.filter((a) => {
+      if (f.plan && a.plan_id !== parseInt(f.plan, 10) && a.plan_name !== f.plan) return false;
+      if (f.date && a.plan_date !== f.date) return false;
+      if (f.vehicle) {
+        const q = f.vehicle.toLowerCase();
+        const plate = (a.plate_number || '').toLowerCase();
+        if (!plate.includes(q)) return false;
+      }
+      if (f.driver) {
+        const q = f.driver.toLowerCase();
+        const driver = (a.current_driver || '').toLowerCase();
+        if (!driver.includes(q)) return false;
+      }
+      if (f.status && a.plan_status !== f.status) return false;
+      return true;
+    });
+
+    // If selected assignment was filtered out, deselect
+    if (state.selectedAssignmentId) {
+      const stillExists = state.filteredAssignments.find(
+        (a) => a.assignment_id === state.selectedAssignmentId
+      );
+      if (!stillExists) {
+        state.selectedAssignmentId = null;
+        state.selectedStops = [];
+        state.selectedAssignmentDetail = null;
+        state.selectedEta = null;
+      }
+    }
+  }
+
+  // ── Populate filters ───────────────────────────────────────
+  function populateFilterPlans() {
+    const sel = document.getElementById('filterPlan');
+    const currentVal = sel.value;
+    sel.innerHTML = '<option value="">All Plans</option>';
+    const seen = new Set();
+    state.plans.forEach((p) => {
+      if (seen.has(p.id)) return;
+      seen.add(p.id);
+      sel.innerHTML += `<option value="${p.id}">${escapeHtml(p.plan_name || 'Plan #' + p.id)}</option>`;
+    });
+    sel.value = currentVal;
+  }
+
+  // ── Bind filter events ─────────────────────────────────────
+  function bindFilterEvents() {
+    const filterIds = ['filterPlan', 'filterDate', 'filterVehicle', 'filterDriver', 'filterStatus'];
+    filterIds.forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('input', () => {
+        state.filters.plan = document.getElementById('filterPlan').value;
+        state.filters.date = document.getElementById('filterDate').value;
+        state.filters.vehicle = document.getElementById('filterVehicle').value.trim().toLowerCase();
+        state.filters.driver = document.getElementById('filterDriver').value.trim().toLowerCase();
+        state.filters.status = document.getElementById('filterStatus').value;
+        applyFilters();
+        renderAll();
+      });
+      el.addEventListener('change', () => {
+        // Trigger same handler for select changes
+        el.dispatchEvent(new Event('input'));
+      });
+    });
+  }
+
+  // ── Select assignment ──────────────────────────────────────
+  function selectAssignment(assignmentId) {
+    if (state.selectedAssignmentId === assignmentId) return;
+
+    state.selectedAssignmentId = assignmentId;
+    state.selectedStops = [];
+    state.selectedAssignmentDetail = null;
+    state.selectedEta = null;
+
+    renderAll();
+
+    // Load detailed data for selected assignment
+    loadAssignmentDetail(assignmentId);
+
+    // Zoom map
+    DASH.map.zoomToVehicle(assignmentId);
+  }
+
+  async function loadAssignmentDetail(assignmentId) {
+    try {
+      const [stops, progress, eta] = await Promise.all([
+        DASH.api.stops(assignmentId),
+        DASH.api.progress(assignmentId),
+        DASH.api.eta(assignmentId),
+      ]);
+
+      // Merge execution status into stops
+      state.selectedStops = stops || [];
+      state.selectedAssignmentDetail = progress || null;
+      state.selectedEta = eta || null;
+
+      // Update timeline and map
+      const currentStopId = getCurrentStopId(state.selectedStops);
+      DASH.timeline.render(state.selectedStops, currentStopId, state.selectedEta);
+      DASH.map.updateStops(state.selectedStops, currentStopId);
+      DASH.map.updateRoute(state.selectedStops);
+
+      // Update info bar
+      updateInfoBar(assignmentId, state.selectedStops, state.selectedAssignmentDetail, state.selectedEta);
+
+      // Show map controls
+      document.getElementById('zoomToVehicleBtn').style.display = '';
+      document.getElementById('openGmapsBtn').style.display = '';
+    } catch (e) {
+      console.error('Failed to load assignment detail:', e);
+    }
+  }
+
+  function getCurrentStopId(stops) {
+    if (!stops) return null;
+    const activeStatuses = ['planned', 'enroute', 'arrived'];
+    for (const s of stops) {
+      if (activeStatuses.includes(s.execution_status)) {
+        return s.id;
+      }
+    }
+    return null;
+  }
+
+  // ── Update info bar ────────────────────────────────────────
+  function updateInfoBar(assignmentId, stops, progress, eta) {
+    const bar = document.getElementById('vehicleInfoBar');
+    const a = state.allAssignments.find((x) => x.assignment_id === assignmentId);
+    if (!a) { bar.style.display = 'none'; return; }
+
+    bar.style.display = '';
+    document.getElementById('vibarVehicle').textContent = a.plate_number || 'Vehicle';
+    document.getElementById('vibarDriver').textContent = a.current_driver || 'No driver';
+    const statusEl = document.getElementById('vibarStatus');
+    statusEl.textContent = a.plan_status || 'unknown';
+    statusEl.className = 'status-badge status-' + (a.plan_status || 'draft');
+
+    const p = progress || { completed: 0, total: 0, progress_pct: 0 };
+    document.getElementById('vibarProgress').textContent = `Progress: ${p.completed}/${p.total} (${p.progress_pct}%)`;
+
+    const etaText = eta && eta.etas && eta.etas.length > 0
+      ? 'ETA: ' + Math.round(eta.etas[0].eta_seconds / 60) + ' min'
+      : 'ETA: --';
+    document.getElementById('vibarEta').textContent = etaText;
+
+    const gps = a.gps;
+    const gpsTime = gps && gps.last_update ? new Date(gps.last_update).toLocaleTimeString() : '';
+    document.getElementById('vibarGpsTime').textContent = gpsTime ? 'GPS: ' + gpsTime : '';
+  }
+
+  // ── Render all panels ──────────────────────────────────────
+  function renderAll() {
+    DASH.vehicleList.render(state.filteredAssignments, state.selectedAssignmentId);
+    DASH.map.updateVehicles(state.filteredAssignments);
+
+    if (state.selectedAssignmentId) {
+      // If we already have stops loaded, re-render timeline
+      if (state.selectedStops.length > 0) {
+        const currentStopId = getCurrentStopId(state.selectedStops);
+        DASH.timeline.render(state.selectedStops, currentStopId, state.selectedEta);
+        DASH.map.updateStops(state.selectedStops, currentStopId);
+        DASH.map.updateRoute(state.selectedStops);
+        updateInfoBar(state.selectedAssignmentId, state.selectedStops, state.selectedAssignmentDetail, state.selectedEta);
+      }
+    } else {
+      document.getElementById('timeline').innerHTML = '<div class="empty-state">Select a vehicle to view stops</div>';
+      document.getElementById('vehicleInfoBar').style.display = 'none';
+      document.getElementById('zoomToVehicleBtn').style.display = 'none';
+      document.getElementById('openGmapsBtn').style.display = 'none';
+      document.getElementById('stopCount').textContent = '';
+      // Clear map extras
+      DASH.map.updateStops([], null);
+      DASH.map.updateRoute([]);
+    }
+  }
+
+  // ── Main tick (called by polling) ──────────────────────────
+  async function onPollTick() {
+    const data = await DASH.api.dashboard();
+    const raw = data.assignments || [];
+
+    // Merge GPS into state
+    state.allAssignments = raw;
+    applyFilters();
+    renderAll();
+
+    // If a plan filter doesn't exist yet and we have data, refresh plan list periodically
+    if (state.plans.length === 0 && raw.length > 0) {
+      loadPlans();
+    }
+
+    // Reload selected assignment detail
+    if (state.selectedAssignmentId) {
+      const stillExists = state.allAssignments.find(
+        (a) => a.assignment_id === state.selectedAssignmentId
+      );
+      if (stillExists) {
+        await loadAssignmentDetail(state.selectedAssignmentId);
+      }
+    }
+  }
+
+  // ── Load plans for filter ──────────────────────────────────
+  async function loadPlans() {
+    try {
+      state.plans = await DASH.api.plans();
+      populateFilterPlans();
+    } catch (e) {
+      console.error('Failed to load plans:', e);
+    }
+  }
+
+  // ── Bind map control buttons ───────────────────────────────
+  function bindMapControls() {
+    document.getElementById('zoomToVehicleBtn').addEventListener('click', () => {
+      if (state.selectedAssignmentId) {
+        DASH.map.zoomToVehicle(state.selectedAssignmentId);
+      }
+    });
+
+    document.getElementById('openGmapsBtn').addEventListener('click', () => {
+      if (state.selectedAssignmentId) {
+        DASH.map.openGoogleMaps(state.selectedAssignmentId, state.selectedStops);
+      }
+    });
+
+    document.getElementById('refreshGPSBtn').addEventListener('click', async () => {
+      try {
+        await DASH.state.refreshNow();
+      } catch (e) {
+        console.error('GPS refresh error:', e);
+      }
+    });
+  }
+
+  // ── Expose refresh for external use (timeline actions) ─────
+  state.selectAssignment = selectAssignment;
+
+  state.refreshNow = async function () {
+    await DASH.polling.refreshNow(onPollTick);
+  };
+
+  // ── Init ──────────────────────────────────────────────────
+  function init() {
+    DASH.map.init();
+    bindFilterEvents();
+    bindMapControls();
+
+    // Load initial data
+    Promise.all([loadPlans()]).catch(() => {});
+
+    // Start polling
+    DASH.polling.start(onPollTick);
+
+    // Invalidate map size after layout settles
+    setTimeout(() => DASH.map.invalidateSize(), 500);
+
+    // Timeline toggle (mobile)
+    const toggleBtn = document.getElementById('timelineToggleBtn');
+    const closeBtn = document.getElementById('timelineCloseBtn');
+    const rightPanel = document.getElementById('rightPanel');
+    if (toggleBtn && rightPanel) {
+      toggleBtn.addEventListener('click', function () {
+        rightPanel.classList.toggle('open');
+      });
+      if (closeBtn) {
+        closeBtn.addEventListener('click', function () {
+          rightPanel.classList.remove('open');
+        });
+      }
+      // Close timeline when clicking on map
+      document.getElementById('centerPanel').addEventListener('click', function () {
+        if (rightPanel.classList.contains('open')) {
+          rightPanel.classList.remove('open');
+        }
+      });
+    }
+  }
+
+  // Utility
+  function escapeHtml(str) {
+    if (str == null) return '';
+    const d = document.createElement('div');
+    d.appendChild(document.createTextNode(String(str)));
+    return d.innerHTML;
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();

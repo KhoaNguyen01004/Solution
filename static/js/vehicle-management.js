@@ -20,26 +20,17 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
-async function apiFetch(url, opts = {}) {
-    const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
-    opts.headers = headers;
-    const resp = await fetch(url, opts);
-    const data = await resp.json();
-    if (!data.success) throw new Error(data.message || 'Unknown error');
-    return data;
-}
-
 // ── Vehicles ───────────────────────────────────────────────────
 async function loadVehicles() {
     try {
-        const data = await apiFetch('/api/fleet/vehicles');
+        const data = await ApiClient.fetch('/fleet/vehicles');
         allVehicles = data.data || [];
         filteredVehicles = [...allVehicles];
         renderKPIs();
         renderTable();
         populateDiagramSelect();
     } catch (err) {
-        showToast('error', `Failed to load: ${err.message}`);
+        UI.toast(`Failed to load: ${err.message}`, 'error');
     }
 }
 
@@ -62,13 +53,13 @@ function renderTable() {
         const checked = selectedIds.has(v.id) ? 'checked' : '';
         return `<tr class="${checked ? 'selected-row' : ''}">
             <td><input type="checkbox" class="vehicle-checkbox" data-id="${v.id}" ${checked} onchange="toggleVehicle(${v.id}, this.checked)"></td>
-            <td><span class="plate-badge">${escHtml(v.plate_number)}</span></td>
-            <td>${v.vehicle_type ? `<span class="type-badge">${escHtml(v.vehicle_type)}</span>` : '<span style="color:#94a3b8;">—</span>'}</td>
-            <td>${v.current_driver ? escHtml(v.current_driver) : '<span style="color:#94a3b8;">—</span>'}</td>
+            <td><span class="plate-badge">${UI.escapeHtml(v.plate_number)}</span></td>
+            <td>${v.vehicle_type ? `<span class="type-badge">${UI.escapeHtml(v.vehicle_type)}</span>` : '<span style="color:#94a3b8;">—</span>'}</td>
+            <td>${v.current_driver ? UI.escapeHtml(v.current_driver) : '<span style="color:#94a3b8;">—</span>'}</td>
             <td>${v.cargo_length_mm ? `<span class="container-badge">${v.cargo_length_mm}×${v.cargo_width_mm}×${v.cargo_height_mm} mm</span>` : '<span style="color:#94a3b8;">—</span>'}</td>
             <td><div style="display:flex;gap:6px;">
-                <button class="btn-action btn-edit" onclick="openModal('${escHtml(v.plate_number)}')">&#9998; Edit</button>
-                <button class="btn-action btn-delete" onclick="deleteVehicle(${v.id}, '${escHtml(v.plate_number)}')">&#128465;</button>
+                <button class="btn-action btn-edit" onclick="openModal('${UI.escapeHtml(v.plate_number)}')">&#9998; Edit</button>
+                <button class="btn-action btn-delete" onclick="deleteVehicle(${v.id}, '${UI.escapeHtml(v.plate_number)}')">&#128465;</button>
             </div></td>
         </tr>`;
     }).join('');
@@ -82,8 +73,6 @@ function filterTable(q) {
         : [...allVehicles];
     renderTable();
 }
-
-function escHtml(s) { return !s ? '' : String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 function onSideDoorToggle(checked) {
     document.getElementById('side-door-fields').style.display = checked ? 'block' : 'none';
@@ -223,7 +212,7 @@ async function saveVehicle() {
     const plate = document.getElementById('field-plate').value.trim().toUpperCase();
     const vtype = document.getElementById('field-type').value;
     const driver = document.getElementById('field-driver').value.trim();
-    if (!plate) { showToast('error', 'Plate number is required'); return; }
+    if (!plate) { UI.toast('Plate number is required', 'error'); return; }
     const body = {
         plate_number: plate,
         vehicle_type: vtype,
@@ -236,30 +225,30 @@ async function saveVehicle() {
     };
     try {
         if (editingId) {
-            await apiFetch(`/api/fleet/vehicles/${editingId}`, {
+            await ApiClient.fetch(`/fleet/vehicles/${editingId}`, {
                 method: 'PUT',
                 body: JSON.stringify(body),
             });
         } else {
-            await apiFetch('/api/fleet/vehicles', {
+            await ApiClient.fetch('/fleet/vehicles', {
                 method: 'POST',
                 body: JSON.stringify(body),
             });
         }
-        showToast('success', `Vehicle ${editingId ? 'updated' : 'created'}`);
+        UI.toast(`Vehicle ${editingId ? 'updated' : 'created'}`, 'success');
         closeModal();
         await loadVehicles();
-    } catch (err) { showToast('error', err.message); }
+    } catch (err) { UI.toast(err.message, 'error'); }
 }
 
 async function deleteVehicle(id, plate) {
     if (!confirm(`Delete vehicle ${plate}?`)) return;
     try {
-        await apiFetch(`/api/fleet/vehicles/${id}`, { method: 'DELETE' });
+        await ApiClient.fetch(`/fleet/vehicles/${id}`, { method: 'DELETE' });
         selectedIds.delete(id);
-        showToast('success', `Vehicle ${plate} deleted`);
+        UI.toast(`Vehicle ${plate} deleted`, 'success');
         await loadVehicles();
-    } catch (err) { showToast('error', err.message); }
+    } catch (err) { UI.toast(err.message, 'error'); }
 }
 
 function toggleVehicle(id, checked) {
@@ -300,24 +289,24 @@ async function bulkDelete() {
     if (count === 0) return;
     if (!confirm(`Delete ${count} selected vehicle(s)? This will unlink their fuel log entries.`)) return;
     try {
-        const result = await apiFetch('/api/fleet/vehicles/bulk-delete', {
+        const result = await ApiClient.fetch('/fleet/vehicles/bulk-delete', {
             method: 'POST',
             body: JSON.stringify({ ids: [...selectedIds] }),
         });
         selectedIds.clear();
-        showToast('success', result.message || `${count} vehicle(s) deleted`);
+        UI.toast(result.message || `${count} vehicle(s) deleted`, 'success');
         await loadVehicles();
-    } catch (err) { showToast('error', err.message); }
+    } catch (err) { UI.toast(err.message, 'error'); }
 }
 
 // ── Types ──────────────────────────────────────────────────────
 async function loadTypes() {
     try {
-        const data = await apiFetch('/api/fleet/vehicle-types');
+        const data = await ApiClient.fetch('/fleet/vehicle-types');
         allTypes = data.data || [];
         renderTypes();
         populateTypeSelect();
-    } catch (err) { showToast('error', `Failed to load types: ${err.message}`); }
+    } catch (err) { UI.toast(`Failed to load types: ${err.message}`, 'error'); }
 }
 
 function populateTypeSelect() {
@@ -332,37 +321,27 @@ function renderTypes() {
     document.getElementById('type-count').textContent = allTypes.length;
     if (!allTypes.length) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
     empty.style.display = 'none';
-    tbody.innerHTML = allTypes.map(t => `<tr><td>${escHtml(t.name)}</td><td><button class="btn-action btn-delete" onclick="deleteVehicleType(${t.id}, '${escHtml(t.name)}')">&#128465;</button></td></tr>`).join('');
+    tbody.innerHTML = allTypes.map(t => `<tr><td>${UI.escapeHtml(t.name)}</td><td><button class="btn-action btn-delete" onclick="deleteVehicleType(${t.id}, '${UI.escapeHtml(t.name)}')">&#128465;</button></td></tr>`).join('');
 }
 
 async function addVehicleType() {
     const name = document.getElementById('new-type-input').value.trim();
     if (!name) return;
     try {
-        await apiFetch('/api/fleet/vehicle-types', { method: 'POST', body: JSON.stringify({ name }) });
+        await ApiClient.fetch('/fleet/vehicle-types', { method: 'POST', body: JSON.stringify({ name }) });
         document.getElementById('new-type-input').value = '';
-        showToast('success', `Type "${name}" added`);
+        UI.toast(`Type "${name}" added`, 'success');
         await loadTypes();
-    } catch (err) { showToast('error', err.message); }
+    } catch (err) { UI.toast(err.message, 'error'); }
 }
 
 async function deleteVehicleType(id, name) {
     if (!confirm(`Delete type "${name}"?`)) return;
     try {
-        await apiFetch(`/api/fleet/vehicle-types/${id}`, { method: 'DELETE' });
-        showToast('success', `Type "${name}" deleted`);
+        await ApiClient.fetch(`/fleet/vehicle-types/${id}`, { method: 'DELETE' });
+        UI.toast(`Type "${name}" deleted`, 'success');
         await loadTypes();
-    } catch (err) { showToast('error', err.message); }
-}
-
-// ── Toast ──────────────────────────────────────────────────────
-function showToast(type, msg) {
-    const c = document.getElementById('toast-container');
-    const t = document.createElement('div');
-    t.className = `toast ${type}`;
-    t.textContent = msg;
-    c.appendChild(t);
-    setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 3000);
+    } catch (err) { UI.toast(err.message, 'error'); }
 }
 
 // ── 3D Container Diagram (Three.js) ─────────────────────────────

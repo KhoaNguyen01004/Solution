@@ -465,7 +465,9 @@ class GoogleSheetService:
         print()
 
         try:
+            _t = time.perf_counter()
             raw_records = self.fetch_records()
+            print(f"fetch_records: {time.perf_counter() - _t:.2f}s")
             summary["fetched"] = len(raw_records)
 
             if not raw_records:
@@ -473,9 +475,15 @@ class GoogleSheetService:
                 self._print_footer(start, summary)
                 return summary
 
+            _t = time.perf_counter()
             existing_keys = self._fetch_existing_keys()
-            plate_map = self._build_plate_map()
+            print(f"fetch_existing_keys: {time.perf_counter() - _t:.2f}s")
 
+            _t = time.perf_counter()
+            plate_map = self._build_plate_map()
+            print(f"build_plate_map: {time.perf_counter() - _t:.2f}s")
+
+            _t = time.perf_counter()
             for raw in raw_records:
                 try:
                     norm = self.normalize_record(raw)

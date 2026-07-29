@@ -1,0 +1,5 @@
+Package: AWC 30 650x430x450 12.0kg
+Container: L=6120.0 W=2100.0 H=2020.0 payload=6950.0kg
+Validation: valid=True
+Boundary: pass=True
+Support (z=0): valid=True

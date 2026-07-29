@@ -342,6 +342,185 @@ The back view renders the cargo area as seen from the rear door looking toward t
 
 Coordinate flips are applied consistently across rendering (`_drawPackages`, `_focusOnPackage`), drag-and-drop, preview, validation (`_quickValidate`, `_throttledValidate`), and placement (`_onDrop`). The generic `_mmToStage` / `_stageToMm` converters remain unfipped — all view-specific logic is handled at the call site.
 
+## Delivery Plan Management
+
+### Architecture
+
+The delivery management system follows a **Plan ↔ Execution** separation pattern. All imported data is immutable; runtime state lives in a separate execution layer.
+
+```
+Delivery Plan (immutable after import)
+    └── Vehicle Assignments
+        └── Planned Stops (immutable)
+                └── Stop Executions (mutable — status, timestamps, reorder)
+```
+
+### Services
+
+| Service | File | Responsibility |
+|---------|------|---------------|
+| Plan | `services/delivery/plan_service.py` | CRUD for plans, assignments, stops, drivers; Excel import pipeline (parse → validate → preview → confirm) |
+| Execution | `services/delivery/execution_service.py` | Current stop derivation, advance, skip, cancel, reorder, insert temp, progress statistics |
+| Tracking | `services/delivery/tracking_service.py` | TTAS GPS feed wrapper, vehicle plate lookup, position normalization |
+| ETA | `services/delivery/eta_service.py` | ORS-based ETA, Haversine fallback, single-leg and multi-stop cumulative |
+| Image | `services/delivery/image_service.py` | Upload with auto folder creation, list, serve, delete with file cleanup |
+
+### Database Schema
+
+#### `drivers`
+| Column | Type | Notes |
+|--------|------|-------|
+| id | INTEGER PK | |
+| name | TEXT NOT NULL | |
+| phone | TEXT | |
+| license_number | TEXT | |
+| created_at / updated_at | TIMESTAMP | |
+
+#### `delivery_plans`
+| Column | Type | Notes |
+|--------|------|-------|
+| id | INTEGER PK | |
+| plan_name | TEXT NOT NULL | |
+| plan_date | DATE NOT NULL | |
+| status | TEXT | draft → confirmed → executing → completed / cancelled |
+| imported_at | TIMESTAMP | Set when Excel import is confirmed |
+| created_by | TEXT | |
+
+#### `vehicle_assignments`
+| Column | Type | Notes |
+|--------|------|-------|
+| id | INTEGER PK | |
+| plan_id | INTEGER FK→plans | CASCADE |
+| vehicle_id | INTEGER FK→vehicles | |
+| driver_id | INTEGER FK→drivers | Nullable |
+| sequence | INTEGER | Ordering within plan |
+
+#### `delivery_plan_stops` — immutable plan data
+| Column | Type | Notes |
+|--------|------|-------|
+| id | INTEGER PK | |
+| vehicle_assignment_id | INTEGER FK→assignments | CASCADE |
+| planned_sequence | INTEGER | Original order from import |
+| station_code / station_name / address | TEXT | |
+| lat / lng | REAL | Coordinates |
+| manager_name / manager_phone | TEXT | |
+| product_description / note | TEXT | |
+
+#### `stop_executions` — mutable runtime state
+| Column | Type | Notes |
+|--------|------|-------|
+| id | INTEGER PK | |
+| stop_id | INTEGER FK→stops | CASCADE, UNIQUE (1:1 with stop) |
+| execution_sequence | INTEGER | May differ from planned_sequence after reorder |
+| status | TEXT | planned → enroute → arrived → completed / skipped / cancelled |
+| skip_reason / cancel_reason | TEXT | |
+| actual_arrival_at / actual_departure_at / completed_at | TIMESTAMP | |
+
+`is_current` is **derived**, not stored: query finds the first stop with status `planned` or `enroute` ordered by `execution_sequence`.
+
+#### `delivery_stop_images`
+| Column | Type | Notes |
+|--------|------|-------|
+| id | INTEGER PK | |
+| stop_id | INTEGER FK→stops | CASCADE |
+| category | TEXT | loading, delivery, extra |
+| filename / relative_path | TEXT | File stored at `DeliveryPlans/YYYY/MM/DD/Plate/Station/Category/` |
+| gps_lat / gps_lng | REAL | Capture coordinates for audit |
+| captured_at / uploaded_at / uploaded_by | TIMESTAMP / TEXT | |
+
+### Current Stop Derivation
+
+Executed by `execution_service.get_current_stop()`:
+
+```sql
+SELECT s.*, e.*
+FROM delivery_plan_stops s
+JOIN stop_executions e ON e.stop_id = s.id
+WHERE s.vehicle_assignment_id = ?
+  AND e.status IN ('planned', 'enroute', 'arrived')
+ORDER BY e.execution_sequence
+LIMIT 1
+```
+
+No `is_current` flag is stored — the current stop is always the first non-terminal stop by execution order.
+
+### Excel Import Pipeline
+
+```
+File upload
+    → Parser (openpyxl, reads active sheet, auto-maps Vietnamese/English columns)
+    → Validator (checks vehicle ID, station code/name, coordinate ranges)
+    → Preview (groups by vehicle, returns structured JSON for confirmation)
+    → Confirm (creates plan, assignments, stops, executions in one transaction)
+```
+
+Auto-creates vehicles and drivers on the fly if they don't exist in the master tables. Plan status set to `confirmed` after import.
+
+### ETA Calculation Flow
+
+```
+GET /api/eta?assignment_id=X
+    1. Fetch remaining stops (status = planned/enroute)
+    2. Look up vehicle GPS from TTAS feed (matched by plate)
+    3. For each remaining stop (sequentially):
+       a. Calculate ORS route from current/previous position → stop
+       b. Accumulate distance + duration
+       c. Return: distance_km, duration_sec, cumulative_sec
+    4. Falls back to Haversine if ORS unavailable
+```
+
+### Image Storage
+
+```
+DeliveryPlans/
+  YYYY/
+    MM/
+      DD/
+        Plate/
+          StationCode/
+            loading/
+            delivery/
+            extra/
+```
+
+Folders are auto-created on first upload. The database stores only the relative path; files are served via `send_file()`.
+
+### Dispatch Features
+
+| Operation | Endpoint | Behaviour |
+|-----------|----------|-----------|
+| Reorder | `POST /api/stops/reorder` | Accepts `assignment_id` + ordered `stop_ids[]`; updates `execution_sequence` on all stops |
+| Skip | `POST /api/stops/<id>/skip` | Sets status=skipped, records reason; current stop re-derived automatically |
+| Cancel | `POST /api/stops/<id>/cancel` | Sets status=cancelled, records reason |
+| Insert temp | `POST /api/stops/insert` | Creates new planned stop + execution, shifts subsequent sequences |
+
+### API Endpoints (all under `/api`)
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET/POST | `/drivers` | List / create drivers |
+| GET/POST | `/plans` | List / create plans |
+| GET/PUT/DELETE | `/plans/<id>` | Get / update / delete plan |
+| POST | `/plans/<id>/confirm` | Set plan status=confirmed |
+| POST | `/plans/import/parse` | Parse Excel → preview |
+| POST | `/plans/import/save` | Confirm import → save |
+| GET/POST | `/assignments` | List / create assignments |
+| GET/PUT/DELETE | `/assignments/<id>` | Get / update / delete assignment |
+| GET/POST | `/stops?assignment_id=` | List stops / create stop |
+| GET/PUT/DELETE | `/stops/<id>` | Get / update / delete stop |
+| POST | `/stops/<id>/skip` | Skip stop |
+| POST | `/stops/<id>/cancel` | Cancel stop |
+| POST | `/stops/reorder` | Reorder execution sequences |
+| POST | `/stops/insert` | Insert temporary stop |
+| GET | `/execution/current?assignment_id=` | Derive current stop |
+| POST | `/execution/advance` | Advance stop (planned→arrived or arrived→completed) |
+| GET | `/execution/dashboard` | All assignments with GPS |
+| GET | `/execution/progress?assignment_id=` | Stop-level statistics |
+| GET | `/eta?assignment_id=` | ORS ETA for remaining stops |
+| GET/POST | `/stops/<id>/images` | List / upload images |
+| GET | `/images/<id>/file` | Serve image file |
+| DELETE | `/images/<id>` | Delete image + file |
+
 ## Frontend: Arrange Results
 
 After auto-arrange, the left sidebar shows an **Arrange Results** section. Each row represents a vehicle that received packages:

@@ -12,7 +12,7 @@
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: 'Inter', sans-serif; background: #0d1117; color: #e6edf3; min-height: 100vh; overflow-x: hidden; }
 
-        .fe-header { position: sticky; top: 0; z-index: 100; background: linear-gradient(135deg,#111827,#1a2332); border-bottom: 1px solid rgba(255,255,255,0.08); padding: 0 28px; height: 64px; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 4px 24px rgba(0,0,0,0.4); }
+        .fe-header { position: sticky; top: 0; z-index: 100; background: linear-gradient(135deg,#111827,#1a2332); border-bottom: 1px solid rgba(255,255,255,0.08); padding: 0 28px; min-height: 64px; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 4px 24px rgba(0,0,0,0.4); flex-wrap: wrap; gap: 8px; }
         .fe-header-left { display: flex; align-items: center; gap: 20px; }
         .fe-logo { display: flex; align-items: center; gap: 10px; }
         .fe-logo-icon { width: 8px; height: 32px; background: linear-gradient(180deg,#10b981,#059669); border-radius: 99px; flex-shrink: 0; }
@@ -149,7 +149,22 @@
         .toast.success { border-left-color: #10b981; } .toast.error { border-left-color: #ef4444; } .toast.warning { border-left-color: #f59e0b; }
         @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 
-        @media (max-width:900px) { .kpi-row { grid-template-columns: 1fr; } .fe-logo h1 { display: none; } .form-row { grid-template-columns: 1fr; } }
+        @media (max-width:1100px) { .fe-header { padding: 0 16px; } }
+        @media (max-width:900px) {
+            .kpi-row { grid-template-columns: 1fr; }
+            .fe-logo h1 { display: none; }
+            .form-row { grid-template-columns: 1fr; }
+            .fe-header { padding: 0 12px; gap: 6px; }
+            .fe-header .header-nav .btn-nav,
+            .fe-header .header-nav .nav-dropdown > .btn-nav { padding: 0 10px; font-size: 12px; height: 30px; }
+        }
+        @media (max-width:768px) {
+            .fe-header { padding: 6px 10px; }
+            .fe-header .header-nav { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; flex: 1; }
+            .fe-header .header-nav::-webkit-scrollbar { display: none; }
+            .fe-header > div:last-child { margin-left: 0; }
+        }
+        @media (max-width:480px) { .fe-header { padding: 4px 8px; } .fe-page { padding: 12px; } }
     </style>
 </head>
 <body>
@@ -159,15 +174,35 @@
         <div class="fe-header-left">
             <div class="fe-logo"><div class="fe-logo-icon"></div><h1>{% if mode == 'container' %}Container Fuel{% else %}Fuel Efficiency{% endif %}</h1></div>
         </div>
-        <nav class="fe-nav">
-            <a href="/" class="btn-nav" style="height:34px;padding:0 14px;font-size:13px;display:inline-flex;align-items:center;border-radius:8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.07);color:#e6edf3;text-decoration:none;font-weight:500;">Map</a>
+        <nav class="header-nav">
+            <a href="/" class="btn-nav">Map</a>
             <div class="nav-dropdown" style="position:relative;">
-                <button class="btn-nav" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='block'?'none':'block'" style="cursor:pointer;background:none;border:none;font-family:inherit;font-size:13px;color:#e6edf3;font-weight:500;padding:0 14px;height:34px;display:inline-flex;align-items:center;gap:4px;border-radius:8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.07);">Fleet &#9662;</button>
+                <button class="btn-nav" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='block'?'none':'block'" style="cursor:pointer;background:none;border:none;font-family:inherit;font-size:13px;color:#c9d1d9;font-weight:500;padding:0 14px;height:34px;display:inline-flex;align-items:center;gap:4px;">Trips &#9662;</button>
                 <div style="display:none;position:absolute;top:100%;right:0;background:#161b22;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:6px;min-width:170px;box-shadow:0 12px 40px rgba(0,0,0,0.5);z-index:200;" class="fleet-dropdown">
-                    <a href="/vehicle-management" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Vehicles</a>
-                    <a href="/oil-change" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Oil Change</a>
+                    <a href="/manage-trips" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Trip Management</a>
+                    <a href="/trip-history" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Trip History</a>
                 </div>
             </div>
+            <div class="nav-dropdown" style="position:relative;">
+                <button class="btn-nav" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='block'?'none':'block'" style="cursor:pointer;background:none;border:none;font-family:inherit;font-size:13px;color:#c9d1d9;font-weight:500;padding:0 14px;height:34px;display:inline-flex;align-items:center;gap:4px;">Delivery &#9662;</button>
+                <div style="display:none;position:absolute;top:100%;right:0;background:#161b22;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:6px;min-width:170px;box-shadow:0 12px 40px rgba(0,0,0,0.5);z-index:200;" class="fleet-dropdown">
+                    <a href="/delivery/new" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Plan Builder</a>
+                    <a href="/delivery/dashboard" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Dispatch</a>
+                </div>
+            </div>
+            <a href="/locations" class="btn-nav">Locations</a>
+            <a href="/truck-load-planner" class="btn-nav">Load Planner</a>
+            <div class="nav-dropdown" style="position:relative;">
+                <button class="btn-nav" onclick="var d=this.nextElementSibling;d.style.display=d.style.display==='block'?'none':'block'" style="cursor:pointer;background:none;border:none;font-family:inherit;font-size:13px;color:#c9d1d9;font-weight:500;padding:0 14px;height:34px;display:inline-flex;align-items:center;gap:4px;">Fleet &#9662;</button>
+                <div style="display:none;position:absolute;top:100%;right:0;background:#161b22;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:6px;min-width:170px;box-shadow:0 12px 40px rgba(0,0,0,0.5);z-index:200;" class="fleet-dropdown">
+                    <a href="/oil-change" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Oil Change</a>
+                    <a href="/vehicle-management" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Vehicles</a>
+                    <a href="/fuel-efficiency" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Fuel</a>
+                    <a href="/fuel-container" class="btn-nav" style="display:flex;width:100%;border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;">Container</a>
+                </div>
+            </div>
+        </nav>
+        <div style="display:flex;align-items:center;gap:8px;margin-left:auto;">
             {% if mode == 'container' %}
             <a href="/fuel-efficiency" class="btn-nav" style="height:34px;padding:0 14px;font-size:13px;display:inline-flex;align-items:center;border-radius:8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.07);color:#e6edf3;text-decoration:none;font-weight:500;">Regular</a>
             {% else %}
@@ -181,7 +216,7 @@
                 <span id="sync-badge" style="font-size:11px;font-weight:500;color:#94a3b8;margin-left:2px;">Never</span>
             </button>
             <button class="btn-add" onclick="openModal()">+ Add Entry</button>
-        </nav>
+        </div>
     </header>
 
     <main class="fe-page">
@@ -390,6 +425,7 @@
 
     <div id="toast-container"></div>
 
+    <script src="/static/js/utils.js"></script>
     <script src="/static/js/fuel-efficiency.js"></script>
     <script src="/static/js/fuel-sync.js"></script>
     <script>document.addEventListener('click',e=>{if(!e.target.closest('.nav-dropdown'))document.querySelectorAll('.fleet-dropdown').forEach(d=>d.style.display='none')});</script>

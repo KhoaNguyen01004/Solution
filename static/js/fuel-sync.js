@@ -6,24 +6,6 @@
 (function () {
   var SYNC_URL = "/api/fuel/sync";
   var HISTORY_URL = "/api/fuel/sync/last";
-  var toastContainer = document.getElementById("toast-container");
-
-  // ── Toast helper ─────────────────────────────────────────────────
-  function showToast(message, type, duration) {
-    if (!toastContainer) return;
-    type = type || "success";
-    duration = duration || 5000;
-    var el = document.createElement("div");
-    el.className = "toast " + type;
-    el.textContent = message;
-    toastContainer.appendChild(el);
-    setTimeout(function () {
-      el.style.opacity = "0";
-      el.style.transform = "translateX(100%)";
-      el.style.transition = "all 0.35s ease";
-      setTimeout(function () { el.remove(); }, 400);
-    }, duration);
-  }
 
   // ── Format duration ──────────────────────────────────────────────
   function fmtDuration(sec) {
@@ -111,7 +93,7 @@
       .then(function (r) { return r.json(); })
       .then(function (resp) {
         if (!resp.success) {
-          showToast("Sync failed: " + (resp.message || "Unknown error"), "error", 6000);
+          UI.toast("Sync failed: " + (resp.message || "Unknown error"), "error", 6000);
           updateSyncBadge({ status: "error", created_at: new Date().toISOString() });
           return;
         }
@@ -124,11 +106,11 @@
         lines.push("Duration: " + fmtDuration(d.duration_sec));
 
         if (d.inserted > 0) {
-          showToast(lines.join("  \u2022  "), "success", 8000);
+          UI.toast(lines.join("  \u2022  "), "success", 8000);
         } else if (d.failed > 0) {
-          showToast(lines.join("  \u2022  "), "warning", 8000);
+          UI.toast(lines.join("  \u2022  "), "warning", 8000);
         } else {
-          showToast("Already up to date  \u2022  " + fmtDuration(d.duration_sec), "success", 4000);
+          UI.toast("Already up to date  \u2022  " + fmtDuration(d.duration_sec), "success", 4000);
         }
 
         updateSyncBadge(d);
@@ -137,7 +119,7 @@
         refreshDashboard();
       })
       .catch(function (err) {
-        showToast("Sync request failed: " + err.message, "error", 6000);
+        UI.toast("Sync request failed: " + err.message, "error", 6000);
       })
       .finally(function () {
         btn.disabled = false;
