@@ -67,5 +67,9 @@ window.DASH = window.DASH || {};
     planDetail(planId) {
       return fetchJSON(`/api/plans/${planId}`);
     },
+
+    stopImages(stopId) {
+      return fetchJSON(`/api/stops/${stopId}/images`);
+    },
   };
 })();

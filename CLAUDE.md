@@ -163,7 +163,7 @@ prioritize:
 
 A task is done only when:
 
-- The relevant suite passes — `pytest tests/test_delivery.py -v` (31 tests) for delivery
+- The relevant suite passes — `pytest tests/test_delivery.py -v` (40 tests) for delivery
   changes, `pytest tests/test_scorer.py -v` (26 tests) for TLP scoring/placement changes.
   No CI is configured, so running these yourself is the only real verification.
 - A `CHANGELOG.md` entry was added, in the existing dated-entry style, for

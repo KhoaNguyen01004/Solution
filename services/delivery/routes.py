@@ -393,8 +393,23 @@ def get_eta():
         ors_key, ors_base,
         current_gps["lat"], current_gps["lng"],
         remaining,
+        assignment_id=assignment_id,
     )
-    return jsonify({"etas": etas, "gps": current_gps})
+
+    remaining_distance_km = etas[-1]["cumulative_km"] if etas and etas[-1].get("cumulative_km") is not None else 0.0
+    remaining_duration_sec = etas[-1]["cumulative_sec"] if etas and etas[-1].get("cumulative_sec") is not None else 0.0
+    travelled_distance_km = eta_service.calculate_travelled_distance_km(
+        stops, current_gps["lat"], current_gps["lng"]
+    )
+
+    return jsonify({
+        "etas": etas,
+        "gps": current_gps,
+        "remaining_distance_km": remaining_distance_km,
+        "remaining_duration_sec": remaining_duration_sec,
+        "travelled_distance_km": travelled_distance_km,
+        "total_distance_km": round(travelled_distance_km + remaining_distance_km, 2),
+    })
 
 
 # ===========================

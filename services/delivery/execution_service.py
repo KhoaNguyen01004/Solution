@@ -189,12 +189,14 @@ def get_dashboard_data(db_path: str):
                 va.vehicle_id,
                 va.driver_id,
                 v.plate_number,
-                v.current_driver,
+                COALESCE(NULLIF(d.name, ''), v.current_driver) as current_driver,
                 dp.plan_name,
-                dp.plan_date
+                dp.plan_date,
+                dp.status as plan_status
             FROM vehicle_assignments va
             JOIN delivery_plans dp ON dp.id = va.plan_id
             LEFT JOIN vehicles v ON v.id = va.vehicle_id
+            LEFT JOIN drivers d ON d.id = va.driver_id
             WHERE dp.status IN ('confirmed', 'executing')
             ORDER BY dp.plan_date DESC, va.sequence
         """)

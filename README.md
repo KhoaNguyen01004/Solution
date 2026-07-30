@@ -10,13 +10,13 @@ Flask-based fleet management with GPS tracking, fuel monitoring, and a 3D/2D **T
 - **Truck Load Planner** (`/truck-load-planner`) — 3D/2D cargo loader with auto-arrange, stacking, step animation
 - **Vehicle Management** (`/vehicle-management`) — Vehicle CRUD and interactive 3D container diagram (Three.js)
 - **Oil Change** (`/oil-change`) — Oil change tracking
-- **Delivery Management** *(Phase 1 complete, UI incoming)* — Delivery plan oriented trip management with Excel import pipeline, stop-level execution tracking, ETA calculation, and per-stop image management
+- **Delivery Management** — Delivery plan oriented trip management with Excel import pipeline (`/delivery/new`), and an operational **Dispatch Dashboard** (`/delivery/dashboard`) with stop-level execution tracking, road-aware ETA/distance, attention indicators (stuck/GPS-stale), a pinned current-stop card with click-to-call, inline skip/cancel reason editing, a read-only photo gallery, and follow-vehicle map mode
 
 ---
 
 ## Running Tests
 
-### Delivery Management Tests (31 tests)
+### Delivery Management Tests (40 tests)
 ```bash
 python -m pytest tests/test_delivery.py -v
 ```
@@ -54,7 +54,7 @@ python tests/test_all.py instrument --mode bug-trace  # Support integrity trace 
 
 # ── Pytest Unit Tests ──────────────────────────────────────
 python -m pytest tests/test_scorer.py -v
-python -m pytest tests/test_delivery.py -v           # Delivery management (31 tests)
+python -m pytest tests/test_delivery.py -v           # Delivery management (40 tests)
 
 # ── Standalone Debugger ────────────────────────────────────
 python tests/debug_arrange.py kbf_lc900          # Auto-arrange debug per scenario
@@ -202,7 +202,7 @@ app/                            # Flask application package (see app/__init__.py
 tests/                          # All test, debug, and diagnostic files
   test_all.py                   # Unified test harness (16 subcommands)
   test_scorer.py                # Pytest unit tests (TLP scoring)
-  test_delivery.py              # Pytest unit tests (delivery management — 31 tests)
+  test_delivery.py              # Pytest unit tests (delivery management — 40 tests)
   debug_arrange.py              # Per-package auto-arrange debugger
   merge_duplicate_vehicles.py   # One-time DB dedup utility
 reports/                        # Test and debug output files

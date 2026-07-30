@@ -462,11 +462,19 @@ Auto-creates vehicles and drivers on the fly if they don't exist in the master t
 GET /api/eta?assignment_id=X
     1. Fetch remaining stops (status = planned/enroute)
     2. Look up vehicle GPS from TTAS feed (matched by plate)
-    3. For each remaining stop (sequentially):
+    3. Check in-memory route cache (keyed by assignment_id); reuse the
+       previous result if the remaining stop set/order/coordinates are
+       unchanged and the vehicle hasn't moved >50m — otherwise recompute
+    4. For each remaining stop (sequentially):
        a. Calculate ORS route from current/previous position → stop
        b. Accumulate distance + duration
-       c. Return: distance_km, duration_sec, cumulative_sec
-    4. Falls back to Haversine if ORS unavailable
+       c. Return per leg: stop_id, distance_km, duration_sec, cumulative_sec,
+          cumulative_km, eta_seconds, geometry (road polyline, [lat,lng]
+          pairs; null when that leg fell back to Haversine)
+    5. Falls back to Haversine (no geometry) if ORS unavailable
+    6. Response also includes remaining_distance_km, travelled_distance_km
+       (straight-line estimate across already-passed stops), and
+       total_distance_km
 ```
 
 ### Image Storage

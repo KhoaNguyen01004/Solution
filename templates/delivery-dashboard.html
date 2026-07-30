@@ -65,11 +65,8 @@
                     <label for="filterStatus">Status</label>
                     <select id="filterStatus">
                         <option value="">All</option>
-                        <option value="draft">Draft</option>
                         <option value="confirmed">Confirmed</option>
                         <option value="executing">Executing</option>
-                        <option value="completed">Completed</option>
-                        <option value="cancelled">Cancelled</option>
                     </select>
                 </div>
             </div>
@@ -85,8 +82,12 @@
         <aside class="dashboard-left" id="leftPanel">
             <div class="panel-header">
                 <h2>Vehicles</h2>
+                <label class="attention-sort-toggle" for="attentionFirstToggle">
+                    <input type="checkbox" id="attentionFirstToggle"> Attention first
+                </label>
                 <span id="vehicleCount" class="panel-count"></span>
             </div>
+            <div class="attention-strip" id="attentionStrip" style="display:none;"></div>
             <div class="vehicle-list" id="vehicleList">
                 <div class="empty-state">Loading vehicles...</div>
             </div>
@@ -99,6 +100,7 @@
             <!-- Map controls overlay -->
             <div class="map-controls">
                 <button class="btn-nav map-control-btn" id="zoomToVehicleBtn" title="Zoom to vehicle" style="display:none;">&#8982; Zoom Vehicle</button>
+                <button class="btn-nav map-control-btn" id="followVehicleBtn" title="Follow vehicle as it moves" style="display:none;">&#8982; Follow</button>
                 <button class="btn-nav map-control-btn" id="openGmapsBtn" title="Open in Google Maps" style="display:none;">&#x2197; Google Maps</button>
                 <button class="btn-nav map-control-btn" id="refreshGPSBtn" title="Refresh GPS">&#x21bb; GPS</button>
             </div>
@@ -112,6 +114,7 @@
                 </div>
                 <div class="vibar-right">
                     <span id="vibarProgress"></span>
+                    <span id="vibarDistance"></span>
                     <span id="vibarEta"></span>
                     <span id="vibarGpsTime"></span>
                 </div>
@@ -125,6 +128,7 @@
                 <span id="stopCount" class="panel-count"></span>
                 <button class="btn-nav timeline-close" id="timelineCloseBtn" title="Close timeline" style="display:none;">&#x2715;</button>
             </div>
+            <div class="current-stop-card" id="currentStopCard" style="display:none;"></div>
             <div class="timeline" id="timeline">
                 <div class="empty-state">Select a vehicle to view stops</div>
             </div>
@@ -132,6 +136,7 @@
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/static/js/utils.js"></script>
     <script src="/static/js/dashboard/api.js"></script>
     <script src="/static/js/dashboard/polling.js"></script>
     <script src="/static/js/dashboard/vehicle-list.js"></script>

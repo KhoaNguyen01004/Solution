@@ -15,6 +15,7 @@ window.DASH = window.DASH || {};
     selectedStops: [],
     selectedAssignmentDetail: null,
     selectedEta: null,
+    followMode: false,
     filters: {
       plan: '',
       date: '',
@@ -68,6 +69,7 @@ window.DASH = window.DASH || {};
     const seen = new Set();
     state.plans.forEach((p) => {
       if (seen.has(p.id)) return;
+      if (p.status !== 'confirmed' && p.status !== 'executing') return;
       seen.add(p.id);
       sel.innerHTML += `<option value="${p.id}">${escapeHtml(p.plan_name || 'Plan #' + p.id)}</option>`;
     });
@@ -104,6 +106,8 @@ window.DASH = window.DASH || {};
     state.selectedStops = [];
     state.selectedAssignmentDetail = null;
     state.selectedEta = null;
+    state.followMode = false;
+    setFollowButtonState();
 
     renderAll();
 
@@ -131,22 +135,35 @@ window.DASH = window.DASH || {};
       const currentStopId = getCurrentStopId(state.selectedStops);
       DASH.timeline.render(state.selectedStops, currentStopId, state.selectedEta);
       DASH.map.updateStops(state.selectedStops, currentStopId);
-      DASH.map.updateRoute(state.selectedStops);
+      DASH.map.updateRoute(state.selectedEta, state.selectedStops);
 
       // Update info bar
       updateInfoBar(assignmentId, state.selectedStops, state.selectedAssignmentDetail, state.selectedEta);
 
       // Show map controls
       document.getElementById('zoomToVehicleBtn').style.display = '';
+      document.getElementById('followVehicleBtn').style.display = '';
       document.getElementById('openGmapsBtn').style.display = '';
+
+      if (state.followMode) {
+        DASH.map.followVehicle(assignmentId);
+      }
     } catch (e) {
       console.error('Failed to load assignment detail:', e);
     }
   }
 
+  // ── Follow-vehicle toggle ───────────────────────────────────
+  function setFollowButtonState() {
+    const btn = document.getElementById('followVehicleBtn');
+    if (!btn) return;
+    btn.classList.toggle('active', state.followMode);
+    btn.textContent = state.followMode ? '◉ Following' : '◎ Follow';
+  }
+
   function getCurrentStopId(stops) {
     if (!stops) return null;
-    const activeStatuses = ['planned', 'enroute', 'arrived'];
+    const activeStatuses = ['planned', 'arrived'];
     for (const s of stops) {
       if (activeStatuses.includes(s.execution_status)) {
         return s.id;
@@ -176,6 +193,13 @@ window.DASH = window.DASH || {};
       : 'ETA: --';
     document.getElementById('vibarEta').textContent = etaText;
 
+    const distanceEl = document.getElementById('vibarDistance');
+    if (eta && (eta.remaining_distance_km || eta.travelled_distance_km)) {
+      distanceEl.textContent = `${eta.travelled_distance_km || 0} km done • ${eta.remaining_distance_km || 0} km left`;
+    } else {
+      distanceEl.textContent = '';
+    }
+
     const gps = a.gps;
     const gpsTime = gps && gps.last_update ? new Date(gps.last_update).toLocaleTimeString() : '';
     document.getElementById('vibarGpsTime').textContent = gpsTime ? 'GPS: ' + gpsTime : '';
@@ -192,18 +216,20 @@ window.DASH = window.DASH || {};
         const currentStopId = getCurrentStopId(state.selectedStops);
         DASH.timeline.render(state.selectedStops, currentStopId, state.selectedEta);
         DASH.map.updateStops(state.selectedStops, currentStopId);
-        DASH.map.updateRoute(state.selectedStops);
+        DASH.map.updateRoute(state.selectedEta, state.selectedStops);
         updateInfoBar(state.selectedAssignmentId, state.selectedStops, state.selectedAssignmentDetail, state.selectedEta);
       }
     } else {
-      document.getElementById('timeline').innerHTML = '<div class="empty-state">Select a vehicle to view stops</div>';
+      DASH.timeline.clear();
       document.getElementById('vehicleInfoBar').style.display = 'none';
       document.getElementById('zoomToVehicleBtn').style.display = 'none';
+      document.getElementById('followVehicleBtn').style.display = 'none';
       document.getElementById('openGmapsBtn').style.display = 'none';
-      document.getElementById('stopCount').textContent = '';
+      state.followMode = false;
+      setFollowButtonState();
       // Clear map extras
       DASH.map.updateStops([], null);
-      DASH.map.updateRoute([]);
+      DASH.map.updateRoute(null, []);
     }
   }
 
@@ -245,9 +271,26 @@ window.DASH = window.DASH || {};
 
   // ── Bind map control buttons ───────────────────────────────
   function bindMapControls() {
+    document.getElementById('refreshNowBtn').addEventListener('click', async () => {
+      try {
+        await DASH.state.refreshNow();
+      } catch (e) {
+        console.error('Refresh error:', e);
+      }
+    });
+
     document.getElementById('zoomToVehicleBtn').addEventListener('click', () => {
       if (state.selectedAssignmentId) {
         DASH.map.zoomToVehicle(state.selectedAssignmentId);
+      }
+    });
+
+    document.getElementById('followVehicleBtn').addEventListener('click', () => {
+      if (!state.selectedAssignmentId) return;
+      state.followMode = !state.followMode;
+      setFollowButtonState();
+      if (state.followMode) {
+        DASH.map.followVehicle(state.selectedAssignmentId);
       }
     });
 
@@ -278,6 +321,7 @@ window.DASH = window.DASH || {};
     DASH.map.init();
     bindFilterEvents();
     bindMapControls();
+    setFollowButtonState();
 
     // Load initial data
     Promise.all([loadPlans()]).catch(() => {});

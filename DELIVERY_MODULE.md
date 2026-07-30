@@ -85,9 +85,11 @@ All steps share a single state object. Auto-save runs every 30s when dirty.
 
 | Panel | Content | Update |
 |-------|---------|--------|
-| Left (320px) | Vehicle cards with progress, status, GPS time | Every 12s poll |
-| Center (flex) | Leaflet map with vehicle markers + stop pins | On selection + poll |
-| Right (360px) | Stop timeline with action buttons | On selection only |
+| Left (280px) | Vehicle cards with progress, status, GPS time, attention indicator (stuck/GPS-stale) | Every 12s poll |
+| Center (flex) | Leaflet map with vehicle markers, stop pins, road-following route | On selection + every poll |
+| Right (300px) | Pinned current-stop card (contact, `tel:` link, primary actions) + stop timeline with photo gallery and inline skip/cancel reason editing | Every poll while a vehicle is selected |
+
+All three panels use incremental DOM diffing (not full rebuilds) — see `CHANGELOG.md`'s Phase 1 entry for why.
 
 ---
 
@@ -324,7 +326,7 @@ ROUTE_REFRESH_INTERVAL=Route cache refresh seconds (default: 60)
 ### Running Tests
 
 ```bash
-# All tests (31 delivery + 26 TLP)
+# All tests (40 delivery + 26 TLP)
 pytest tests/
 
 # Delivery-specific
@@ -341,11 +343,11 @@ pytest tests/test_delivery.py --cov=services/delivery --cov-report=term
 
 | Test Class | Tests | Coverage |
 |-----------|-------|----------|
-| TestEtaService | 7 | ETA calculation, ORS fallback |
+| TestEtaService | 16 | ETA calculation, ORS fallback, road geometry, route cache hit/invalidation, travelled distance |
 | TestStopProgression | 7 | Advance, skip, cancel, current stop |
-| TestStopReordering | 4 | Reorder, insert temp stop, sequence update |
+| TestStopReordering | 5 | Reorder, insert temp stop, sequence update |
 | TestImageService | 5 | Upload, list, delete, edge cases |
-| TestProgress | 4 | Progress calculation, breakdown |
+| TestProgress | 5 | Progress calculation, breakdown |
 | TestTransactions | 2 | Rollback on failure, cascade delete |
 
 ### Manual Test Checklist

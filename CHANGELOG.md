@@ -1,5 +1,115 @@
 # Changelog
 
+## 2026-07-30 — Dispatch Module Phase 3 QA Pass: Two Bugs Fixed
+
+Final QA pass on Phase 3 before tagging, covering: Follow mode over an extended session, attention chips crossing real thresholds, photo gallery under multiple-images/missing/slow-network conditions, inline-reason-edit durability under polling and rapid interaction, listener/memory growth, and browser performance over a simulated 30-minute session. Verified via a console-level mock harness driving `DASH.api.*` with realistic synthetic data (moving GPS, threshold-crossing timestamps, multi-image responses, artificial network delay) since this sandbox has no live TTAS/ORS credentials. Two real bugs found and fixed in `static/js/dashboard/timeline.js`; everything else confirmed correct.
+
+### Fixed
+- **Duplicate photo-gallery fetches under slow network** (`timeline.js::bindPhotosToggle`) — rapid toggle clicks while a fetch was in flight (`loaded` was still `false`) triggered a second concurrent request to `/api/stops/<id>/images`. Reproduced with 4 rapid clicks during a 3s artificial delay → confirmed 2 fetch calls. Added a `loading` guard alongside the existing `loaded` one; re-tested identically → confirmed 1 call.
+- **Abandoned reason edit permanently blanked a stop's content** (`timeline.js::render`) — the `openReasonStopIds` guard added to protect an in-progress skip/cancel edit from being wiped by a background poll was never cleared. If a dispatcher opened Skip/Cancel on a stop and navigated away (selected a different vehicle, or deselected) without confirming or cancelling, that stop's `.timeline-detail-wrap` — including its Advance/Skip/Cancel buttons — stayed permanently empty on every future render for the rest of the session, even after a full rebuild created a brand-new DOM node for it (reproduced and confirmed: `detailWrapInnerHtmlLength: 0` after abandon-and-return). Fixed by clearing `openReasonStopIds` at the two points where stale reason-row state can no longer correspond to real DOM: the empty-list branch and the full-rebuild branch of `render()`. Re-verified the original in-progress-edit-survives-polling behavior still holds (30 consecutive same-assignment polls) after this change.
+
+### Verified, no changes needed
+- **Follow mode**: `panTo`-based re-centering tracked 20 simulated GPS-movement cycles smoothly with zero jitter, and correctly preserved a dispatcher's manually-set zoom level (tested at zoom 10, forced there by the user, vs. the manual "Zoom to Vehicle" button's zoom-14) throughout — confirming it never fights a manual pan/zoom.
+- **Attention chips**: fired and cleared correctly against realistic threshold-crossing data for both proxies independently (stuck-at-stop crossing 20min, GPS-stale crossing 15min) and returned to hidden when both dropped back under threshold.
+- **Photo gallery**: multiple images, zero images, and slow-network (3s artificial delay) scenarios all rendered the correct state once the duplicate-fetch fix above was applied.
+- **Listener/memory growth over ~150 simulated poll cycles** (≈30min at the real 12s interval) mixed with UI interactions: DOM node count grew by only 3 (not scaling with cycle count), heap usage was flat (0MB measured growth via `performance.memory`), and an instrumented `addEventListener` audit found every element outside the attention strip bound its listener exactly once — no rebinding anywhere. The attention strip's repeated rebind count is many distinct short-lived chip elements (each bound once, each discarded together with its listener on the next full-innerHTML rebuild) rather than the same node being bound repeatedly — already a documented, deliberate Phase 3 simplification given the strip's small size, and confirmed non-leaking by the flat DOM/heap metrics, so left unchanged per "fix only issues found."
+- `pytest tests/test_delivery.py` — 40/40 passing throughout (no backend touched by either fix).
+
+### Remaining Known Limitations (unchanged from Phase 3)
+- Attention thresholds (20min stuck, 15min GPS-stale) remain untuned against real fleet data.
+- True SLA-based delay still requires a schema column, out of scope per the earlier decision.
+- Could not test Follow mode / attention chips / photo gallery against real TTAS GPS or real uploaded images in this sandbox — verified via realistic synthetic data instead.
+
+## 2026-07-30 — Dispatch Module Phase 3: Operational Workspace
+
+Frontend-only workflow improvements to the Dispatch dashboard, based on a workflow analysis grounded in the actual code (not `docs/PHASE_3_Dispatcher_Workspace.md`'s aspirational layout). No grid/layout redesign, no new backend logic beyond the pre-existing image API, no schema change. All changes additive to `static/js/dashboard/{vehicle-list,timeline,map,main}.js`, `templates/delivery-dashboard.html`, `static/css/delivery-dashboard.css`, plus one method added to `api.js`.
+
+### Added
+- **Attention proxies** (`vehicle-list.js`) — since no scheduled/promised time exists anywhere in the schema, "delay" is approximated from data already available every poll: a vehicle `arrived` at a stop for more than 20 minutes without advancing ("stuck"), or a vehicle whose GPS hasn't updated in 15+ minutes ("GPS stale"). Surfaced as a small dot on the vehicle card, a dismissed-when-empty attention strip at the top of the vehicle list, and an "Attention first" sort toggle — all pure client-side derivation, no schema change.
+- **Pinned current-stop card** (`timeline.js`, new `#currentStopCard` element) — the selected vehicle's current stop (contact name, address, phone, ETA) is now always visible at the top of the Timeline panel regardless of scroll position, with mirrored Advance/Skip/Cancel actions so the single most common action never requires scrolling.
+- **Click-to-call** — `manager_phone` is now a `tel:` link in both the pinned card and each per-stop detail body (previously plain text).
+- **Read-only photo gallery** (`timeline.js` + `api.js::stopImages()`) — a "📷 Photos" toggle per stop lazily fetches `/api/stops/<id>/images` (backend untouched, this endpoint already existed with zero consumers anywhere in the app before this) and shows a thumbnail strip; clicking a thumbnail opens the original in a new tab. Lives in its own DOM node outside the diffed detail content so its open/loaded state survives every poll.
+- **Follow-vehicle map mode** (`map.js::followVehicle()`, new `#followVehicleBtn`) — `panTo` (no forced zoom, no popup) re-centers on the selected vehicle every poll while active; resets automatically on deselection or switching to a different vehicle.
+
+### Changed
+- **Skip/Cancel no longer use `prompt()`/`alert()`** (`timeline.js`) — clicking either swaps the action buttons for an inline reason input (Confirm/Enter to submit, × to abort), with `UI.toast()` reporting errors and enforcing "cancel requires a non-empty reason" (previously a silent `if (!reason) return`). Shared between the per-stop body and the pinned card via one `bindActionDelegation()`/`handleStopAction()` implementation, avoiding duplicate logic.
+- Added `<script src="/static/js/utils.js">` to `delivery-dashboard.html` — first use of `UI.toast()`/`UI.escapeHtml()` on this page, per `CLAUDE.md`'s convention for new fetch/toast/escape code. The page's own `DASH.api` fetch wrapper (a different response contract than `ApiClient`) was kept as-is, matching the module it was already established in.
+
+### Fixed (self-consistency issue caught during implementation)
+- Because the new reason row is non-blocking (unlike the old native `prompt()`, which paused all JS until dismissed), a background poll can now legitimately fire while a dispatcher is mid-typing a skip/cancel reason. Content diffing for a stop with an open reason row is suppressed (`openReasonStopIds` set) until it closes, so an in-progress edit is never silently wiped — the exact kind of state-loss bug this dashboard's Phase 1 work was about eliminating.
+
+### Testing
+- `pytest tests/test_delivery.py -v` — 40/40 passing, unaffected (no backend logic changed).
+- Manual: dev server + browser — verified the pinned card renders with a working `tel:` href, the inline reason row appears/confirms/cancels with zero native dialogs, the required-reason toast fires correctly, the photo gallery lazy-fetches and shows the correct empty state, and the Follow toggle switches to its active visual state. Could not visually trigger an actual attention chip/dot, since no vehicle in this sandbox's data currently has live GPS or a long-arrived stop meeting either threshold — the toggle and empty-strip behavior were confirmed, the firing condition itself was not.
+
+### Remaining Technical Debt / Deferred
+- Attention thresholds (20 min stuck, 15 min GPS-stale) are reasonable defaults, not tuned against real fleet data — may need adjustment once used in production.
+- True SLA-based delay (vs. a promised/scheduled time) remains unavailable — would need a schema column, explicitly deferred per this phase's scope decision.
+
+### Out of Scope
+- A few other pre-existing dead-for-the-same-reason status-map entries in `vehicle-list.js`/CSS (noted in the Phase 0 entry) remain untouched.
+- Alerts, WebSockets, routing/backend redesign — reserved for later phases per `docs/MASTER_PLAN.md`.
+
+## 2026-07-30 — Dispatch Module Phase 2: Route Intelligence
+
+Extends the existing ORS integration (`services/delivery/eta_service.py`, `services/delivery/routes.py`) to surface road geometry, remaining/travelled distance, and avoid redundant ETA recalculation; updates the map's route rendering (`static/js/dashboard/map.js`, `main.js`) to draw it. No new endpoints, no schema change, no new routing provider, polling interval unchanged.
+
+### Added
+- **Road-following route geometry** — `eta_service.calculate_eta()` now parses the `geometry.coordinates` ORS was already returning (previously discarded) and converts GeoJSON `[lng, lat]` to Leaflet's `[lat, lng]`. Each leg in `calculate_etas_for_stops()`'s output now carries this as `"geometry"` (`None` for haversine/fallback legs, where no real road path exists).
+- **In-memory route cache** (`eta_service.py`, module-level `_route_cache` + `threading.Lock`) — `calculate_etas_for_stops(..., assignment_id=...)` reuses the previous result when the remaining stop set/order/coordinates are unchanged AND the vehicle has moved less than `ROUTE_CACHE_GPS_THRESHOLD_M` (50m, filters GPS jitter without masking real movement). Invalidates on assignment change (different cache key), stop order/destination change (stop-id+lat+lng tuple differs), stop completion/skip (changes which stops are "remaining"), and significant GPS movement. Kept local to `eta_service.py` rather than `app/state.py` — that module's docstring scopes it to the fleet/fuel/oil/trips blueprints + TTAS session, a different package/concern than `services/delivery`. `assignment_id` defaults to `None`, which bypasses the cache entirely (existing callers/tests unaffected).
+- **Remaining/travelled/total distance** — `/api/eta` now also returns `remaining_distance_km` (from the last remaining leg's new `cumulative_km`), `travelled_distance_km` (new `calculate_travelled_distance_km()` — a straight-line, best-effort sum across already-passed stops, intentionally not ORS-routed to avoid extra API calls for a secondary figure), and `total_distance_km`. Surfaced in the dashboard's vehicle info bar via a new `#vibarDistance` span.
+
+### Changed
+- `map.js::updateRoute(eta, stops)` (signature changed, both call sites in `main.js` updated) — now builds the polyline by concatenating each remaining leg's road geometry in order; falls back to a straight segment only for the specific leg(s) missing geometry, and to the old straight-line-through-all-stops behavior only when there's no live ETA at all (GPS offline) — never blanks the route. Solid line when real road geometry was used, dashed when it's a straight-line fallback, so dispatchers can tell the difference at a glance. The existing "skip redraw if the path is unchanged" check (from Phase 1) is unchanged, now comparing the richer coordinate list.
+- Vehicle info bar's "ETA:" label is unchanged (still time-to-next-stop, from `etas[0].eta_seconds`, per Phase 0's established contract) — the new distance figures are additive, not a replacement, to avoid an unrequested semantic change.
+
+### Testing
+- 9 new tests in `tests/test_delivery.py::TestEtaService`: geometry coordinate-order conversion, `geometry: None` on non-ORS legs, `cumulative_km` tracking, cache hit (ORS mock called once across two identical calls), cache invalidation by GPS move / stop-set change, cache tolerating sub-threshold GPS jitter, cache bypass when `assignment_id` is omitted, and `calculate_travelled_distance_km` (zero when nothing passed, positive sum otherwise). Full suite: 40/40 passing.
+- Manual: dev server + browser — confirmed no console errors and correct graceful fallback (old straight-line-through-stops behavior, unchanged) in this sandbox, which has no TTAS/ORS credentials configured so `/api/eta` returns `{"error": "Vehicle GPS not available", "etas": []}` for every vehicle. The road-geometry/caching logic itself could only be exercised through the mocked unit tests in this environment.
+
+### Remaining Technical Debt / Deferred
+- `travelled_distance_km` is straight-line (haversine), not road-following — an intentional trade-off to avoid extra ORS calls for a secondary metric; flagged in case a later phase wants it more precise.
+- Route cache has no eviction/TTL — acceptable at this fleet's scale (40 vehicles' worth of tiny cache entries), not worth the complexity here.
+
+### Out of Scope
+- Alerts, WebSockets, new routing providers, backend/database redesign — reserved for later phases per `docs/MASTER_PLAN.md`.
+- Could not visually confirm real road polylines rendering in this sandbox (no ORS/TTAS credentials available) — recommend a manual check against the live Render deployment or a local `.env` with real credentials before considering this phase fully verified end-to-end.
+
+## 2026-07-30 — Dispatch Module Phase 1: Incremental Live Updates
+
+Rendering-only pass on the Dispatch dashboard's poll-driven refresh (`static/js/dashboard/{vehicle-list,map,timeline}.js`, small `main.js` call-site changes). No new endpoints, no schema change, no WebSockets, polling interval (12s) unchanged. Verified against the live code, not `SYSTEM.md`/`DELIVERY_MODULE.md`.
+
+### Fixed
+- **Vehicle list rebuilt from scratch every 12s poll** (`vehicle-list.js`) — `container.innerHTML = html` destroyed and recreated every card (and rebound every click listener) regardless of whether anything changed, resetting scroll position and hover/focus state. Now keeps a `Map<assignment_id, cardElement>`: creates only new cards, patches text/class/width on existing ones by comparing old vs. new values, removes cards for ids no longer present, and reorders via targeted `insertBefore` only when order actually changed. Click listeners are bound once per card at creation.
+- **Vehicle markers cleared and recreated every poll** (`map.js`) — `vehicleMarkerLayer.clearLayers()` + full rebuild destroyed marker identity (and any open popup) every 12s. Now diffs by assignment id: moves existing markers via `setLatLng`, patches the label/border color by writing directly to the existing icon's DOM node (no `setIcon`), and updates popup content via `popup.setContent()` — which Leaflet applies live even while the popup is open, instead of closing it. Same approach for the selected assignment's stop markers (full rebuild only when the stop-id set changes, i.e. on selection switch); the route polyline is skipped entirely when its coordinates haven't changed.
+- **Found and fixed while implementing the above**: `map.js::updateVehicles` read `gps.latitude`/`gps.longitude`, but `tracking_service.normalize_gps_position()` (`services/delivery/tracking_service.py`) has always output `lat`/`lng` — so vehicle markers were never actually placed on the map, independent of any rendering-strategy concern. Corrected to `gps.lat`/`gps.lng`.
+- **Timeline rebuilt from scratch on every poll while a vehicle was selected** (`timeline.js`) — same `innerHTML` replacement pattern, plus a real state-loss bug: `collapsed = isCompleted ? '' : 'open'` was recomputed from status on every render, so a dispatcher's manual expand/collapse of a stop was silently reverted on the next poll (≤12s later). Now keeps a `Map<stop_id, element>` scoped to the selected assignment: full rebuild only when the stop-id set changes (selection switch, or a stop inserted); otherwise patches the header (seq/name/status badge) directly and swaps only the detail/action-button body content when its generated HTML actually differs. The collapse/expand toggle and Advance/Skip/Cancel actions are bound once per stop via delegated listeners on creation, so they never need rebinding and are unaffected by later body-content patches — this is what fixes the collapse-state loss.
+- `main.js`'s `renderAll()` "no selection" branch bypassed the timeline module by setting `#timeline`'s `innerHTML` directly, which would have left `timeline.js`'s new node cache pointing at detached DOM. Added `DASH.timeline.clear()` (an alias for `render([], null, null)`) and routed that branch through it.
+
+### Remaining Technical Debt / Deferred
+- Timeline/vehicle-list reordering only handles add/remove/patch; if the *same* set of ids arrives in a different order on a same-key poll (structurally shouldn't happen — backend order is a stable `ORDER BY`, and stop order only changes via explicit reorder/insert actions that go through `refreshNow()`), the timeline won't reorder. Vehicle list already handles this case via `insertBefore` reconciliation; timeline was left simpler since its stop order is more stable. Flagged for Phase 3 if it ever surfaces.
+- `map.js::currentZoomAssignment` remains an unused variable (pre-existing, out of scope).
+
+### Out of Scope
+- Alerts, routing changes, WebSockets, polling-interval changes — reserved for Phases 2/4/5 per `docs/MASTER_PLAN.md`.
+- No new automated frontend tests were added (no JS test harness exists in this repo); verified manually via a running dev server + browser (see below) plus the existing `pytest tests/test_delivery.py` (unaffected, backend untouched except the one-line GPS field fix, which is frontend-only).
+
+## 2026-07-30 — Dispatch Module Phase 0: Bug Fixes
+
+Bug-fix-only stabilization pass on the Dispatch/delivery-dashboard module (`templates/delivery-dashboard.html`, `static/js/dashboard/*.js`, `services/delivery/*.py`), verified against actual code rather than the (partly stale) `SYSTEM.md`/`DELIVERY_MODULE.md` docs. No UI redesign, no schema change, no new features.
+
+### Fixed
+- **ETA contract mismatch** (`services/delivery/eta_service.py::calculate_etas_for_stops`) — backend never returned the `stop_id`/`eta_seconds` fields the dashboard frontend (`main.js`, `timeline.js`) reads, so stop ETAs never rendered and the summary bar showed `NaN`. Added both fields (mirroring existing `id`/`cumulative_sec`) without removing the originals.
+- **Dead header refresh button** — `#refreshNowBtn` in `delivery-dashboard.html` had no event listener. Bound it to the existing `DASH.state.refreshNow()` (same mechanism `#refreshGPSBtn` already used).
+- **Status/Plan filters could never return results** — `get_dashboard_data()` (`execution_service.py`) never selected a `plan_status` field at all (every card silently defaulted to "confirmed"), and separately its `WHERE dp.status IN ('confirmed','executing')` scope (intentional — an active-ops board) meant "Draft/Completed/Cancelled" could never match. Added `dp.status AS plan_status` to the query, removed the three unreachable options from `#filterStatus`, and filtered the Plan dropdown (`main.js::populateFilterPlans`) to only list confirmed/executing plans.
+- **Driver source duplication** — the dashboard showed only `vehicles.current_driver` (a generic default edited in Vehicle Management), ignoring the dispatcher-assigned, per-delivery `vehicle_assignments.driver_id → drivers.name` that Plan Builder already treats as authoritative and override-capable. `get_dashboard_data()` now `LEFT JOIN`s `drivers` and returns `COALESCE(NULLIF(d.name,''), v.current_driver)` under the same `current_driver` field name (no frontend change needed).
+- **Dead `enroute` UI handling** — `execution_service.advance_stop()` only ever implements `planned → arrived → completed`; nothing sets `status = 'enroute'`, confirmed by the existing passing test `test_advance_planned_to_completed` and by `CHANGELOG.md`'s own prior description of `advance_stop`. Removed the unreachable `enroute` branches from `vehicle-list.js`, `timeline.js`, `map.js` status maps and their corresponding `delivery-dashboard.css` classes. Backend `IN ('planned', 'enroute', 'arrived')` clauses left untouched (harmless, matches the schema's documented status domain).
+
+### Known Issues / Out of Scope
+- `SYSTEM.md`/`DELIVERY_MODULE.md` still document a 4-state `planned → enroute → arrived → completed` lifecycle that doesn't match the shipped 2-step `advance_stop`; docs were not updated as part of this bug-fix-only pass.
+- `docs/dispatch/PHASE_0_BUG_FIXES.md` / `DISPATCH_ARCHITECTURE.md` referenced by the originating ticket don't exist in this repo — only `docs/MASTER_PLAN.md` + `docs/PHASE_1..5_*.md` (phases 1–5, no Phase 0 doc).
+- `vehicle-list.js::statusClass()` and `delivery-dashboard.css` still contain a few other status-map entries (`arrived`, `skipped`, `planned` on `plan_status`-scoped elements) that are dead for the same reason `enroute` was — out of scope since only `enroute` was flagged.
+
 ## 2026-07-29 — Architecture Refactor: Frontend Namespace, DatabaseManager, AABB Unification, `app/` Package Extraction
 
 Implements Phase 1 items 1–6, Phase 2 items 7–8, Phase 3 items 13–15, and Phase 4 items 17–20 of `CODEBASE_ANALYSIS_REPORT.md`'s Priority Action Items (see that file's updated status column for the full picture, including what's still pending).

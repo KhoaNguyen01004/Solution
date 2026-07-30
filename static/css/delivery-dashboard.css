@@ -164,6 +164,75 @@
     border-radius: 10px;
 }
 
+/* ── Attention (stuck / stale-GPS proxies) ────────────────── */
+.attention-sort-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10.5px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    white-space: nowrap;
+    margin-left: 8px;
+}
+
+.attention-sort-toggle input {
+    cursor: pointer;
+}
+
+.attention-strip {
+    display: flex;
+    gap: 6px;
+    padding: 8px;
+    overflow-x: auto;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.attention-chip {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 5px 10px;
+    background: rgba(239,68,68,0.1);
+    border: 1px solid rgba(239,68,68,0.3);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: background var(--transition);
+}
+
+.attention-chip:hover {
+    background: rgba(239,68,68,0.18);
+}
+
+.attention-chip-plate {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.attention-chip-reason {
+    font-size: 9.5px;
+    color: #f87171;
+}
+
+.vc-vehicle-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.vc-attention-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #f87171;
+    box-shadow: 0 0 0 2px rgba(239,68,68,0.2);
+    flex-shrink: 0;
+}
+
 .vehicle-list {
     flex: 1;
     overflow-y: auto;
@@ -257,7 +326,6 @@
 }
 
 .vc-progress-fill.status-completed { background: var(--success); }
-.vc-progress-fill.status-enroute { background: #22d3ee; }
 .vc-progress-fill.status-arrived { background: #fb923c; }
 .vc-progress-fill.status-confirmed { background: var(--accent); }
 .vc-progress-fill.status-draft { background: #9ca3af; }
@@ -291,8 +359,7 @@
     color: var(--accent);
 }
 
-.status-badge.status-executing,
-.status-badge.status-enroute {
+.status-badge.status-executing {
     background: rgba(34,211,238,0.15);
     color: #22d3ee;
 }
@@ -358,6 +425,12 @@
 
 .map-control-btn:hover {
     background: rgba(255,255,255,0.12);
+}
+
+.map-control-btn.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
 }
 
 /* Vehicle info bar */
@@ -428,6 +501,59 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+}
+
+/* ── Pinned current-stop card ─────────────────────────────── */
+.current-stop-card {
+    flex-shrink: 0;
+    padding: 10px 12px;
+    background: rgba(56,139,253,0.06);
+    border-bottom: 1px solid var(--border);
+    font-size: 11.5px;
+}
+
+.cs-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+}
+
+.cs-label {
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+}
+
+.cs-station {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+}
+
+.cs-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+
+.cs-phone {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.cs-phone:hover {
+    text-decoration: underline;
+}
+
+.cs-eta {
+    color: var(--text-primary);
+    font-weight: 600;
 }
 
 /* Timeline items */
@@ -557,6 +683,90 @@
     font-size: 10.5px;
 }
 
+.tel-link {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.tel-link:hover {
+    text-decoration: underline;
+}
+
+/* ── Inline reason row (replaces prompt()/alert() for skip/cancel) ── */
+.timeline-reason-row {
+    display: flex;
+    gap: 4px;
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+}
+
+.timeline-reason-input {
+    flex: 1;
+    min-width: 0;
+    height: 26px;
+    padding: 0 8px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 11px;
+    font-family: inherit;
+}
+
+.timeline-reason-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.timeline-reason-row button {
+    height: 26px;
+    padding: 0 10px;
+    font-size: 10.5px;
+    flex-shrink: 0;
+}
+
+/* ── Lazy read-only photo gallery ─────────────────────────── */
+.timeline-photos-wrap {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+}
+
+.timeline-photos-toggle {
+    height: 26px;
+    padding: 0 10px;
+    font-size: 10.5px;
+}
+
+.timeline-photos {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.timeline-photos-status {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.timeline-photo-thumb {
+    display: block;
+    width: 56px;
+    height: 56px;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    border: 1px solid var(--border);
+}
+
+.timeline-photo-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
 /* ── Map markers (Leaflet overrides) ──────────────────────── */
 .vehicle-marker-label {
     background: var(--surface-2);
@@ -582,7 +792,6 @@
 .stop-marker-icon.completed { background: var(--success); }
 .stop-marker-icon.current { background: #fb923c; width: 18px; height: 18px; }
 .stop-marker-icon.planned { background: #9ca3af; }
-.stop-marker-icon.enroute { background: #22d3ee; }
 .stop-marker-icon.arrived { background: #fb923c; }
 .stop-marker-icon.skipped { background: #eab308; }
 .stop-marker-icon.cancelled { background: #f87171; }

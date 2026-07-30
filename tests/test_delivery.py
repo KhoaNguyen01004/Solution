@@ -104,6 +104,12 @@ class TestEtaService:
         assert result["source"] == "ors"
         assert result["distance_km"] == 15.0
         assert result["duration_sec"] == 900
+        # GeoJSON [lng, lat] must be converted to Leaflet [lat, lng]
+        assert result["geometry"] == [[10.8, 106.6], [10.9, 106.7]]
+
+    def test_calculate_eta_no_api_key_has_no_geometry(self):
+        result = eta_service.calculate_eta("", "", 10.8, 106.6, 10.9, 106.7)
+        assert result["geometry"] is None
 
     @patch("services.delivery.eta_service.requests.get")
     def test_calculate_eta_ors_failure_fallback(self, mock_get):
@@ -130,6 +136,83 @@ class TestEtaService:
 
     def test_calculate_etas_empty_list(self):
         assert eta_service.calculate_etas_for_stops("", "", 10.8, 106.6, []) == []
+
+    @patch("services.delivery.eta_service.calculate_eta")
+    def test_calculate_etas_tracks_cumulative_km_and_geometry(self, mock_calc_eta):
+        mock_calc_eta.return_value = {
+            "source": "ors", "distance_km": 5.0, "duration_sec": 300,
+            "geometry": [[10.8, 106.6], [10.81, 106.61]],
+        }
+        stops = [{"id": 1, "lat": 10.81, "lng": 106.61}, {"id": 2, "lat": 10.82, "lng": 106.62}]
+        results = eta_service.calculate_etas_for_stops("", "", 10.8, 106.6, stops)
+        assert results[0]["cumulative_km"] == 5.0
+        assert results[1]["cumulative_km"] == 10.0
+        assert results[0]["geometry"] == [[10.8, 106.6], [10.81, 106.61]]
+
+    @patch("services.delivery.eta_service.calculate_eta")
+    def test_route_cache_hit_skips_recompute(self, mock_calc_eta):
+        mock_calc_eta.return_value = {"source": "haversine", "distance_km": 5.0, "duration_sec": 300, "geometry": None}
+        stops = [{"id": 1, "lat": 10.81, "lng": 106.61}]
+
+        r1 = eta_service.calculate_etas_for_stops("", "", 10.8, 106.6, stops, assignment_id=90001)
+        r2 = eta_service.calculate_etas_for_stops("", "", 10.8, 106.6, stops, assignment_id=90001)
+
+        assert mock_calc_eta.call_count == 1
+        assert r1 == r2
+
+    @patch("services.delivery.eta_service.calculate_eta")
+    def test_route_cache_invalidated_by_gps_move(self, mock_calc_eta):
+        mock_calc_eta.return_value = {"source": "haversine", "distance_km": 5.0, "duration_sec": 300, "geometry": None}
+        stops = [{"id": 1, "lat": 10.81, "lng": 106.61}]
+
+        eta_service.calculate_etas_for_stops("", "", 10.8, 106.6, stops, assignment_id=90002)
+        eta_service.calculate_etas_for_stops("", "", 11.5, 107.3, stops, assignment_id=90002)
+
+        assert mock_calc_eta.call_count == 2
+
+    @patch("services.delivery.eta_service.calculate_eta")
+    def test_route_cache_tolerates_tiny_gps_jitter(self, mock_calc_eta):
+        mock_calc_eta.return_value = {"source": "haversine", "distance_km": 5.0, "duration_sec": 300, "geometry": None}
+        stops = [{"id": 1, "lat": 10.81, "lng": 106.61}]
+
+        eta_service.calculate_etas_for_stops("", "", 10.80000, 106.60000, stops, assignment_id=90003)
+        eta_service.calculate_etas_for_stops("", "", 10.80001, 106.60001, stops, assignment_id=90003)
+
+        assert mock_calc_eta.call_count == 1
+
+    @patch("services.delivery.eta_service.calculate_eta")
+    def test_route_cache_invalidated_by_stop_change(self, mock_calc_eta):
+        mock_calc_eta.return_value = {"source": "haversine", "distance_km": 5.0, "duration_sec": 300, "geometry": None}
+        stops1 = [{"id": 1, "lat": 10.81, "lng": 106.61}]
+        stops2 = [{"id": 2, "lat": 10.82, "lng": 106.62}]
+
+        eta_service.calculate_etas_for_stops("", "", 10.8, 106.6, stops1, assignment_id=90004)
+        eta_service.calculate_etas_for_stops("", "", 10.8, 106.6, stops2, assignment_id=90004)
+
+        assert mock_calc_eta.call_count == 2
+
+    @patch("services.delivery.eta_service.calculate_eta")
+    def test_route_cache_bypassed_without_assignment_id(self, mock_calc_eta):
+        mock_calc_eta.return_value = {"source": "haversine", "distance_km": 5.0, "duration_sec": 300, "geometry": None}
+        stops = [{"id": 1, "lat": 10.81, "lng": 106.61}]
+
+        eta_service.calculate_etas_for_stops("", "", 10.8, 106.6, stops)
+        eta_service.calculate_etas_for_stops("", "", 10.8, 106.6, stops)
+
+        assert mock_calc_eta.call_count == 2
+
+    def test_travelled_distance_zero_when_nothing_passed(self):
+        stops = [{"id": 1, "lat": 10.81, "lng": 106.61, "planned_sequence": 1, "execution_status": "planned"}]
+        assert eta_service.calculate_travelled_distance_km(stops, 10.8, 106.6) == 0.0
+
+    def test_travelled_distance_sums_passed_stops(self):
+        stops = [
+            {"id": 1, "lat": 10.81, "lng": 106.61, "planned_sequence": 1, "execution_status": "completed"},
+            {"id": 2, "lat": 10.82, "lng": 106.62, "planned_sequence": 2, "execution_status": "skipped"},
+            {"id": 3, "lat": 10.83, "lng": 106.63, "planned_sequence": 3, "execution_status": "planned"},
+        ]
+        result = eta_service.calculate_travelled_distance_km(stops, 10.82, 106.62)
+        assert result > 0
 
 
 # ===========================================================================
