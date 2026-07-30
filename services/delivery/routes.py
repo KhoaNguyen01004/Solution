@@ -101,6 +101,22 @@ def delete_plan(plan_id):
     return jsonify({"ok": True})
 
 
+@bp.route("/plans/batch-delete", methods=["POST"])
+def batch_delete_plans():
+    data = request.get_json(force=True)
+    plan_ids = data.get("plan_ids", [])
+    if not plan_ids:
+        return jsonify({"error": "plan_ids is required"}), 400
+    plan_service.delete_plans(_db(), plan_ids)
+    return jsonify({"ok": True})
+
+
+@bp.route("/plans/clear", methods=["POST"])
+def clear_plans():
+    plan_service.clear_plans(_db())
+    return jsonify({"ok": True})
+
+
 @bp.route("/plans/<int:plan_id>/confirm", methods=["POST"])
 def confirm_plan(plan_id):
     ok = plan_service.update_plan(_db(), plan_id, status="confirmed")

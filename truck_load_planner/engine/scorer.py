@@ -6,9 +6,16 @@ from .container import Container
 from .geometry import AABB
 
 SCORING_WEIGHTS = {
-    "usable_space": 1,
+    # usable_space boosted 3x (was 1) so its dead-strip penalty (-1500 now,
+    # was -500) reliably outweighs a high contact_area score (max 1000) —
+    # previously a placement with great contact could still win despite
+    # leaving an unusable gap for remaining packages.
+    "usable_space": 3,
     "contact_area": 1000,
-    "x_position": -200,
+    # x_position now measures row/slice completion (higher = better; see
+    # _score_x_position), not "prefer small xmin" — weight sign flipped
+    # accordingly from the pre-Phase-2 version.
+    "x_position": 200,
     "weight_balance": 50,
     "stack_level": 1,
     "tower_height": 1,
@@ -132,6 +139,9 @@ def _score_package_contact(aabb: AABB, others: list[AABB]) -> float:
 
     return min(total_contact / max_possible, 1.0)
 
+# layer0-vs-layer1 gap kept small (contra a naive 1000/300 split) so contact_area/
+# usable_space can outweigh it when stacking is genuinely the better placement;
+# the steep drop below layer2 still discourages deep, less-stable towers.
 def _score_stack_and_tower(aabb: AABB, others_with_layers: list[tuple[AABB, int]]) -> tuple[float, float]:
     layer = 0
     if aabb.zmin > 0.001:
@@ -145,11 +155,11 @@ def _score_stack_and_tower(aabb: AABB, others_with_layers: list[tuple[AABB, int]
             layer = 1
             
     if layer == 0:
-        stack_score = 1000.0
+        stack_score = 200.0
     elif layer == 1:
-        stack_score = 300.0
+        stack_score = 150.0
     elif layer == 2:
-        stack_score = 100.0
+        stack_score = 50.0
     else:
         stack_score = -500.0
 
@@ -165,11 +175,11 @@ def _score_stack_and_tower(aabb: AABB, others_with_layers: list[tuple[AABB, int]
             tower_layer = max(tower_layer, o_layer)
 
     if tower_layer == 0:
-        tower_score = 500.0
+        tower_score = 100.0
     elif tower_layer == 1:
-        tower_score = 300.0
+        tower_score = 60.0
     elif tower_layer == 2:
-        tower_score = 0.0
+        tower_score = -50.0
     elif tower_layer == 3:
         tower_score = -300.0
     else:
@@ -266,6 +276,39 @@ def _score_usable_space(
     )
     return min(500.0, usable_ratio * 350.0 + width_ratio * 150.0)
 
+def _score_x_position(aabb: AABB, others: list[AABB], container: Container) -> float:
+    """Row/slice-completion: reward a candidate that closes out the width
+    at the deepest X reached so far (within its own height band), instead
+    of skipping past an open row into fresh container depth. Restricted to
+    packages whose Z-range overlaps the candidate's — a stack elsewhere at
+    a different height shouldn't count against this candidate's row."""
+    if container.width <= 0 or container.length <= 0:
+        return 0.0
+
+    same_band = [
+        o for o in others
+        if _overlap_len(aabb.zmin, aabb.zmax, o.zmin, o.zmax) > 0
+    ]
+    front_x = max((o.xmax for o in same_band), default=0.0)
+
+    at_front = front_x == 0.0 or abs(aabb.xmin - front_x) <= _FACE_TOLERANCE
+    if not at_front:
+        # Skipping ahead of the still-open row — no completion bonus, but
+        # still mildly prefer shallower depth so placement keeps advancing
+        # once a row is actually closed out.
+        return max(0.0, 1.0 - aabb.xmin / container.length)
+
+    covered_width = sum(
+        max(0.0, o.ymax - o.ymin) for o in same_band
+        if o.xmin <= front_x + _FACE_TOLERANCE and o.xmax >= front_x - _FACE_TOLERANCE
+    )
+    remaining_width = max(0.0, container.width - covered_width)
+    if remaining_width <= 0:
+        return 0.0
+
+    candidate_width = aabb.ymax - aabb.ymin
+    return min(1.0, candidate_width / remaining_width)
+
 def score_placement(
     package: Package,
     x: float,
@@ -289,7 +332,7 @@ def score_placement(
     raw = {
         "usable_space": _score_usable_space(aabb, others, container, remaining_packages),
         "contact_area": _score_package_contact(aabb, others),
-        "x_position": aabb.xmin / container.length if container.length > 0 else 0.0,
+        "x_position": _score_x_position(aabb, others, container),
         "weight_balance": _score_y_balance(aabb, package, placements, container),
         "stack_level": stack_score,
         "tower_height": tower_score,

@@ -240,18 +240,25 @@ class OptimizedStrategy:
         ]
 
     def _weight_profiles(self) -> list[tuple[str, dict[str, float]]]:
+        # usable_space overrides are independently-tuned absolute values,
+        # not multipliers relative to base — left as originally calibrated
+        # (2.0/2.5) rather than scaled with the Phase 2 base bump (1->3),
+        # which would double-apply the same boost and overweight this term
+        # within these profiles. x_position's sign is flipped to match its
+        # Phase 2 semantics change (was "prefer small xmin", now "reward
+        # slice completion" — higher is better either way), magnitude kept.
         base = dict(scorer_mod.SCORING_WEIGHTS)
         dense = dict(base)
         dense.update({
             "usable_space": 2.0,
-            "x_position": -350.0,
+            "x_position": 350.0,
             "stack_level": 0.35,
             "tower_height": 0.35,
         })
         stack_friendly = dict(base)
         stack_friendly.update({
             "usable_space": 2.5,
-            "x_position": -300.0,
+            "x_position": 300.0,
             "contact_area": 1200.0,
             "stack_level": 0.15,
             "tower_height": 0.2,
@@ -288,7 +295,9 @@ class OptimizedStrategy:
             for weight_name, weights in self._weight_profiles():
                 scorer_mod.SCORING_WEIGHTS.clear()
                 scorer_mod.SCORING_WEIGHTS.update(weights)
-                planner._candidate_limit = None
+                # Respect whatever candidate_limit the caller configured
+                # (e.g. the "fast" profile's cap) instead of discarding it —
+                # previously this unconditionally cleared it on every trial.
 
                 for order_name, ordered in self._orders(packages):
                     if cancel_callback and cancel_callback():

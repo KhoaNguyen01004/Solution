@@ -109,6 +109,21 @@ def delete_plan(db_path: str, plan_id: int):
         return c.rowcount > 0
 
 
+def delete_plans(db_path: str, plan_ids: list[int]):
+    with DatabaseManager(db_path).connect() as conn:
+        c = conn.cursor()
+        placeholders = ",".join("?" * len(plan_ids))
+        c.execute(f"DELETE FROM delivery_plans WHERE id IN ({placeholders})", plan_ids)
+        return c.rowcount > 0
+
+
+def clear_plans(db_path: str):
+    with DatabaseManager(db_path).connect() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM delivery_plans")
+        return True
+
+
 # ---- Vehicle Assignments ----
 
 def list_assignments(db_path: str, plan_id: Optional[int] = None):

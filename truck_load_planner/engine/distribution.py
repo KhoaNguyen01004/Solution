@@ -2,6 +2,12 @@ from truck_load_planner.engine.package import Package
 from truck_load_planner.engine.placement import Placement
 from truck_load_planner.engine.trace_mutations import M
 from truck_load_planner.engine.candidate_points import generate_candidates, tighten_position
+from truck_load_planner.engine.auto_arrange import _run_ordered_pass
+from truck_load_planner.engine.vehicle_selection import (
+    SmallestVehicleThatFitsStrategy,
+    vehicle_capacity,
+)
+
 
 def reassign_load_sequences(placements: list) -> None:
     indexed = list(enumerate(placements))
@@ -51,14 +57,16 @@ def find_best_for_pkg(pkg, vinfo, session, remaining_pkgs=None):
 
 
 def _vehicle_capacity(vinfo):
-    vol_mm3 = (vinfo.get("cargo_length_mm", 0) *
-               vinfo.get("cargo_width_mm", 0) *
-               vinfo.get("cargo_height_mm", 0))
-    payload = vinfo.get("payload_kg", 0)
-    return vol_mm3 * max(payload, 1)
+    return vehicle_capacity(vinfo)
 
 
-def distribute_across_vehicles(packages, vehicle_sessions, debug=False, profile=None):
+def distribute_across_vehicles(
+    packages,
+    vehicle_sessions,
+    debug=False,
+    profile=None,
+    strategy=None,
+):
     sorted_pkgs = sorted(
         packages,
         key=lambda p: (
@@ -70,50 +78,50 @@ def distribute_across_vehicles(packages, vehicle_sessions, debug=False, profile=
         ),
     )
 
-    sorted_vehicles = sorted(
-        vehicle_sessions,
-        key=lambda vs: _vehicle_capacity(vs[0]),
-        reverse=True,
-    )
+    if strategy is None:
+        strategy = SmallestVehicleThatFitsStrategy()
+    selected = strategy.select_vehicles(sorted_pkgs, vehicle_sessions, profile)
 
     placed = 0
-    failed = 0
-    unplaced = []
     placed_vehicle_map = {vinfo["vehicle_id"]: [] for vinfo, _ in vehicle_sessions}
-
     remaining_pkgs = list(sorted_pkgs)
 
-    for vinfo, session in sorted_vehicles:
+    for vinfo, session in selected:
         if not remaining_pkgs:
             break
 
-        pool = list(remaining_pkgs)
-        remaining_pkgs = []
-
-        for i, pkg in enumerate(pool):
-            future_pkgs = pool[i + 1:] + remaining_pkgs
-            score, pos = find_best_for_pkg(pkg, vinfo, session, future_pkgs)
-            if pos is not None:
-                pkg_name = pkg.name if pkg else "?"
-                p_result = session._planner.place_package(
-                    pkg, pos["x"], pos["y"], pos["z"], pos["rotation"],
-                    _trace_reason=f"distribute_across_vehicles/{pkg_name}",
-                )
-                if p_result.valid:
+        preplaced = bool(session._planner.placements)
+        if preplaced:
+            for pl in session._planner.placements:
+                if pl.package:
                     placed += 1
-                    placed_vehicle_map[vinfo["vehicle_id"]].append(pkg.name)
-                else:
-                    unplaced.append(pkg.name)
-                    remaining_pkgs.append(pkg)
-            else:
-                remaining_pkgs.append(pkg)
+                    placed_vehicle_map[vinfo["vehicle_id"]].append(pl.package.name)
+                    if pl.package in remaining_pkgs:
+                        remaining_pkgs.remove(pl.package)
+            continue
 
-    # In original logic, failed was len(unplaced) but unplaced didn't cover pure rejections correctly if we just matched the old code,
-    # let's just make it len(remaining_pkgs) to be correct.
+        # Delegate the per-vehicle placement loop to the same
+        # candidate/tighten/validate/score/place pipeline the
+        # single-vehicle path uses (auto_arrange.py::_run_ordered_pass)
+        # instead of a second hand-written copy of it, so scoring/
+        # stacking fixes apply identically to both paths.
+        pool = list(remaining_pkgs)
+        result = _run_ordered_pass(
+            session._planner, pool,
+            f"distribute_across_vehicles/{vinfo['vehicle_id']}",
+            debug=debug,
+        )
+        placed += result.placed_packages
+        for pl in session._planner.placements:
+            if pl.package:
+                placed_vehicle_map[vinfo["vehicle_id"]].append(pl.package.name)
+        still_unplaced = set(result.unplaced_packages)
+        remaining_pkgs = [p for p in pool if p.name in still_unplaced]
+
     failed = len(remaining_pkgs)
     unplaced = [p.name for p in remaining_pkgs]
 
-    for _, session in sorted_vehicles:
+    for _, session in selected:
         pls = session._planner.placements
         if pls:
             reassign_load_sequences(pls)

@@ -709,11 +709,16 @@
       "static_js_truck_load_planner_loadplannerapp",
       "static_js_truck_load_planner_loadplannerapp_addshipmentitem",
       "static_js_truck_load_planner_loadplannerapp_canceleditshipment",
+      "static_js_truck_load_planner_loadplannerapp_cancelpackageeditor",
       "static_js_truck_load_planner_loadplannerapp_cancelpalettedrag",
       "static_js_truck_load_planner_loadplannerapp_clearpreview",
       "static_js_truck_load_planner_loadplannerapp_constructor",
       "static_js_truck_load_planner_loadplannerapp_createshipment",
+      "static_js_truck_load_planner_loadplannerapp_deletepackage",
       "static_js_truck_load_planner_loadplannerapp_editshipment",
+      "static_js_truck_load_planner_loadplannerapp_filterpackages",
+      "static_js_truck_load_planner_loadplannerapp_getmaxqty",
+      "static_js_truck_load_planner_loadplannerapp_getpackagevehiclemap",
       "static_js_truck_load_planner_loadplannerapp_initcanvas",
       "static_js_truck_load_planner_loadplannerapp_nextpackagecolor",
       "static_js_truck_load_planner_loadplannerapp_ondblclick",
@@ -726,11 +731,14 @@
       "static_js_truck_load_planner_loadplannerapp_openhelp",
       "static_js_truck_load_planner_loadplannerapp_openpackageeditor",
       "static_js_truck_load_planner_loadplannerapp_populateaddpackageselect",
+      "static_js_truck_load_planner_loadplannerapp_populatepackagelist",
       "static_js_truck_load_planner_loadplannerapp_removeshipmentitem",
       "static_js_truck_load_planner_loadplannerapp_renderedititems",
       "static_js_truck_load_planner_loadplannerapp_resizecanvas",
       "static_js_truck_load_planner_loadplannerapp_saveasplan",
+      "static_js_truck_load_planner_loadplannerapp_savepackage",
       "static_js_truck_load_planner_loadplannerapp_saveplan",
+      "static_js_truck_load_planner_loadplannerapp_setpkgtab",
       "static_js_truck_load_planner_loadplannerapp_setupevents",
       "static_js_truck_load_planner_loadplannerapp_showshipmenteditform",
       "static_js_truck_load_planner_loadplannerapp_toggle3dfullscreen",
@@ -855,6 +863,10 @@
       "static_js_vehicle_management_updatebulkdeletebutton"
     ],
     "16": [
+      "manual_test_build_engine_packages",
+      "manual_test_load_db",
+      "manual_test_rationale_557",
+      "manual_test_run_comparison",
       "tests_test_all",
       "tests_test_all_avg",
       "tests_test_all_cmd_benchmark_distribution",
@@ -1059,18 +1071,28 @@
       "truck_load_planner_engine_candidate_points_tighten_position"
     ],
     "22": [
+      "static_js_truck_load_planner_loadplannerapp_deleteselected",
       "static_js_truck_load_planner_loadplannerapp_deselectallshapes",
       "static_js_truck_load_planner_loadplannerapp_deselectpackage",
+      "static_js_truck_load_planner_loadplannerapp_duplicateselected",
       "static_js_truck_load_planner_loadplannerapp_fittoscreen",
       "static_js_truck_load_planner_loadplannerapp_focusonpackage",
       "static_js_truck_load_planner_loadplannerapp_oncanvasclick",
+      "static_js_truck_load_planner_loadplannerapp_onkeydown",
       "static_js_truck_load_planner_loadplannerapp_onpackagecardclick",
       "static_js_truck_load_planner_loadplannerapp_onwheel",
+      "static_js_truck_load_planner_loadplannerapp_pushundo",
+      "static_js_truck_load_planner_loadplannerapp_redo",
       "static_js_truck_load_planner_loadplannerapp_rendercanvas",
       "static_js_truck_load_planner_loadplannerapp_resetview",
+      "static_js_truck_load_planner_loadplannerapp_rotateselected",
+      "static_js_truck_load_planner_loadplannerapp_showinspector",
       "static_js_truck_load_planner_loadplannerapp_switchview",
       "static_js_truck_load_planner_loadplannerapp_syncpackagecardhighlight",
       "static_js_truck_load_planner_loadplannerapp_togglegrid",
+      "static_js_truck_load_planner_loadplannerapp_undo",
+      "static_js_truck_load_planner_loadplannerapp_updateselectedposition",
+      "static_js_truck_load_planner_loadplannerapp_updateselectedrotation",
       "static_js_truck_load_planner_loadplannerapp_updatestatusbarscale",
       "static_js_truck_load_planner_loadplannerapp_updatestatusbarzoom",
       "static_js_truck_load_planner_loadplannerapp_zoomin",
@@ -1355,19 +1377,15 @@
     ],
     "35": [
       "manual_test",
-      "manual_test_build_engine_packages",
       "manual_test_build_placement_dict",
-      "manual_test_load_db",
       "manual_test_log_instrument",
       "manual_test_pp_placement",
       "manual_test_print_engine_stats",
       "manual_test_rationale_1",
       "manual_test_rationale_107",
       "manual_test_rationale_532",
-      "manual_test_rationale_557",
       "manual_test_rationale_82",
       "manual_test_run_benchmark",
-      "manual_test_run_comparison",
       "manual_test_run_test",
       "tests_test_auto_arrange_e2e",
       "tests_test_auto_arrange_e2e_make_session",
@@ -1419,29 +1437,21 @@
     "38": [
       "static_js_truck_load_planner",
       "static_js_truck_load_planner_api",
-      "static_js_truck_load_planner_loadplannerapp_cancelpackageeditor",
       "static_js_truck_load_planner_loadplannerapp_clearallpackages",
       "static_js_truck_load_planner_loadplannerapp_closemodal",
       "static_js_truck_load_planner_loadplannerapp_confirmsave",
-      "static_js_truck_load_planner_loadplannerapp_deletepackage",
       "static_js_truck_load_planner_loadplannerapp_deselectvehicle",
-      "static_js_truck_load_planner_loadplannerapp_filterpackages",
-      "static_js_truck_load_planner_loadplannerapp_getmaxqty",
-      "static_js_truck_load_planner_loadplannerapp_getpackagevehiclemap",
       "static_js_truck_load_planner_loadplannerapp_init",
       "static_js_truck_load_planner_loadplannerapp_loaddata",
       "static_js_truck_load_planner_loadplannerapp_loadplan",
       "static_js_truck_load_planner_loadplannerapp_openloaddialog",
       "static_js_truck_load_planner_loadplannerapp_openshipmentselector",
       "static_js_truck_load_planner_loadplannerapp_openvehicleselector",
-      "static_js_truck_load_planner_loadplannerapp_populatepackagelist",
       "static_js_truck_load_planner_loadplannerapp_populateplanlist",
       "static_js_truck_load_planner_loadplannerapp_populateshipmentlist",
       "static_js_truck_load_planner_loadplannerapp_populatevehiclelist",
-      "static_js_truck_load_planner_loadplannerapp_savepackage",
       "static_js_truck_load_planner_loadplannerapp_saveshipment",
-      "static_js_truck_load_planner_loadplannerapp_selectshipment",
-      "static_js_truck_load_planner_loadplannerapp_setpkgtab"
+      "static_js_truck_load_planner_loadplannerapp_selectshipment"
     ],
     "39": [
       "static_js_dashboard_api",
@@ -1524,10 +1534,15 @@
     "44": [
       "static_js_truck_load_planner_loadplannerapp_exportplan",
       "static_js_truck_load_planner_loadplannerapp_getcontainerdims",
+      "static_js_truck_load_planner_loadplannerapp_gettotalpackagecount",
       "static_js_truck_load_planner_loadplannerapp_showmeasurement",
       "static_js_truck_load_planner_loadplannerapp_stepcreateanimmesh",
       "static_js_truck_load_planner_loadplannerapp_updatedoorstatus",
+      "static_js_truck_load_planner_loadplannerapp_updatesequence",
+      "static_js_truck_load_planner_loadplannerapp_updatestatus",
+      "static_js_truck_load_planner_loadplannerapp_updatetotalsorted",
       "static_js_truck_load_planner_loadplannerapp_updatevalidationui",
+      "static_js_truck_load_planner_loadplannerapp_updatevehicleinfo",
       "static_js_truck_load_planner_loadplannerapp_validateallplacements"
     ],
     "45": [
@@ -1656,23 +1671,6 @@
     ],
     "67": [
       "truck_load_planner_optimization_init"
-    ],
-    "68": [
-      "static_js_truck_load_planner_loadplannerapp_deleteselected",
-      "static_js_truck_load_planner_loadplannerapp_duplicateselected",
-      "static_js_truck_load_planner_loadplannerapp_gettotalpackagecount",
-      "static_js_truck_load_planner_loadplannerapp_onkeydown",
-      "static_js_truck_load_planner_loadplannerapp_pushundo",
-      "static_js_truck_load_planner_loadplannerapp_redo",
-      "static_js_truck_load_planner_loadplannerapp_rotateselected",
-      "static_js_truck_load_planner_loadplannerapp_showinspector",
-      "static_js_truck_load_planner_loadplannerapp_undo",
-      "static_js_truck_load_planner_loadplannerapp_updateselectedposition",
-      "static_js_truck_load_planner_loadplannerapp_updateselectedrotation",
-      "static_js_truck_load_planner_loadplannerapp_updatesequence",
-      "static_js_truck_load_planner_loadplannerapp_updatestatus",
-      "static_js_truck_load_planner_loadplannerapp_updatetotalsorted",
-      "static_js_truck_load_planner_loadplannerapp_updatevehicleinfo"
     ]
   },
   "cohesion": {
@@ -1688,17 +1686,17 @@
     "9": 0.07770582793709528,
     "10": 0.07536231884057971,
     "11": 0.10338164251207729,
-    "12": 0.11954022988505747,
+    "12": 0.10099573257467995,
     "13": 0.1066066066066066,
     "14": 0.11261261261261261,
     "15": 0.09759759759759759,
-    "16": 0.21169354838709678,
+    "16": 0.18571428571428572,
     "17": 0.08412698412698413,
     "18": 0.14616755793226383,
     "19": 0.16399286987522282,
     "20": 0.09259259259259259,
     "21": 0.1455026455026455,
-    "22": 0.20833333333333334,
+    "22": 0.13846153846153847,
     "23": 0.12307692307692308,
     "24": 0.09057971014492754,
     "25": 0.13043478260869565,
@@ -1711,16 +1709,16 @@
     "32": 0.29239766081871343,
     "33": 0.23976608187134502,
     "34": 0.1830065359477124,
-    "35": 0.15584415584415584,
+    "35": 0.17647058823529413,
     "36": 0.17647058823529413,
     "37": 0.2647058823529412,
-    "38": 0.12333333333333334,
+    "38": 0.16911764705882354,
     "39": 0.2571428571428571,
     "40": 0.20952380952380953,
     "41": 0.21794871794871795,
     "42": 0.15384615384615385,
     "43": 0.3484848484848485,
-    "44": 0.2857142857142857,
+    "44": 0.19696969696969696,
     "45": 0.24242424242424243,
     "46": 0.3888888888888889,
     "47": 0.4444444444444444,
@@ -1743,8 +1741,7 @@
     "64": 1.0,
     "65": 1.0,
     "66": 1.0,
-    "67": 1.0,
-    "68": 0.2
+    "67": 1.0
   },
   "gods": [
     {
@@ -1855,41 +1852,8 @@
       "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; bridges separate communities"
     }
   ],
-  "questions": [
-    {
-      "type": "bridge_node",
-      "question": "Why does `Package` connect `Package` to `DatabaseManager`, `test_scorer.py`, `distribute_across_vehicles`, `planner.py`, `GoogleSheetService`, `Container`, `LoadPlanningSession`, `debug_arrange.py`, `PlanningState`, `Planner`?",
-      "why": "High betweenness centrality (0.121) - this node is a cross-community bridge."
-    },
-    {
-      "type": "bridge_node",
-      "question": "Why does `DatabaseManager` connect `DatabaseManager` to `_create_plan`, `TestEtaService`?",
-      "why": "High betweenness centrality (0.105) - this node is a cross-community bridge."
-    },
-    {
-      "type": "bridge_node",
-      "question": "Why does `GoogleSheetService` connect `GoogleSheetService` to `fuel.py`?",
-      "why": "High betweenness centrality (0.055) - this node is a cross-community bridge."
-    },
-    {
-      "type": "verify_inferred",
-      "question": "Are the 9 inferred relationships involving `DatabaseManager` (e.g. with `FakeFileStorage` and `TestEtaService`) actually correct?",
-      "why": "`DatabaseManager` has 9 INFERRED edges - model-reasoned connections that need verification."
-    },
-    {
-      "type": "verify_inferred",
-      "question": "Are the 10 inferred relationships involving `Planner` (e.g. with `AutoArrangeResult` and `StrategyRegistry`) actually correct?",
-      "why": "`Planner` has 10 INFERRED edges - model-reasoned connections that need verification."
-    },
-    {
-      "type": "verify_inferred",
-      "question": "Are the 10 inferred relationships involving `Container` (e.g. with `Planner` and `PlanningState`) actually correct?",
-      "why": "`Container` has 10 INFERRED edges - model-reasoned connections that need verification."
-    },
-    {
-      "type": "isolated_nodes",
-      "question": "What connects `allEntries`, `filteredEntries`, `allVehicles` to the rest of the system?",
-      "why": "29 weakly-connected nodes found - possible documentation gaps or missing edges."
-    }
-  ]
+  "tokens": {
+    "input": 0,
+    "output": 0
+  }
 }

@@ -52,15 +52,15 @@ def test_determinism():
 def test_stack_and_tower_on_floor():
     aabb = _make_aabb(PACKAGE, 0, 0, 0, 0)
     stack, tower = _score_stack_and_tower(aabb, [])
-    assert stack == 1000.0
-    assert tower == 500.0
+    assert stack == 200.0
+    assert tower == 100.0
 
 
 def test_stack_and_tower_floating():
     aabb = _make_aabb(PACKAGE, 0, 0, 500, 0)
     stack, tower = _score_stack_and_tower(aabb, [])
-    assert stack == 300.0  # Assumes 1 layer since it's floating
-    assert tower == 300.0
+    assert stack == 150.0  # Assumes 1 layer since it's floating
+    assert tower == 60.0
 
 
 def test_stack_and_tower_stacked():
@@ -68,8 +68,8 @@ def test_stack_and_tower_stacked():
     others = _build_others_with_layers(placements)
     aabb = _make_aabb(PACKAGE, 0, 0, 600, 0)
     stack, tower = _score_stack_and_tower(aabb, others)
-    assert stack == 300.0
-    assert tower == 300.0
+    assert stack == 150.0
+    assert tower == 60.0
 
 
 def test_package_contact_no_neighbors():

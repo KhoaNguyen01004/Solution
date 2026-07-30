@@ -850,11 +850,13 @@ class LoadPlannerApp {
           }
           this._hideMeasurement();
 
-          this._validateAllPlacements().then(() => {
-            this.renderCanvas();
-            this.updateStatus();
-            if (this._show3D) this.update3DScene();
-          });
+          // updateStatus() runs its own client-only updateValidationUI()
+          // internally, so run it first — _validateAllPlacements' backend
+          // result must land last or it would be immediately overwritten.
+          this.renderCanvas();
+          this.updateStatus();
+          if (this._show3D) this.update3DScene();
+          this._validateAllPlacements(i);
         } catch (e) { console.error("dragend error", e); }
       });
 
@@ -1666,12 +1668,45 @@ class LoadPlannerApp {
 
   /* ═══════════════════════ VALIDATION ═══════════════════════ */
 
-  async _validateAllPlacements() {
+  /**
+   * Re-validate a placement against the real backend rules (collision,
+   * weight, support/stacking, door access) after a manual drag/rotate —
+   * the client-side checklist in updateValidationUI() has no support
+   * check at all, so a manually-created unsupported/unstable placement
+   * would otherwise still show "All checks passed".
+   * @param {number} [movedIndex] - index of the placement that just
+   *   changed; omitted falls back to the client-only checklist.
+   */
+  async _validateAllPlacements(movedIndex) {
     if (!this.currentVehicle || this.placements.length === 0) return;
-    // Re-validate all placements by checking the last one
-    // For comprehensive validation, we'd call the batch endpoint
-    // For now, just update the UI based on status calculation
-    this.updateValidationUI();
+    if (movedIndex == null || movedIndex < 0 || movedIndex >= this.placements.length) {
+      this.updateValidationUI();
+      return;
+    }
+    const moved = this.placements[movedIndex];
+    try {
+      const result = await API.validate({
+        vehicle_id: this.currentVehicle.vehicle_id,
+        package_id: moved.package_id,
+        x: moved.x, y: moved.y, z: moved.z || 0, rotation: moved.rotation || 0,
+        existing_placements: this.placements
+          .filter((_, idx) => idx !== movedIndex)
+          .map(p => ({
+            package_id: p.package_id,
+            x: p.x, y: p.y, z: p.z || 0,
+            rotation: p.rotation || 0,
+            _name: p._name,
+            _length: p._length,
+            _width: p._width,
+            _height: p._height,
+            _weight_kg: p._weight_kg,
+          })),
+      });
+      this.updateValidationUI(result);
+    } catch (e) {
+      console.error("_validateAllPlacements error", e);
+      this.updateValidationUI();
+    }
   }
 
   updateValidationUI(result) {
@@ -1757,6 +1792,18 @@ class LoadPlannerApp {
       }
     }
 
+    // Backend validation result (from _validateAllPlacements, run after a
+    // manual drag/rotate) can override the pass verdict even when every
+    // client-side check above looks fine \u2014 the checklist has no support/
+    // stacking check at all, so this is the only way a manually-created
+    // unsupported placement gets flagged instead of silently reading as
+    // "All checks passed".
+    let backendReason = null;
+    if (result && result.accepted === false) {
+      allValid = false;
+      backendReason = (result.errors && result.errors[0]) || "Backend validation failed";
+    }
+
     const sbVal = document.getElementById("sb-validation");
     if (this.placements.length === 0) {
       sbVal.textContent = "Ready";
@@ -1765,7 +1812,7 @@ class LoadPlannerApp {
       sbVal.textContent = "All checks passed";
       sbVal.style.color = "var(--success)";
     } else {
-      sbVal.textContent = "Issues detected";
+      sbVal.textContent = backendReason ? ("Issues detected: " + backendReason) : "Issues detected";
       sbVal.style.color = "var(--danger)";
     }
   }
@@ -1806,11 +1853,13 @@ class LoadPlannerApp {
     vBar.style.width = vPct + "%";
     vBar.className = "tlp-progress-fill " + (vPct > 90 ? "red" : vPct > 70 ? "yellow" : "green");
 
-    // Floor utilization
+    // Floor utilization — only z===0 placements occupy floor area; a
+    // stacked package sits on top of another one, not on new floor space
+    // (matches the backend's floor_used_pct, engine/statistics.py).
     const floorArea = d.len * d.wid;
     let usedArea = 0;
     for (const p of this.placements) {
-      usedArea += (p._length || 0) * (p._width || 0);
+      if (p.z === 0) usedArea += (p._length || 0) * (p._width || 0);
     }
     const floorPct = floorArea > 0 ? Math.min(100, (usedArea / floorArea) * 100) : 0;
     document.getElementById("status-floor").textContent = Math.round(floorPct) + "%";
@@ -3378,8 +3427,15 @@ class LoadPlannerApp {
       return;
     }
     for (const p of this.placements) {
-      const pl = p._length || 100;
-      const pw = p._width || 100;
+      let pl = p._length || 100;
+      let pw = p._width || 100;
+      // Match the 2D renderer (_drawPackages): rotation 90/270 swaps
+      // which axis length/width occupy (AABB.from_dimensions on the
+      // backend), otherwise a rotated package renders with the wrong
+      // box extents even though its backend placement is valid.
+      if (p.rotation === 90 || p.rotation === 270) {
+        const t = pl; pl = pw; pw = t;
+      }
       const ph = p._height || 100;
       const color = p._color || (p._package && p._package.color) || "#3b82f6";
 

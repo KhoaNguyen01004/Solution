@@ -809,6 +809,158 @@
 }
 
 /* ── Responsive tweaks ────────────────────────────────────── */
+/* ── Manage Plans Dropdown ─────────────────────────────────── */
+.manage-plans-wrap {
+    position: relative;
+}
+
+.manage-plans-dropdown {
+    display: none;
+    position: absolute;
+    top: 100%;
+    right: 0;
+    width: 320px;
+    max-height: 420px;
+    background: #161b22;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+    z-index: 200;
+    overflow: hidden;
+    flex-direction: column;
+    margin-top: 4px;
+}
+
+.manage-plans-dropdown.open {
+    display: flex;
+}
+
+.manage-plans-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-primary);
+    flex-shrink: 0;
+}
+
+.manage-plans-close {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 4px;
+}
+
+.manage-plans-close:hover {
+    color: var(--text-primary);
+}
+
+.manage-plans-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+    max-height: 280px;
+}
+
+.manage-plans-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 14px;
+    font-size: 12px;
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: background var(--transition);
+}
+
+.manage-plans-item:hover {
+    background: rgba(255,255,255,0.06);
+}
+
+.manage-plans-item input[type="checkbox"] {
+    cursor: pointer;
+    accent-color: var(--accent);
+    flex-shrink: 0;
+}
+
+.manage-plans-item .plan-item-name {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.manage-plans-item .plan-item-date {
+    font-size: 10px;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.manage-plans-item .plan-item-status {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    padding: 1px 6px;
+    border-radius: 8px;
+    flex-shrink: 0;
+}
+
+.manage-plans-item .plan-item-status.draft {
+    background: rgba(156,163,175,0.15);
+    color: #9ca3af;
+}
+
+.manage-plans-item .plan-item-status.confirmed {
+    background: rgba(56,139,253,0.15);
+    color: var(--accent);
+}
+
+.manage-plans-item .plan-item-status.executing {
+    background: rgba(34,211,238,0.15);
+    color: #22d3ee;
+}
+
+.manage-plans-item .plan-item-status.completed {
+    background: rgba(46,160,67,0.15);
+    color: var(--success);
+}
+
+.manage-plans-actions {
+    display: flex;
+    gap: 6px;
+    padding: 10px 14px;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.manage-plans-actions button {
+    flex: 1;
+    height: 30px;
+    font-size: 11px;
+    padding: 0 8px;
+}
+
+.btn-danger {
+    background: rgba(239,68,68,0.15);
+    color: #f87171;
+    border: 1px solid rgba(239,68,68,0.3);
+}
+
+.btn-danger:hover {
+    background: rgba(239,68,68,0.25);
+}
+
+.manage-plans-empty {
+    padding: 24px 16px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
 @media (max-width: 1300px) {
     .dashboard-shell {
         grid-template-columns: 240px 1fr 280px;

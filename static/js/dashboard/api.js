@@ -71,5 +71,17 @@ window.DASH = window.DASH || {};
     stopImages(stopId) {
       return fetchJSON(`/api/stops/${stopId}/images`);
     },
+
+    deletePlans(planIds) {
+      return fetchJSON('/api/plans/batch-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan_ids: planIds }),
+      });
+    },
+
+    clearPlans() {
+      return fetchJSON('/api/plans/clear', { method: 'POST' });
+    },
   };
 })();

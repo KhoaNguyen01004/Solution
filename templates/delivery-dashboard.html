@@ -69,6 +69,22 @@
                 <span id="pollStatus" class="poll-status"></span>
                 <button class="btn-nav" id="refreshNowBtn" title="Refresh now">&#x21bb;</button>
                 <button class="btn-nav timeline-toggle" id="timelineToggleBtn" title="Toggle timeline">&#x2630;</button>
+                <div class="manage-plans-wrap">
+                    <button class="btn-nav" id="managePlansBtn" title="Manage Plans">&#x2699; Plans</button>
+                    <div class="manage-plans-dropdown" id="managePlansDropdown">
+                        <div class="manage-plans-header">
+                            <strong>Manage Plans</strong>
+                            <button class="manage-plans-close" id="managePlansClose">&#x2715;</button>
+                        </div>
+                        <div class="manage-plans-list" id="managePlansList">
+                            <div class="empty-state" style="padding:16px;">Loading plans...</div>
+                        </div>
+                        <div class="manage-plans-actions">
+                            <button class="btn-nav" id="deleteSelectedPlansBtn" disabled>Delete Selected</button>
+                            <button class="btn-nav btn-danger" id="clearAllPlansBtn">Clear All</button>
+                        </div>
+                    </div>
+                </div>
                 <a href="/delivery/new" class="btn-nav">+ New Plan</a>
             </div>
         </header>

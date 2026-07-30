@@ -326,6 +326,7 @@ window.DASH = window.DASH || {};
     DASH.map.init();
     bindFilterEvents();
     bindMapControls();
+    bindManagePlansEvents();
     setFollowButtonState();
 
     // Load initial data
@@ -359,7 +360,112 @@ window.DASH = window.DASH || {};
     }
   }
 
-  // Utility
+  // ── Plan Management (delete/clear) ──────────────────────────
+  const managePlansState = {
+    selectedIds: new Set(),
+  };
+
+  function toggleManagePlans(show) {
+    const dd = document.getElementById('managePlansDropdown');
+    if (!dd) return;
+    dd.classList.toggle('open', show !== undefined ? show : !dd.classList.contains('open'));
+    if (dd.classList.contains('open')) {
+      populateManagePlansList();
+    }
+  }
+
+  function populateManagePlansList() {
+    const list = document.getElementById('managePlansList');
+    if (!list) return;
+    const plans = state.plans.length > 0 ? state.plans : [];
+    if (plans.length === 0) {
+      list.innerHTML = '<div class="manage-plans-empty">No plans found</div>';
+      document.getElementById('deleteSelectedPlansBtn').disabled = true;
+      return;
+    }
+    let html = '';
+    plans.forEach((p) => {
+      const checked = managePlansState.selectedIds.has(p.id) ? 'checked' : '';
+      const statusClass = p.status || 'draft';
+      html += `
+        <label class="manage-plans-item">
+          <input type="checkbox" value="${p.id}" ${checked}>
+          <span class="plan-item-name">${escapeHtml(p.plan_name || 'Plan #' + p.id)}</span>
+          <span class="plan-item-date">${escapeHtml(p.plan_date || '')}</span>
+          <span class="plan-item-status ${statusClass}">${statusClass}</span>
+        </label>
+      `;
+    });
+    list.innerHTML = html;
+
+    // Bind checkbox changes
+    list.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+      cb.addEventListener('change', () => {
+        const id = parseInt(cb.value, 10);
+        if (cb.checked) {
+          managePlansState.selectedIds.add(id);
+        } else {
+          managePlansState.selectedIds.delete(id);
+        }
+        const btn = document.getElementById('deleteSelectedPlansBtn');
+        if (btn) btn.disabled = managePlansState.selectedIds.size === 0;
+      });
+    });
+  }
+
+  async function deleteSelectedPlans() {
+    const ids = Array.from(managePlansState.selectedIds);
+    if (ids.length === 0) return;
+    if (!confirm(`Are you sure you want to delete ${ids.length} selected plan(s)? This cannot be undone.`)) return;
+    try {
+      await DASH.api.deletePlans(ids);
+      UI.toast(`Deleted ${ids.length} plan(s)`, 'success');
+      managePlansState.selectedIds = new Set();
+      toggleManagePlans(false);
+      // Reload plans and data
+      await loadPlans();
+      await DASH.state.refreshNow();
+    } catch (e) {
+      UI.toast(`Delete failed: ${e.message}`, 'error');
+    }
+  }
+
+  async function clearAllPlans() {
+    if (!confirm('Are you sure you want to delete ALL plans? This cannot be undone.')) return;
+    try {
+      await DASH.api.clearPlans();
+      UI.toast('All plans cleared', 'success');
+      managePlansState.selectedIds = new Set();
+      toggleManagePlans(false);
+      // Reload plans and data
+      await loadPlans();
+      await DASH.state.refreshNow();
+    } catch (e) {
+      UI.toast(`Clear failed: ${e.message}`, 'error');
+    }
+  }
+
+  function bindManagePlansEvents() {
+    const btn = document.getElementById('managePlansBtn');
+    const close = document.getElementById('managePlansClose');
+    const deleteBtn = document.getElementById('deleteSelectedPlansBtn');
+    const clearBtn = document.getElementById('clearAllPlansBtn');
+
+    if (btn) btn.addEventListener('click', (e) => { e.stopPropagation(); toggleManagePlans(); });
+    if (close) close.addEventListener('click', () => toggleManagePlans(false));
+    if (deleteBtn) deleteBtn.addEventListener('click', deleteSelectedPlans);
+    if (clearBtn) clearBtn.addEventListener('click', clearAllPlans);
+
+    // Close on outside click
+    document.addEventListener('click', (e) => {
+      const wrap = document.querySelector('.manage-plans-wrap');
+      if (wrap && !wrap.contains(e.target)) {
+        toggleManagePlans(false);
+      }
+    });
+  }
+
+  // ── Utility ────────────────────────────────────────────────
   function escapeHtml(str) {
     if (str == null) return '';
     const d = document.createElement('div');
