@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-07-30 — Documentation Reorganization: Consolidated into docs/
+
+Prompted directly by the redundancy this session's TLP work kept running into: the algorithm was documented three times (`SORTING_STRATEGY.md`, `SYSTEM.md`'s "Sorting Algorithm" section, `README.md`'s "Algorithm Reference" section) and had drifted — only `SORTING_STRATEGY.md` was kept current through Phases 1-6 above, so the other two were actively wrong (still describing the pre-Phase-1 4-term scorer, `LargestFirstStrategy`-only single-vehicle default, and pure `LargestVehicleFirstStrategy` multi-vehicle distribution). The delivery module was documented twice (`DELIVERY_MODULE.md`, and a smaller duplicate inside `SYSTEM.md`). User asked for all docs reorganized into a `docs/` folder with redundant/repetitive content removed, keeping documentation minimal.
+
+### Changed
+- **New canonical TLP doc**: `docs/TRUCK_LOAD_PLANNER.md` — merges the (kept-current) `SORTING_STRATEGY.md` with `SYSTEM.md`'s non-duplicated TLP content (3D step-animation controls, 2D canvas coordinate mapping, TLP database schema, auto-arrange API request/response shape, frontend validation-panel behavior). Root `SORTING_STRATEGY.md` and `SYSTEM.md` deleted — their content isn't lost, it's here, once, current.
+- **Moved into `docs/`, unchanged content**: `CHANGELOG.md` (this file), `CODEBASE_ANALYSIS_REPORT.md`, `DELIVERY_MODULE.md` (already the more complete of the two delivery docs — `SYSTEM.md`'s duplicate section was simply dropped, not merged, since it had nothing `DELIVERY_MODULE.md` lacked).
+- **`README.md`** (stays at repo root — universal convention): removed its stale "Algorithm Reference" and "Engine Architecture" sections (now pointers to `docs/TRUCK_LOAD_PLANNER.md`), updated the TLP test-count/command reference for `tests/test_auto_arrange_e2e.py` (added this session, Phase 5).
+- **`CLAUDE.md`**: Reference Documents section updated to the new `docs/` paths; removed the `INSTRUCTIONS.md` entry (file doesn't exist — a stale reference to an already-retired original delivery-module spec, confirmed no-longer-needed).
+- Fixed path references in code comments that pointed at the old root locations: `truck_load_planner/engine/support.py`, `app.py`.
+
+### Removed
+- `docs/MASTER_PLAN.md` + `docs/PHASE_1_Live_Updates.md` through `PHASE_5_Real_Time.md` — the original pre-build planning specs for the Dispatch module, which per this file's own history is already built and shipped (Phases 1-3 QA'd, see the dated entries below). Same category as the retired `INSTRUCTIONS.md`: a historical spec superseded by what's actually in the code and in this changelog, not living reference documentation.
+
+### Not touched (explicitly out of scope)
+- The two Vietnamese internship-report files at repo root — personal academic documents unrelated to the app, already flagged as out-of-scope in `CLAUDE.md`.
+- `CLAUDE.md`/`AGENTS.md` themselves — agent-instruction/config files auto-loaded by tooling, not documentation-about-the-codebase; moving them would break the mechanism that reads them.
+
 ## 2026-07-30 — Truck Load Planner Phase 6: Frontend Fidelity Fixes
 
 Final phase of the 6-phase truck-load-planner improvement plan (Phases 1-5 above). Closes the "is it the algorithm or the UI" question the investigation opened with: the frontend independently recomputed some metrics, misrendered rotated packages in 3D, and let manual edits bypass backend validation entirely — meaning some of what looked like "the algorithm produced instability" was actually the UI, not the backend. `static/js/truck-load-planner.js` only.

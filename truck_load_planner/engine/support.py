@@ -20,7 +20,7 @@ from .package import Package, StackingMode
 _GRID_SAMPLES = 20    # samples per axis for union coverage estimation
 
 # Package.max_stack_layers == 0 is documented/DB-default as "no explicit
-# per-package limit" (README.md, SORTING_STRATEGY.md), not "physically
+# per-package limit" (docs/TRUCK_LOAD_PLANNER.md), not "physically
 # unlimited" — without a system-wide ceiling, unspecified packages could
 # tower indefinitely. Used two ways: (1) as the per-base breadth fallback
 # in _check_stacking_rules ("how many packages can share one base's top

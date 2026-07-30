@@ -19,7 +19,7 @@ an `.xlsx`) — unrelated to the Flask app; ignore them for code changes.
   keeps its original full path, e.g. `/api/fleet/vehicles`, `/api/fuel-log`,
   `/oil-change`), `tlp_bp` (`/api/tlp`), `delivery_bp` (`/api`).
 - **Database**: SQLite at `routing_system.db`, no ORM — raw SQL throughout. Two access
-  patterns coexist and both are intentional (CODEBASE_ANALYSIS_REPORT.md items 9-12):
+  patterns coexist and both are intentional (docs/CODEBASE_ANALYSIS_REPORT.md items 9-12):
   - `DatabaseManager` (`app/db.py`, context-manager, `PRAGMA foreign_keys=ON` by default)
     — `services/delivery/*.py`, `truck_load_planner/routes.py`.
   - Raw `sqlite3.connect()` — `app/routes/*.py`, `app.py`.
@@ -156,7 +156,7 @@ prioritize:
   (in your summary or a note to the user) — do not implement it unless explicitly
   instructed.
 - The DB-access-pattern split and the 3-page frontend-namespace gap are deliberately
-  incomplete (CODEBASE_ANALYSIS_REPORT.md §9) — don't fix them as a drive-by.
+  incomplete (docs/CODEBASE_ANALYSIS_REPORT.md §9) — don't fix them as a drive-by.
 - Ignore root-level non-app files (internship report, `.docx`/`.xlsx`) for code tasks.
 
 ## Definition of Done
@@ -189,12 +189,11 @@ improvements that preserve existing functionality.
 
 ## Reference Documents
 
-- `CODEBASE_ANALYSIS_REPORT.md` — audit, roadmap, Priority Action Items status (§9).
-- `CHANGELOG.md` — dated entries on what changed and why.
-- `DELIVERY_MODULE.md` — delivery module design/entity reference.
-- `SYSTEM.md` — TLP algorithm/scoring internals.
-- `INSTRUCTIONS.md` — original delivery-module rewrite spec.
-- `README.md` — pages, full test-command reference, algorithm reference, tech stack.
+- `docs/CODEBASE_ANALYSIS_REPORT.md` — audit, roadmap, Priority Action Items status (§9).
+- `docs/CHANGELOG.md` — dated entries on what changed and why.
+- `docs/DELIVERY_MODULE.md` — delivery module design/entity reference.
+- `docs/TRUCK_LOAD_PLANNER.md` — TLP algorithm/scoring/API/frontend reference.
+- `README.md` — pages, full test-command reference, tech stack (stays at repo root).
 
 ## graphify
 

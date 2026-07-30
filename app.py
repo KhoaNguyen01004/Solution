@@ -3,7 +3,7 @@ Entry point. Builds the Flask app via app.create_app() (see app/__init__.py)
 and registers the remaining routes that haven't been extracted into a
 domain blueprint yet (index, the main /api/vehicles list, manual-location
 management, geocoding, and the delivery page routes) — see
-CODEBASE_ANALYSIS_REPORT.md Section 6.4.1 for the extraction plan this
+docs/CODEBASE_ANALYSIS_REPORT.md Section 6.4.1 for the extraction plan this
 followed.
 """
 from flask import jsonify, render_template, request
