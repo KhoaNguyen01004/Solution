@@ -1,5 +1,52 @@
 # Changelog
 
+## 2026-07-30 — Site-Wide Navigation: Fixed Dispatch Dropdown Bug + Reorganized Structure
+
+Two related complaints: the Dispatch page's nav dropdowns were visually broken, and the overall nav "doesn't follow any rules or best practice." No shared nav template exists anywhere in this app — all ~9 pages fully copy-paste the identical `<nav>` block — so both were investigated and fixed per-file rather than via a new shared-template refactor (explicitly deferred, see below).
+
+### Fixed
+- **Dispatch page's nav dropdowns were invisible and unclickable** (`static/css/delivery-dashboard.css`) — `.dashboard-header .header-nav` had an *unguarded* `overflow-x: auto`, while every other page correctly wraps the identical rule in `@media (max-width: 768px)`. Setting `overflow-x` forces the browser to also compute `overflow-y: auto` (CSS spec behavior), so the dropdown menus — `position:absolute`, opening below the nav's ~34px height — were being clipped to zero visible height at *every* screen width, with no scrollbar cue since `scrollbar-width: none` hides it. The click handler fired correctly the whole time; the menu just never rendered. Moved the rule into the existing mobile-only media query, matching every other page.
+- **Dispatch was also missing the click-outside-to-close script** (`templates/delivery-dashboard.html`) present on every other page (`document.addEventListener('click', ...)` closing any open `.fleet-dropdown`). Added it.
+- Verified live in-browser: dropdown now has real height, is clickable, and closes on an outside click; zero console errors.
+
+### Changed — nav reorganization (applied identically across 9 templates: `index.html`, `delivery-dashboard.html`, `delivery-plan-builder.html`, `manage-trips.html`, `trip-history.html`, `locations.html`, `oil-change.html`, `vehicle-management.html`, `fuel-efficiency.html`)
+- **New top-level order**: `Map | Dispatch | Plan Builder | Trips ▾ | Locations | Load Planner | Fleet ▾` (previously `Map | Trips ▾ | Delivery ▾ | Locations | Load Planner | Fleet ▾`).
+- **Dispatch promoted to a top-level link** — previously two clicks deep (`Delivery ▾ → Dispatch`) despite being the most-used page.
+- **"Delivery ▾" removed** — once Dispatch moved out, it only had one item left (Plan Builder); a one-item dropdown added a click for no reason, so Plan Builder became a bare top-level link instead.
+- **"Trips ▾" and "Fleet ▾" kept as dropdowns** — both still group 2-4 genuinely related destinations.
+- **Active-page highlighting added** — each page hardcodes `active` (the pre-existing `.btn-nav.active` style, previously unused in this header) on its own corresponding link/button, since there's no shared template to compute this dynamically. For pages under a dropdown (Trip Management/History → Trips ▾; Oil Change/Vehicles/Fuel/Container → Fleet ▾), the dropdown's own button gets the active state. This required removing the inline `background:none;border:none;color:#c9d1d9;` from those specific buttons, since inline styles otherwise override the `.active` class's background.
+
+### Considered and explicitly not done
+- **Consolidating the 9 copy-pasted nav blocks into one shared Jinja include/macro** — this is *why* Dispatch could drift and break without affecting any other page in the first place, but the user asked to reorganize the existing per-page pattern first, not take on a template refactor in the same pass.
+- **Adding a full nav to `truck-load-planner.html`** — initially assessed as a navigation dead-end, but on inspection it already has a `← Dashboard` back-link (`templates/truck-load-planner.html:1052`); left as-is rather than forcing the full multi-item nav onto a deliberately minimal, focused full-screen tool.
+
+### Testing
+- `pytest tests/test_delivery.py` — 49/49 passing (no backend touched).
+- Manual: dev server + browser — verified the Dispatch dropdown renders/clicks/closes correctly, verified active-state highlighting on Dispatch (dispatch page), Trips ▾ (manage-trips page), and Fleet ▾ (oil-change page), zero console errors on each.
+
+### Remaining Technical Debt
+- The no-shared-template problem itself remains — any future nav change still means editing 9 files by hand. Flagged as a candidate for a later pass if this drift recurs.
+
+## 2026-07-30 — Dispatch Module Post-Phase-3: Plan Auto-Completion + Live Speed Signal
+
+Two of three items from a production-usage planning review (real dispatcher feedback after tagging `dispatch-phase-3`): the dashboard never removed old/test plans because nothing ever transitioned a plan out of `confirmed`/`executing`, and TTAS's live speed telemetry (crawled from the tracking site) was being discarded entirely. A third item (manual "Archive Plan" action) was explicitly deferred pending observation of production usage after auto-completion ships. No schema change, additive only, backward compatible.
+
+### Added
+- **Plan auto-completion** (`services/delivery/execution_service.py`) — a plan's `status` now automatically transitions to `completed` once every stop across *every* vehicle assignment under it has reached a terminal state (`completed`/`skipped`/`cancelled`). Wired into the three call sites that produce a terminal stop status: `advance_stop()`'s `arrived→completed` branch, and `_update_execution()` (used by both `skip_stop()`/`cancel_stop()`) — the latter only runs the (more expensive) full-plan check when the status being written is itself terminal. Uses the `completed` value the schema already documents for `delivery_plans.status`; no migration needed.
+  - **Safeguard**: `insert_temp_stop()` now reverts a plan from `completed` back to `executing` if a new pending stop is added to it — otherwise a dispatcher inserting a stop into an already-auto-completed plan would silently hide that pending work from the dashboard, which would be a worse bug than the one being fixed.
+- **Live speed as a supplementary signal only** (`services/delivery/tracking_service.py::normalize_gps_position()`) — TTAS's raw `speed_status` is Vietnamese status text (e.g. "Chạy 42km/h"), not a clean number, exactly as flagged before implementation. Added `_parse_speed_kmh()`, a defensive regex extraction (mirroring the one already proven in `app/routes/trips.py`, not duplicating its exact behavior — this one returns `None` rather than defaulting to `0` when nothing numeric is found, since "unknown" and "confirmed stopped" are different facts). The new `speed_kmh` field is additive on the existing flat GPS dict — by design, this flat/`.get()`-based shape already accommodates future telemetry (e.g. `heading`) without another contract change, so no restructuring was needed to satisfy that ask.
+  - **Explicitly not used for ETA or routing** — the existing ORS route-based ETA (Phase 2) remains the sole ETA authority. Instantaneous `distance ÷ speed` is a known bad pattern (a vehicle stopped at a red light would read speed=0 → ETA→∞).
+  - Surfaced in the vehicle info bar (`#vibarSpeed`) and map marker popup as read-only context.
+  - Feeds a new, third attention proxy in `vehicle-list.js::computeAttention()`: `reported_stopped` — live speed ≤2 km/h while GPS is fresh (not stale) and the vehicle isn't already parked at a stop. Purely corroborating/informational, same as the existing `stuck`/`gps_stale` proxies from Phase 3.
+
+### Deferred (explicit decision, not forgotten)
+- Manual "Archive Plan" action — holding off to observe whether auto-completion alone resolves the dashboard-clutter complaint in real usage before adding a manual escape hatch.
+- A default rolling date-window filter was considered and rejected during planning: a plan can legitimately span into the next day, and filtering by `plan_date === today` risked hiding real, still-active work.
+
+### Testing
+- 9 new tests: `TestPlanAutoCompletion` (4 — single-assignment completion, partial-completion no-op, multi-assignment requirement, revert-on-insert-into-completed-plan) and `TestTrackingService` (5 — embedded-speed parsing, unparseable→`None`, missing-field→`None`, decimal speed, and explicitly distinguishing a genuine `0` reading from "unknown"). Full suite: 49/49 passing.
+- Manual: dev server + browser (console-mocked `DASH.api.*`, same technique as the Phase 3 QA pass) — confirmed the info bar and map popup render the parsed speed, the `reported_stopped` attention chip/dot fire at low speed and clear at normal speed, no console errors. Auto-completion itself was verified via the isolated pytest suite rather than against the real `routing_system.db`'s existing plans, to avoid irreversibly mutating that data during a manual check.
+
 ## 2026-07-30 — Dispatch Module Phase 3 QA Pass: Two Bugs Fixed
 
 Final QA pass on Phase 3 before tagging, covering: Follow mode over an extended session, attention chips crossing real thresholds, photo gallery under multiple-images/missing/slow-network conditions, inline-reason-edit durability under polling and rapid interaction, listener/memory growth, and browser performance over a simulated 30-minute session. Verified via a console-level mock harness driving `DASH.api.*` with realistic synthetic data (moving GPS, threshold-crossing timestamps, multi-image responses, artificial network delay) since this sandbox has no live TTAS/ORS credentials. Two real bugs found and fixed in `static/js/dashboard/timeline.js`; everything else confirmed correct.

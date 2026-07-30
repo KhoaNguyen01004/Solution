@@ -39,6 +39,7 @@ window.DASH = window.DASH || {};
   function vehiclePopupHtml(a, label, status, lat, lng) {
     const stopName = a.current_stop ? (a.current_stop.station_name || a.current_stop.station_code || 'Stop #' + a.current_stop.planned_sequence) : 'No active stop';
     const progress = a.progress || {};
+    const speedKmh = a.gps && a.gps.speed_kmh != null ? a.gps.speed_kmh : null;
     return `
           <div style="font-size:12px;min-width:160px;">
             <strong>${escapeHtml(label)}</strong><br/>
@@ -46,6 +47,7 @@ window.DASH = window.DASH || {};
             Status: <span style="color:${statusColor(status)};font-weight:600;">${escapeHtml(status)}</span><br/>
             Stop: ${escapeHtml(stopName)}<br/>
             Progress: ${progress.completed || 0}/${progress.total || 0}<br/>
+            ${speedKmh != null ? 'Speed: ' + Math.round(speedKmh) + ' km/h<br/>' : ''}
             GPS: ${lat.toFixed(5)}, ${lng.toFixed(5)}
           </div>`;
   }

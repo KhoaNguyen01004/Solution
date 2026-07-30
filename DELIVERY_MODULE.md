@@ -292,6 +292,8 @@ planned ──► enroute ──► arrived ──► completed
 
 5. **Dashboard polls every 12s** — The dashboard endpoint returns all data in one call (`/api/execution/dashboard`). Detailed data (stops, ETA) is fetched per-selection only.
 
+6. **Plans auto-complete, they're never auto-archived** — `execution_service.py` transitions a plan's status to `completed` once every stop across every vehicle assignment under it is terminal (completed/skipped/cancelled), so finished plans stop appearing on the active dashboard on their own. There's deliberately no automatic archival/deletion of old or abandoned plans (e.g. test data whose stops were never touched) — that's a manual, explicit dispatcher action, left as a future addition pending observed need.
+
 ---
 
 ## Configuration
@@ -326,7 +328,7 @@ ROUTE_REFRESH_INTERVAL=Route cache refresh seconds (default: 60)
 ### Running Tests
 
 ```bash
-# All tests (40 delivery + 26 TLP)
+# All tests (49 delivery + 26 TLP)
 pytest tests/
 
 # Delivery-specific
@@ -344,7 +346,9 @@ pytest tests/test_delivery.py --cov=services/delivery --cov-report=term
 | Test Class | Tests | Coverage |
 |-----------|-------|----------|
 | TestEtaService | 16 | ETA calculation, ORS fallback, road geometry, route cache hit/invalidation, travelled distance |
+| TestTrackingService | 5 | Defensive TTAS speed parsing (embedded/decimal/unparseable/missing) |
 | TestStopProgression | 7 | Advance, skip, cancel, current stop |
+| TestPlanAutoCompletion | 4 | Plan auto-completes when all stops/assignments terminal, reopens on new stop |
 | TestStopReordering | 5 | Reorder, insert temp stop, sequence update |
 | TestImageService | 5 | Upload, list, delete, edge cases |
 | TestProgress | 5 | Progress calculation, breakdown |

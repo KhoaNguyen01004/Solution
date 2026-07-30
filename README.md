@@ -16,7 +16,7 @@ Flask-based fleet management with GPS tracking, fuel monitoring, and a 3D/2D **T
 
 ## Running Tests
 
-### Delivery Management Tests (40 tests)
+### Delivery Management Tests (49 tests)
 ```bash
 python -m pytest tests/test_delivery.py -v
 ```
@@ -54,7 +54,7 @@ python tests/test_all.py instrument --mode bug-trace  # Support integrity trace 
 
 # ── Pytest Unit Tests ──────────────────────────────────────
 python -m pytest tests/test_scorer.py -v
-python -m pytest tests/test_delivery.py -v           # Delivery management (40 tests)
+python -m pytest tests/test_delivery.py -v           # Delivery management (49 tests)
 
 # ── Standalone Debugger ────────────────────────────────────
 python tests/debug_arrange.py kbf_lc900          # Auto-arrange debug per scenario
@@ -202,7 +202,7 @@ app/                            # Flask application package (see app/__init__.py
 tests/                          # All test, debug, and diagnostic files
   test_all.py                   # Unified test harness (16 subcommands)
   test_scorer.py                # Pytest unit tests (TLP scoring)
-  test_delivery.py              # Pytest unit tests (delivery management — 40 tests)
+  test_delivery.py              # Pytest unit tests (delivery management — 49 tests)
   debug_arrange.py              # Per-package auto-arrange debugger
   merge_duplicate_vehicles.py   # One-time DB dedup utility
 reports/                        # Test and debug output files

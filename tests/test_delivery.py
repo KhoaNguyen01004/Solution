@@ -13,6 +13,7 @@ from services.delivery import plan_service
 from services.delivery import execution_service
 from services.delivery import eta_service
 from services.delivery import image_service
+from services.delivery import tracking_service
 from services.delivery.database import init_delivery_tables
 from app.db import DatabaseManager
 
@@ -216,6 +217,51 @@ class TestEtaService:
 
 
 # ===========================================================================
+# 1b. Tracking Service Tests (defensive speed parsing)
+# ===========================================================================
+
+class TestTrackingService:
+    """Tests for tracking_service.py: TTAS speed_status is a Vietnamese
+    status phrase, not clean numeric data — these confirm the parser is
+    defensive rather than assuming a clean format."""
+
+    def test_normalize_gps_position_parses_embedded_speed(self):
+        result = tracking_service.normalize_gps_position({
+            "latitude": 10.8, "longitude": 106.6, "speed_status": "Chạy 42km/h",
+            "vehicle_status": "moving", "last_update": "2026-07-30T10:00:00",
+        })
+        assert result["speed_kmh"] == 42.0
+        assert result["speed"] == "Chạy 42km/h"
+
+    def test_normalize_gps_position_speed_none_when_unparseable(self):
+        result = tracking_service.normalize_gps_position({
+            "latitude": 10.8, "longitude": 106.6, "speed_status": "Dừng đỗ",
+        })
+        assert result["speed_kmh"] is None
+
+    def test_normalize_gps_position_speed_none_when_missing(self):
+        result = tracking_service.normalize_gps_position({"latitude": 10.8, "longitude": 106.6})
+        assert result["speed_kmh"] is None
+
+    def test_normalize_gps_position_parses_decimal_speed(self):
+        result = tracking_service.normalize_gps_position({
+            "latitude": 10.8, "longitude": 106.6, "speed_status": "Chạy 37.5 km/h",
+        })
+        assert result["speed_kmh"] == 37.5
+
+    def test_normalize_gps_position_never_defaults_to_zero(self):
+        # A genuine 0 km/h reading and "we don't know" must stay distinguishable.
+        moving_unparseable = tracking_service.normalize_gps_position({
+            "latitude": 10.8, "longitude": 106.6, "speed_status": "unknown state",
+        })
+        assert moving_unparseable["speed_kmh"] is None
+        stopped = tracking_service.normalize_gps_position({
+            "latitude": 10.8, "longitude": 106.6, "speed_status": "Chạy 0km/h",
+        })
+        assert stopped["speed_kmh"] == 0.0
+
+
+# ===========================================================================
 # 2. Stop Progression Tests (advance, skip, cancel)
 # ===========================================================================
 
@@ -311,6 +357,66 @@ class TestStopProgression:
         execution_service.skip_stop(db_path, s1)
         cs = execution_service.get_current_stop(db_path, assignment_id)
         assert cs["id"] == s2
+
+
+# ===========================================================================
+# 2b. Plan Auto-Completion Tests
+# ===========================================================================
+
+class TestPlanAutoCompletion:
+    """Tests for execution_service.py: a plan auto-completes once every
+    stop across every vehicle assignment under it reaches a terminal
+    state (completed/skipped/cancelled) — otherwise nothing ever leaves
+    the dashboard's active (confirmed/executing) view."""
+
+    def test_plan_completes_when_all_stops_terminal(self, db_path):
+        plan_id = _create_plan(db_path)
+        plan_service.update_plan(db_path, plan_id, status="confirmed")
+        assignment_id = _create_vehicle_assignment(db_path, plan_id)
+        s1 = _create_stop(db_path, assignment_id, 1)
+        s2 = _create_stop(db_path, assignment_id, 2)
+
+        execution_service.advance_stop(db_path, s1)  # planned -> arrived
+        execution_service.advance_stop(db_path, s1)  # arrived -> completed
+        assert plan_service.get_plan(db_path, plan_id)["status"] == "confirmed"
+
+        execution_service.skip_stop(db_path, s2)
+        assert plan_service.get_plan(db_path, plan_id)["status"] == "completed"
+
+    def test_plan_not_completed_while_a_stop_remains(self, db_path):
+        plan_id = _create_plan(db_path)
+        plan_service.update_plan(db_path, plan_id, status="confirmed")
+        assignment_id = _create_vehicle_assignment(db_path, plan_id)
+        s1 = _create_stop(db_path, assignment_id, 1)
+        _create_stop(db_path, assignment_id, 2)
+
+        execution_service.cancel_stop(db_path, s1, "test")
+        assert plan_service.get_plan(db_path, plan_id)["status"] == "confirmed"
+
+    def test_plan_requires_every_assignment_terminal(self, db_path):
+        plan_id = _create_plan(db_path)
+        plan_service.update_plan(db_path, plan_id, status="executing")
+        a1 = _create_vehicle_assignment(db_path, plan_id)
+        a2 = _create_vehicle_assignment(db_path, plan_id)
+        s1 = _create_stop(db_path, a1, 1)
+        s2 = _create_stop(db_path, a2, 1)
+
+        execution_service.cancel_stop(db_path, s1, "done")
+        assert plan_service.get_plan(db_path, plan_id)["status"] == "executing"
+
+        execution_service.cancel_stop(db_path, s2, "done")
+        assert plan_service.get_plan(db_path, plan_id)["status"] == "completed"
+
+    def test_insert_temp_stop_reopens_completed_plan(self, db_path):
+        plan_id = _create_plan(db_path)
+        plan_service.update_plan(db_path, plan_id, status="executing")
+        assignment_id = _create_vehicle_assignment(db_path, plan_id)
+        s1 = _create_stop(db_path, assignment_id, 1)
+        execution_service.skip_stop(db_path, s1)
+        assert plan_service.get_plan(db_path, plan_id)["status"] == "completed"
+
+        execution_service.insert_temp_stop(db_path, assignment_id, after_sequence=1, station_name="New Stop")
+        assert plan_service.get_plan(db_path, plan_id)["status"] == "executing"
 
 
 # ===========================================================================

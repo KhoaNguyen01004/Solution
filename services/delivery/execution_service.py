@@ -6,6 +6,43 @@ from app.db import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
+TERMINAL_STATUSES = ("completed", "skipped", "cancelled")
+
+
+def _get_plan_id_for_stop(conn, stop_id: int) -> Optional[int]:
+    c = conn.cursor()
+    c.execute("""
+        SELECT va.plan_id FROM delivery_plan_stops s
+        JOIN vehicle_assignments va ON va.id = s.vehicle_assignment_id
+        WHERE s.id = ?
+    """, (stop_id,))
+    row = c.fetchone()
+    return row["plan_id"] if row else None
+
+
+def _maybe_complete_plan(conn, plan_id: Optional[int]):
+    """Auto-completes a plan once every stop across every vehicle
+    assignment under it has reached a terminal state — otherwise a plan
+    never leaves the dashboard's active (confirmed/executing) view.
+    """
+    if plan_id is None:
+        return
+    c = conn.cursor()
+    placeholders = ",".join("?" for _ in TERMINAL_STATUSES)
+    c.execute(f"""
+        SELECT COUNT(*) as remaining
+        FROM stop_executions e
+        JOIN delivery_plan_stops s ON s.id = e.stop_id
+        JOIN vehicle_assignments va ON va.id = s.vehicle_assignment_id
+        WHERE va.plan_id = ? AND e.status NOT IN ({placeholders})
+    """, (plan_id, *TERMINAL_STATUSES))
+    remaining = c.fetchone()["remaining"]
+    if remaining == 0:
+        c.execute(
+            "UPDATE delivery_plans SET status = 'completed', updated_at = ? WHERE id = ? AND status != 'completed'",
+            (datetime.now().isoformat(), plan_id),
+        )
+
 
 def get_current_stop(db_path: str, assignment_id: int) -> Optional[dict]:
     with DatabaseManager(db_path).connect() as conn:
@@ -44,7 +81,10 @@ def _update_execution(db_path: str, stop_id: int, **kwargs):
     with DatabaseManager(db_path).connect() as conn:
         c = conn.cursor()
         c.execute(f"UPDATE stop_executions SET {set_clause} WHERE stop_id = ?", vals)
-        return c.rowcount > 0
+        ok = c.rowcount > 0
+        if ok and updates.get("status") in TERMINAL_STATUSES:
+            _maybe_complete_plan(conn, _get_plan_id_for_stop(conn, stop_id))
+        return ok
 
 
 def advance_stop(db_path: str, stop_id: int):
@@ -68,6 +108,7 @@ def advance_stop(db_path: str, stop_id: int):
                 UPDATE stop_executions SET status = 'completed', actual_departure_at = ?,
                     completed_at = ?, updated_at = ? WHERE stop_id = ?
             """, (now, now, now, stop_id))
+            _maybe_complete_plan(conn, _get_plan_id_for_stop(conn, stop_id))
             return True, "completed"
         else:
             return False, f"Cannot advance stop in status '{status}'"
@@ -140,6 +181,15 @@ def insert_temp_stop(db_path: str, assignment_id: int, after_sequence: int,
             INSERT INTO stop_executions (stop_id, execution_sequence, status)
             VALUES (?, ?, 'planned')
         """, (stop_id, insert_seq))
+
+        # If the plan had already auto-completed, this new pending stop
+        # must not stay silently hidden from the dashboard's active view.
+        plan_id = _get_plan_id_for_stop(conn, stop_id)
+        if plan_id is not None:
+            c.execute(
+                "UPDATE delivery_plans SET status = 'executing', updated_at = ? WHERE id = ? AND status = 'completed'",
+                (datetime.now().isoformat(), plan_id),
+            )
 
         return stop_id
 

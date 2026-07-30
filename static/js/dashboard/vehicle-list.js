@@ -13,6 +13,10 @@ window.DASH = window.DASH || {};
   // change needed.
   const STUCK_THRESHOLD_MS = 20 * 60 * 1000;
   const GPS_STALE_THRESHOLD_MS = 15 * 60 * 1000;
+  // Corroborating signal only (never a hard alert): live TTAS speed reads
+  // ~0 while the vehicle isn't parked at a stop. A single reading can just
+  // be a red light, so this stays informational, same as the other proxies.
+  const REPORTED_STOPPED_SPEED_KMH = 2;
 
   function statusClass(status) {
     const map = {
@@ -46,11 +50,17 @@ window.DASH = window.DASH || {};
       }
     }
     const gps = a.gps;
+    let gpsIsFresh = false;
     if (gps && gps.last_update) {
       const lastUpdate = new Date(gps.last_update).getTime();
-      if (!isNaN(lastUpdate) && (Date.now() - lastUpdate) > GPS_STALE_THRESHOLD_MS) {
-        reasons.push('gps_stale');
+      if (!isNaN(lastUpdate)) {
+        gpsIsFresh = (Date.now() - lastUpdate) <= GPS_STALE_THRESHOLD_MS;
+        if (!gpsIsFresh) reasons.push('gps_stale');
       }
+    }
+    if (gpsIsFresh && gps.speed_kmh != null && gps.speed_kmh <= REPORTED_STOPPED_SPEED_KMH
+        && (!cs || cs.execution_status !== 'arrived')) {
+      reasons.push('reported_stopped');
     }
     return reasons;
   }
@@ -63,6 +73,9 @@ window.DASH = window.DASH || {};
     if (reason === 'gps_stale') {
       const mins = Math.floor((Date.now() - new Date(a.gps.last_update).getTime()) / 60000);
       return `GPS stale ${mins}m`;
+    }
+    if (reason === 'reported_stopped') {
+      return `Reporting ${Math.round(a.gps.speed_kmh)} km/h, not at a stop`;
     }
     return reason;
   }

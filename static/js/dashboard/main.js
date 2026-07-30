@@ -201,6 +201,11 @@ window.DASH = window.DASH || {};
     }
 
     const gps = a.gps;
+
+    // Supplementary operational context only — never used for ETA/routing.
+    const speedEl = document.getElementById('vibarSpeed');
+    speedEl.textContent = gps && gps.speed_kmh != null ? `${Math.round(gps.speed_kmh)} km/h` : '';
+
     const gpsTime = gps && gps.last_update ? new Date(gps.last_update).toLocaleTimeString() : '';
     document.getElementById('vibarGpsTime').textContent = gpsTime ? 'GPS: ' + gpsTime : '';
   }

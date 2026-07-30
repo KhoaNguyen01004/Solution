@@ -25,14 +25,7 @@
 }
 
 .dashboard-header .header-nav {
-    overflow-x: auto;
     flex-shrink: 0;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-}
-
-.dashboard-header .header-nav::-webkit-scrollbar {
-    display: none;
 }
 
 .dashboard-header .header-left {
@@ -102,6 +95,17 @@
         display: inline-flex !important;
         margin-left: auto;
         font-size: 14px;
+    }
+    /* Mobile-only — unconditional overflow-x here previously clipped the
+       nav dropdowns invisible at every width (setting overflow-x forces
+       the browser to also compute overflow-y as auto). */
+    .dashboard-header .header-nav {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+    .dashboard-header .header-nav::-webkit-scrollbar {
+        display: none;
     }
 }
 
