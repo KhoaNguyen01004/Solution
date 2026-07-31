@@ -72,6 +72,26 @@ window.DASH = window.DASH || {};
     return s.execution_sequence || s.planned_sequence || '?';
   }
 
+  // ── Locate on the map ──────────────────────────────────────────
+  // Clicking a stop in the timeline brings it up on the map. The timeline says
+  // which stop; the map says where — needing a second control to connect the
+  // two was the gap.
+  //
+  // Follow mode is switched off first: it re-centres on the vehicle every poll,
+  // so leaving it on would drag the view off the stop within 12 seconds.
+  function focusStopOnMap(stopId) {
+    if (!DASH.map || typeof DASH.map.focusStop !== 'function') return;
+    if (DASH.map.focusStop(stopId)) {
+      if (DASH.state && typeof DASH.state.setFollowMode === 'function') {
+        DASH.state.setFollowMode(false);
+      }
+      return;
+    }
+    // No marker means the stop was imported without coordinates. Say so —
+    // a click that does nothing at all reads as a broken dashboard.
+    UI.toast('This stop has no coordinates, so it is not on the map', 'error', 4000);
+  }
+
   // ── Reorder ────────────────────────────────────────────────────
   // Up/down buttons rather than drag-and-drop: this panel is used on phones in
   // the field, where HTML5 drag events don't fire at all.
@@ -349,6 +369,7 @@ window.DASH = window.DASH || {};
       }
       bodyEl.classList.toggle('open');
       chevronEl.classList.toggle('open');
+      focusStopOnMap(s.id);
     });
 
     bindActionDelegation(detailWrapEl);
@@ -379,7 +400,7 @@ window.DASH = window.DASH || {};
     // header (status/seq/name) and swaps each stop's detail content when it
     // actually changed — collapse state, photo-gallery state, and button
     // bindings are untouched.
-    render(stops, currentStopId, etas) {
+    render(stops, currentStopId, etas, emptyMessage) {
       const container = document.getElementById('timeline');
       const countEl = document.getElementById('stopCount');
       const list = stops || [];
@@ -387,7 +408,8 @@ window.DASH = window.DASH || {};
       this._renderCurrentStopCard(list, currentStopId, etas);
 
       if (list.length === 0) {
-        container.innerHTML = '<div class="empty-state">Select a vehicle to view stops</div>';
+        container.innerHTML =
+          `<div class="empty-state">${escapeHtml(emptyMessage || 'Select a vehicle to view stops')}</div>`;
         if (countEl) countEl.textContent = '';
         this._stopNodes.clear();
         this._setKey = null;
@@ -439,8 +461,12 @@ window.DASH = window.DASH || {};
     // Resets to the empty state and drops the node cache — use this instead
     // of touching #timeline's innerHTML directly, or the cache above goes
     // stale (its nodes get detached without the module knowing).
-    clear() {
-      this.render([], null, null);
+    //
+    // `message` lets a caller distinguish "nothing selected" from "selected,
+    // waiting on the server", which are very different things to a dispatcher
+    // who has just clicked a truck.
+    clear(message) {
+      this.render([], null, null, message);
     },
 
     _patchStop(entry, s, currentStopId, eta, list, idx) {
@@ -489,14 +515,27 @@ window.DASH = window.DASH || {};
       if (!this._currentStopCardBound) {
         this._currentStopCardBound = true;
         bindActionDelegation(card);
+        // Same locate-on-click as a timeline row. The pinned card is the stop a
+        // dispatcher asks "where is that?" about most often.
+        card.addEventListener('click', (e) => {
+          // Advance/Skip/Cancel, the tel: link and the reason input all live in
+          // this card and mean something else entirely.
+          if (e.target.closest('button, a, input')) return;
+          const stopId = parseInt(card.dataset.stopId || '', 10);
+          if (stopId) focusStopOnMap(stopId);
+        });
       }
 
       const stop = currentStopId ? stops.find((s) => s.id === currentStopId) : null;
       if (!stop) {
         card.style.display = 'none';
         this._currentStopCardHtml = null;
+        delete card.dataset.stopId;
         return;
       }
+      // Read by the locate-on-click handler above, which is bound once and so
+      // can't close over whichever stop happens to be current.
+      card.dataset.stopId = stop.id;
 
       let eta = null;
       if (etas && etas.etas) {

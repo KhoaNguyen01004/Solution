@@ -10,16 +10,25 @@ Flask-based fleet management with GPS tracking, fuel monitoring, and a 3D/2D **T
 - **Truck Load Planner** (`/truck-load-planner`) — 3D/2D cargo loader with auto-arrange, stacking, step animation
 - **Vehicle Management** (`/vehicle-management`) — Vehicle CRUD and interactive 3D container diagram (Three.js)
 - **Oil Change** (`/oil-change`) — Oil change tracking
-- **Delivery Management** — Delivery plan oriented trip management with Excel import pipeline (`/delivery/new`), and an operational **Dispatch Dashboard** (`/delivery/dashboard`) with stop-level execution tracking, road-aware ETA/distance, attention indicators (stuck/GPS-stale), a pinned current-stop card with click-to-call, inline skip/cancel reason editing, a read-only photo gallery, and follow-vehicle map mode
+- **Delivery Management** — Delivery plan oriented trip management with Excel import pipeline (`/delivery/new`), and an operational **Dispatch Dashboard** (`/delivery/dashboard`) with stop-level execution tracking, road-aware ETA/distance, attention indicators (stuck/GPS-stale), a pinned current-stop card with click-to-call, inline skip/cancel reason editing, a read-only photo gallery, follow-vehicle map mode, live stop reordering, click-a-stop-to-locate-it, and a switchable basemap (satellite / streets / muted) with Esri imagery capture dates
+
+> **No authentication.** Every endpoint, including the destructive ones, is open to anyone who can reach the host — a deliberate 2026-07-31 decision for an internal-network deployment. See `docs/DELIVERY_MODULE.md` § Key Design Decisions before exposing this publicly.
 
 ---
 
 ## Running Tests
 
-### Delivery Management Tests (49 tests)
+### Delivery Management Tests (187 tests)
 ```bash
-python -m pytest tests/test_delivery.py -v
+python -m pytest tests/test_delivery.py -v         # 99 — service layer
+python -m pytest tests/test_delivery_routes.py -v  # 88 — route layer, real HTTP with TTAS mocked
 ```
+
+`test_delivery.py` imports the service modules directly; `test_delivery_routes.py` drives
+`app.test_client()` end to end, which is the only suite that sees bugs living inside a
+request handler or in an assembled response. Run both for any delivery change.
+
+`pytest tests/` runs everything — **254 tests**.
 
 ### Truck Load Planner Tests (31 tests)
 
@@ -123,7 +132,8 @@ tests/                          # All test, debug, and diagnostic files
   test_all.py                   # Unified test harness (16 subcommands)
   test_scorer.py                # Pytest unit tests (TLP scoring — 26 tests)
   test_auto_arrange_e2e.py      # Pytest end-to-end TLP tests (5 tests)
-  test_delivery.py              # Pytest unit tests (delivery management — 49 tests)
+  test_delivery.py              # Pytest unit tests (delivery services — 99 tests)
+  test_delivery_routes.py       # Pytest route-layer tests (delivery HTTP API — 88 tests)
   debug_arrange.py              # Per-package auto-arrange debugger
   merge_duplicate_vehicles.py   # One-time DB dedup utility
 reports/                        # Test and debug output files
@@ -137,7 +147,7 @@ services/                       # Application services (not to be confused with 
     tracking_service.py         # TTAS GPS wrapper, vehicle lookup
     eta_service.py              # ORS-based ETA calculation (Haversine fallback)
     image_service.py            # Stop image upload, serve, delete
-    routes.py                   # Flask Blueprint (24 endpoints under /api)
+    routes.py                   # Flask Blueprint (35 endpoints under /api, none authenticated)
 scripts/
   migrate_to_delivery.py        # Idempotent migration from legacy vehicle_trips
 truck_load_planner/             # Core application package
@@ -153,6 +163,13 @@ truck_load_planner/             # Core application package
                                  # remain self-contained
 static/                         # Frontend assets (JS, CSS)
   js/utils.js                   # ApiClient (fetch wrapper) + UI (toast, escapeHtml) namespace, shared by all pages
+  js/dashboard/                 # Dispatch dashboard, split by panel — the only multi-file page
+    main.js                     # Orchestrator: state, filters, selection, detail loading, plan management
+    api.js                      # Every dashboard fetch, with a 20s client timeout
+    polling.js                  # 12s poll cycle, refresh coalescing, pause while the tab is hidden
+    vehicle-list.js             # Left panel
+    map.js                      # Leaflet: basemap switcher, markers, route line, Esri imagery identify
+    timeline.js                 # Right panel: stop list, actions, reordering, locate-on-map
 templates/                      # HTML templates
 ```
 
@@ -161,5 +178,21 @@ templates/                      # HTML templates
 ## Tech Stack
 
 - **Backend**: Python, Flask, SQLite3
-- **Frontend**: Vanilla JS (`ApiClient`/`UI` shared namespace in `static/js/utils.js`), Chart.js 4.4.7, Konva.js 9 (canvas), Three.js (3D)
+- **Frontend**: Vanilla JS (`ApiClient`/`UI` shared namespace in `static/js/utils.js`), Chart.js 4.4.7, Konva.js 9 (canvas), Three.js (3D), Leaflet 1.9.4 (maps)
 - **No ORM** — raw SQL for full control, via `DatabaseManager` (`app/db.py`) context-managed connections
+- **No build step** — every script is loaded directly by a `<script>` tag
+
+### Third-party hosts the browser must reach
+
+Beyond the app itself, the dispatch dashboard loads from these at runtime. If a driver
+tablet or office network filters them, the map degrades rather than failing loudly, so
+they are worth allow-listing explicitly:
+
+| Host | Used for |
+|------|----------|
+| `unpkg.com` | Leaflet JS/CSS |
+| `server.arcgisonline.com` | Esri World Imagery tiles **and** the imagery capture-date `identify` query |
+| `basemaps.cartocdn.com` | CARTO Positron / Voyager tiles and the satellite label overlay |
+| `cdnjs.cloudflare.com` | Chart.js, Konva, Three.js on the other pages |
+
+Server-side the app also calls OpenRouteService (routing/ETA) and TTAS (GPS).

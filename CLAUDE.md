@@ -25,10 +25,21 @@ an `.xlsx`) — unrelated to the Flask app; ignore them for code changes.
   - Raw `sqlite3.connect()` — `app/routes/*.py`, `app.py`.
   `truck_load_planner/routes.py` uses `enable_fk=False` deliberately — that schema has no
   `ON DELETE CASCADE`, and 3 existing delete routes would break under FK enforcement.
+- **No authentication, by decision.** A shared dispatcher password existed for part of
+  2026-07-31 and was removed at the operator's request (see `docs/CHANGELOG.md`): this
+  runs on an internal network and the login step cost dispatchers time at every shift
+  change. Every endpoint, `POST /api/plans/clear` included, is open. **Do not re-add auth
+  as a drive-by "fix"** — `tests/test_delivery_routes.py::TestOpenAccess` fails if you do,
+  and it is deliberate, not an oversight. If the deployment ever becomes publicly
+  reachable, that is the conversation to have first.
 - **Concurrency caveat**: no `PRAGMA journal_mode=WAL` configured anywhere. `app/routes/
   trips.py` runs a background route-refresh thread writing to the same file concurrent
   requests write to — "database is locked" here is a pre-existing constraint, not
-  necessarily something you broke.
+  necessarily something you broke. Related: `render.yaml`'s `gunicorn wsgi:app` has no
+  `--workers`/`--threads`, so production is a **single synchronous worker** and requests
+  queue behind each other — `/api/execution/dashboard` does a blocking TTAS fetch inside
+  the request, so a user action landing mid-poll waits for it. Adding workers without
+  enabling WAL first trades that latency for lock errors; treat the pair as one decision.
 - **Deployment**: `render.yaml` has no `disk:` block. Confirm in the Render dashboard
   whether a persistent disk is attached before assuming `routing_system.db` or
   `DeliveryPlans/` uploads survive a redeploy.
@@ -55,6 +66,16 @@ static/js/utils.js    Shared ApiClient (fetch wrapper) + UI (.toast(), .escapeHt
                       namespace. 1 page still uses the legacy global showToast():
                       locations.js. (Was 3 — trip-history.js and manage-trips.js
                       were deleted 2026-07-31 with the trip pages.)
+static/js/dashboard/  The dispatch dashboard, and the ONLY multi-file page. Namespaced
+                      on window.DASH; load order is fixed by the template:
+                        api.js        every fetch, 20s client timeout
+                        polling.js    12s cycle, refresh coalescing, pauses when hidden
+                        vehicle-list.js  left panel
+                        map.js        Leaflet: basemaps, markers, route, Esri identify
+                        timeline.js   right panel: stops, actions, reorder, locate
+                        main.js       orchestrator — owns state and is loaded last
+                      Cross-module calls go through DASH.state / DASH.map / DASH.timeline,
+                      never by reaching into another file's internals.
 ```
 
 `templates/` — one HTML page per entry, matching `static/js/` filenames.
@@ -149,6 +170,25 @@ prioritize:
   2026-07-29 refactor fixed a real XSS bug from older copies that missed single quotes.
 - Mobile-friendly for delivery/dispatch pages — used in the field, not at a desk.
 
+### Dashboard map conventions (learned the hard way, 2026-07-31)
+
+- **Never move the map view except in direct response to a click.** The only automatic
+  pan is Follow mode, which is explicitly opted into. Anything that deliberately moves
+  the view elsewhere (locating a stop) turns Follow off first, or the next poll undoes it.
+- **Leaflet's popup autoPan is a hidden view-mover.** `Popup._adjustPan()` is reached both
+  by `popup.setContent()` and by `marker.setLatLng()` firing `move`. Both run on every
+  poll for a moving truck with an open popup, and both used to drag the map back onto the
+  vehicle. `map.js`'s `withoutAutoPan()` wraps background updates; opening a popup still
+  pans, which is intentional.
+- **Markers must read on any basemap.** The base is user-switchable between satellite and
+  near-white street maps, so marker styling carries both a dark fill/ring and a light
+  outer ring. A single-colour outline works on one and disappears on the other.
+- **Never make a panel wait on `/api/eta`.** It issues one OpenRouteService call per
+  remaining stop, serially, each with a 30s server timeout. Fetch it alongside the fast
+  local queries and paint as each lands — never in one `Promise.all`.
+- **Panels absolutely positioned over the map** (`.map-controls`, the info bar) and
+  Leaflet's own controls compete for corners; check all four before adding another.
+
 ## Scope Control
 
 - Only modify files directly related to the requested task — no unrelated cleanup,
@@ -164,9 +204,16 @@ prioritize:
 
 A task is done only when:
 
-- The relevant suite passes — `pytest tests/test_delivery.py -v` (49 tests) for delivery
-  changes, `pytest tests/test_scorer.py -v` (26 tests) for TLP scoring/placement changes.
+- The relevant suite passes. For delivery changes run **both** `pytest tests/test_delivery.py -v`
+  (99, service layer) and `pytest tests/test_delivery_routes.py -v` (88, route layer) —
+  the service suite is structurally blind to bugs inside a request handler or in an
+  assembled response, which is where every Critical audit finding lived. For TLP
+  scoring/placement, `pytest tests/test_scorer.py -v` (26). `pytest tests/` is 254 total.
   No CI is configured, so running these yourself is the only real verification.
+- Frontend-only changes get no pytest coverage at all. Check syntax with `node --check`,
+  and for anything with real logic (map behaviour, render ordering, response parsing),
+  drive the actual module under jsdom against a stub rather than reasoning about it — the
+  2026-07-31 dashboard work found several bugs that way that inspection had missed.
 - A `CHANGELOG.md` entry was added, in the existing dated-entry style, for
   architecturally significant changes (see the 2026-07-29 entry for expected detail).
   Skip for small, self-contained fixes.

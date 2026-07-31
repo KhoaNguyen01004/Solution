@@ -109,6 +109,18 @@ window.DASH = window.DASH || {};
     state.followMode = false;
     setFollowButtonState();
 
+    // Clear the previous vehicle's detail *now*, before any request goes out.
+    // renderAll() below repaints the right panel only when selectedStops is
+    // non-empty, so without this the timeline, map stops, route line and info
+    // bar all kept showing the *previously* selected truck until the new data
+    // landed. The click looked like it had done nothing — or worse, like it had
+    // selected a vehicle whose stops belonged to someone else.
+    DASH.timeline.clear('Loading stops…');
+    DASH.map.updateStops([], null);
+    DASH.map.updateRoute(null, []);
+    updateInfoBar(assignmentId, [], null, null);
+    showVehicleMapControls();
+
     renderAll();
 
     // Load detailed data for selected assignment
@@ -116,6 +128,25 @@ window.DASH = window.DASH || {};
 
     // Zoom map
     DASH.map.zoomToVehicle(assignmentId);
+  }
+
+  function showVehicleMapControls() {
+    document.getElementById('zoomToVehicleBtn').style.display = '';
+    document.getElementById('followVehicleBtn').style.display = '';
+    document.getElementById('openGmapsBtn').style.display = '';
+  }
+
+  // The one place the right panel and the map's per-assignment layers are
+  // painted from state. Called repeatedly as each of the three detail requests
+  // lands, so it must be safe to run with a partial state — a null ETA renders
+  // the timeline without ETAs and the route as straight lines, which is what
+  // the dispatcher sees for the moment before /api/eta answers.
+  function paintAssignmentDetail(assignmentId) {
+    const currentStopId = getCurrentStopId(state.selectedStops);
+    DASH.timeline.render(state.selectedStops, currentStopId, state.selectedEta);
+    DASH.map.updateStops(state.selectedStops, currentStopId);
+    DASH.map.updateRoute(state.selectedEta, state.selectedStops);
+    updateInfoBar(assignmentId, state.selectedStops, state.selectedAssignmentDetail, state.selectedEta);
   }
 
   // Monotonic token for assignment-detail loads. Every call takes the next
@@ -136,48 +167,64 @@ window.DASH = window.DASH || {};
 
   async function loadAssignmentDetail(assignmentId) {
     const generation = ++detailGeneration;
+
+    // Superseded while a request was in flight — drop the result rather than
+    // paint stale data over the current selection. Also skips writing over a
+    // reorder the dispatcher just made locally that the server hasn't
+    // acknowledged yet: that response was built from the old order.
+    const isStale = () =>
+      generation !== detailGeneration ||
+      state.selectedAssignmentId !== assignmentId ||
+      pendingReorders > 0;
+
+    // All three go out together, but they are NO LONGER awaited together.
+    // /api/stops and /api/execution/progress read local SQLite and answer in
+    // milliseconds; /api/eta issues one OpenRouteService call per remaining
+    // stop, serially, each with a 30-second server-side timeout. Promise.all
+    // held the whole right panel hostage to the slowest of the three, so
+    // clicking a vehicle showed nothing for as long as the ETA took — the
+    // "it takes 15 seconds to react" report. Each response now paints on
+    // arrival, so the stop list appears essentially immediately and ETAs fill
+    // in behind it.
+    const stopsRequest = DASH.api.stops(assignmentId);
+    const progressRequest = DASH.api.progress(assignmentId);
+    const etaRequest = DASH.api.eta(assignmentId);
+
+    // Each is awaited below, but an early `return` on a stale generation can
+    // leave one un-awaited. Park a handler on each now so a rejection can't
+    // surface as an unhandled promise rejection.
+    [stopsRequest, progressRequest, etaRequest].forEach((p) => p.catch(() => {}));
+
     try {
-      const [stops, progress, eta] = await Promise.all([
-        DASH.api.stops(assignmentId),
-        DASH.api.progress(assignmentId),
-        DASH.api.eta(assignmentId),
-      ]);
-
-      // Superseded while these were in flight — drop the result rather than
-      // paint stale data over the current selection.
-      if (generation !== detailGeneration) return;
-      if (state.selectedAssignmentId !== assignmentId) return;
-      // A reorder the dispatcher just made is painted locally and not yet
-      // acknowledged by the server. This response was built from the old
-      // order, so writing it would visibly snap the stops back.
-      if (pendingReorders > 0) return;
-
-      // Merge execution status into stops
+      const stops = await stopsRequest;
+      if (isStale()) return;
       state.selectedStops = stops || [];
-      state.selectedAssignmentDetail = progress || null;
-      state.selectedEta = eta || null;
-
-      // Update timeline and map
-      const currentStopId = getCurrentStopId(state.selectedStops);
-      DASH.timeline.render(state.selectedStops, currentStopId, state.selectedEta);
-      DASH.map.updateStops(state.selectedStops, currentStopId);
-      DASH.map.updateRoute(state.selectedEta, state.selectedStops);
-
-      // Update info bar
-      updateInfoBar(assignmentId, state.selectedStops, state.selectedAssignmentDetail, state.selectedEta);
-
-      // Show map controls
-      document.getElementById('zoomToVehicleBtn').style.display = '';
-      document.getElementById('followVehicleBtn').style.display = '';
-      document.getElementById('openGmapsBtn').style.display = '';
-
-      if (state.followMode) {
-        DASH.map.followVehicle(assignmentId);
-      }
+      paintAssignmentDetail(assignmentId);
+      showVehicleMapControls();
+      if (state.followMode) DASH.map.followVehicle(assignmentId);
     } catch (e) {
-      if (generation === detailGeneration) {
-        console.error('Failed to load assignment detail:', e);
-      }
+      if (!isStale()) console.error('Failed to load stops:', e);
+      return; // Without stops there is nothing for the other two to annotate.
+    }
+
+    try {
+      const progress = await progressRequest;
+      if (isStale()) return;
+      state.selectedAssignmentDetail = progress || null;
+      paintAssignmentDetail(assignmentId);
+    } catch (e) {
+      if (!isStale()) console.error('Failed to load progress:', e);
+    }
+
+    try {
+      const eta = await etaRequest;
+      if (isStale()) return;
+      state.selectedEta = eta || null;
+      paintAssignmentDetail(assignmentId);
+    } catch (e) {
+      // An ETA failure is not a detail-load failure. The timeline, stops and
+      // route are already on screen and stay there.
+      if (!isStale()) console.error('Failed to load ETA:', e);
     }
   }
 
@@ -188,6 +235,15 @@ window.DASH = window.DASH || {};
     btn.classList.toggle('active', state.followMode);
     btn.textContent = state.followMode ? '◉ Following' : '◎ Follow';
   }
+
+  // Follow is a competing intent with looking at anything else on the map, so
+  // anything that deliberately moves the view somewhere other than the vehicle
+  // switches it off. Otherwise the next poll pans straight back and undoes it.
+  state.setFollowMode = function (on) {
+    if (state.followMode === on) return;
+    state.followMode = on;
+    setFollowButtonState();
+  };
 
   function getCurrentStopId(stops) {
     if (!stops) return null;
@@ -247,13 +303,10 @@ window.DASH = window.DASH || {};
     DASH.map.updateVehicles(state.filteredAssignments);
 
     if (state.selectedAssignmentId) {
-      // If we already have stops loaded, re-render timeline
+      // Only once stops have arrived — otherwise this would paint over the
+      // "Loading stops…" placeholder that selectAssignment just put up.
       if (state.selectedStops.length > 0) {
-        const currentStopId = getCurrentStopId(state.selectedStops);
-        DASH.timeline.render(state.selectedStops, currentStopId, state.selectedEta);
-        DASH.map.updateStops(state.selectedStops, currentStopId);
-        DASH.map.updateRoute(state.selectedEta, state.selectedStops);
-        updateInfoBar(state.selectedAssignmentId, state.selectedStops, state.selectedAssignmentDetail, state.selectedEta);
+        paintAssignmentDetail(state.selectedAssignmentId);
       }
     } else {
       DASH.timeline.clear();
@@ -369,10 +422,7 @@ window.DASH = window.DASH || {};
     detailGeneration++;
 
     state.selectedStops = orderedStops;
-    const currentStopId = getCurrentStopId(orderedStops);
-    DASH.timeline.render(orderedStops, currentStopId, state.selectedEta);
-    DASH.map.updateStops(orderedStops, currentStopId);
-    DASH.map.updateRoute(state.selectedEta, orderedStops);
+    paintAssignmentDetail(assignmentId);
 
     const stopIds = orderedStops.map((s) => s.id);
     pendingReorders++;

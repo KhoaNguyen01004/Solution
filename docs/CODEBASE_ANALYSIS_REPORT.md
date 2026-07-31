@@ -664,6 +664,18 @@ Move `parse_excel_rows()`, `confirm_import()`, and related Excel logic from `ser
 
 Every route opens/closes `sqlite3.connect()` manually. Under concurrent users, this creates contention on the single SQLite file. **Recommendation:** Use a connection factory with `check_same_thread=False` or migrate to PostgreSQL.
 
+**Update 2026-07-31 — the contention is currently masked, not absent.** `render.yaml` runs
+`gunicorn wsgi:app` with no `--workers`/`--threads`, so production is a *single synchronous
+worker*: requests queue rather than contend, and this concern has never actually been
+exercised. That queueing is itself a user-visible problem — `/api/execution/dashboard`
+performs a blocking TTAS HTTP fetch inside the request, so a dispatcher action landing
+mid-poll waits behind it (see the 2026-07-31 CHANGELOG entry on click latency).
+
+The trap: raising worker or thread count is a one-line `startCommand` change that
+immediately converts that latency into the contention described above, because no
+`PRAGMA journal_mode=WAL` is configured anywhere. **WAL first, concurrency second** — they
+are one decision, not two, and item 23 below should be read that way.
+
 ### 7.2 Global Mutable State
 
 - `truck_load_planner/routes.py:15` — `DB_PATH = None` module-level global
@@ -738,6 +750,23 @@ All items below map to the [4 Pillar Framework](#6-architectural-refactoring-roa
 
 **Status as of 2026-07-29**: Phases 1–3 and most of Phase 4 are done — see `CHANGELOG.md`'s 2026-07-29 entry for exactly what was built, what was verified, and 2 real bugs the work caught before they hit production. Items marked ⬜ Pending are still open; a few (9, 10, 12, 16, 21, 22) were deliberately left out of the sessions that did 1–8/13–15/17–20, not forgotten.
 
+**Addendum 2026-07-31**: none of the items in this table moved, but three things happened
+around them that change how they should be read.
+
+- **Item 23 (concurrency) is now blocked on WAL, and the blocker is documented in §7.1.** Production
+  turned out to be a single synchronous Gunicorn worker, which hides the pooling problem
+  behind request queueing and produces a user-visible latency problem instead.
+- **A route-layer test suite now exists** (`tests/test_delivery_routes.py`, 88 tests). This
+  report's §5 testing analysis predates it; the delivery module is no longer service-tested
+  only. Total across `tests/` is 254.
+- **Authentication was added and then removed the same day.** The delivery module is
+  deliberately unauthenticated — see `docs/DELIVERY_MODULE.md` § Key Design Decisions #7
+  before treating that as a finding. It is the one item in this codebase where the "obvious
+  improvement" has already been made, reverted, and recorded.
+
+The wider audit that drove that work is `docs/DELIVERY_AUDIT_2026-07-31.md`, which is a
+separate, delivery-specific document; this report remains the whole-codebase view.
+
 ### Phase 1: Immediate Wins (Pillars 1 & 3) — High Impact, Low Effort
 
 | # | Action | Pillar | Effort | Impact | Status |
@@ -784,7 +813,7 @@ All items below map to the [4 Pillar Framework](#6-architectural-refactoring-roa
 
 | # | Action | Pillar | Effort | Impact | Status |
 |---|--------|--------|--------|--------|--------|
-| 23 | Add connection pooling or migrate from SQLite | Encapsulation | 1-2w | Concurrent user support | ⬜ Pending |
+| 23 | Add connection pooling or migrate from SQLite | Encapsulation | 1-2w | Concurrent user support | ⬜ Pending — **do `PRAGMA journal_mode=WAL` first.** Production is currently a single Gunicorn worker (§7.1), so raising worker count is the cheap half of this item and would convert queueing latency straight into lock errors |
 | 24 | Implement SSE/WebSocket for dashboard | (performance) | 1w | Eliminates polling overhead | ⬜ Pending |
 | 25 | Add JS build step (Vite/esbuild) | (tooling) | 2d | Bundling, tree-shaking, ES modules | ⬜ Pending |
 | 26 | Split CSS into partials | (tooling) | 1d | Maintainability | ⬜ Pending |

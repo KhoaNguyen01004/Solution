@@ -7,7 +7,7 @@
 │                   Flask Application                      │
 │  ┌───────────────────────────────────────────────────┐  │
 │  │                   app.py                           │  │
-│  │  Routes: /, /delivery/*, /api/*, /manage-trips     │  │
+│  │  Routes: /, /delivery/*, /api/*                    │  │
 │  │  Blueprints: tlp_bp, delivery_bp                   │  │
 │  └──────────┬────────────────────────────────────────┘  │
 │             │                                            │
@@ -41,9 +41,12 @@
 ┌────────────────────┐  ┌───────────────────────────┐
 │   Jinja2 Templates │  │  JS / CSS / Images        │
 │  delivery-*.html    │  │  dashboard/* (modular)    │
-│  manage-trips.html  │  │  delivery-plan-builder.js │
+│                     │  │  delivery-plan-builder.js │
 └────────────────────┘  └───────────────────────────┘
 ```
+
+> `manage-trips.html` and its route were removed on 2026-07-31 — the Dispatch dashboard
+> superseded them.
 
 ---
 
@@ -61,13 +64,16 @@ static/css/
 static/js/
 ├── delivery-plan-builder.js       Single-file wizard (state machine, 5 steps)
 └── dashboard/
-    ├── main.js                    Orchestrator, state, filters, init
-    ├── api.js                     All API calls
-    ├── polling.js                 12-second poll cycle
+    ├── main.js                    Orchestrator, state, filters, detail loading, plan mgmt
+    ├── api.js                     All API calls (20s client-side timeout)
+    ├── polling.js                 12-second poll cycle, refresh coalescing, tab-visibility
     ├── vehicle-list.js            Left panel rendering
-    ├── map.js                     Leaflet map, markers, routes
-    └── timeline.js                Right panel, stop list, actions
+    ├── map.js                     Leaflet: basemap switcher, markers, route, imagery identify
+    └── timeline.js                Right panel, stop list, actions, reorder, locate-on-map
 ```
+
+`main.js` loads last and owns `DASH.state`. Modules talk to each other only through the
+`DASH.state` / `DASH.map` / `DASH.timeline` surfaces, never by reaching into internals.
 
 ### Plan Builder Flow
 
@@ -86,10 +92,31 @@ All steps share a single state object. Auto-save runs every 30s when dirty.
 | Panel | Content | Update |
 |-------|---------|--------|
 | Left (280px) | Vehicle cards with progress, status, GPS time, attention indicator (stuck/GPS-stale) | Every 12s poll |
-| Center (flex) | Leaflet map with vehicle markers, stop pins, road-following route | On selection + every poll |
-| Right (300px) | Pinned current-stop card (contact, `tel:` link, primary actions) + stop timeline with photo gallery and inline skip/cancel reason editing | Every poll while a vehicle is selected |
+| Center (flex) | Leaflet map: vehicle markers, stop pins, road-following route, basemap switcher, imagery capture-date popup | On selection + every poll |
+| Right (300px) | Pinned current-stop card (contact, `tel:` link, primary actions) + stop timeline with photo gallery, inline skip/cancel reason editing, and per-stop reorder controls | Progressively on selection, then every poll |
 
 All three panels use incremental DOM diffing (not full rebuilds) — see `CHANGELOG.md`'s Phase 1 entry for why.
+
+#### Selecting a vehicle
+
+Selection fires three requests at once and paints each as it lands, rather than awaiting
+all three. `/api/stops` and `/api/execution/progress` are local SQLite reads; `/api/eta`
+issues one OpenRouteService call per remaining stop, serially, each with a 30-second
+server-side timeout. A `Promise.all` here made the whole panel as slow as routing.
+
+Selection also clears the previous vehicle's timeline, stop pins, route line and info bar
+immediately and shows "Loading stops…" — otherwise the panel silently keeps displaying
+the *previous* truck's stops until new data arrives.
+
+#### Map behaviour
+
+| Concern | Behaviour |
+|---------|-----------|
+| Basemaps | Satellite (Esri World Imagery + CARTO label overlay), Streets (CARTO Voyager), Muted (CARTO Positron). Choice persists in `localStorage` under `dashboard_basemap`. |
+| Imagery date | Clicking the map while Satellite is active queries Esri's `World_Imagery/MapServer/identify` and shows capture date, source, sensor, resolution and accuracy. |
+| Automatic panning | Only Follow mode. Leaflet's popup autoPan is suppressed for background updates (`withoutAutoPan()` in `map.js`), or a moving truck's popup drags the view back every poll. |
+| Locating a stop | Clicking a timeline row or the current-stop card centres the map on it, raising zoom to 15 only if further out, and turns Follow off. |
+| Reordering | Up/down controls per stop, optimistic, POSTed in click order. Terminal stops can't move and nothing moves across one. |
 
 ---
 
@@ -192,6 +219,12 @@ planned ──► enroute ──► arrived ──► completed
 
 ## API Endpoints
 
+**None of these require authentication** — reads or writes, including
+`POST /api/plans/clear`, which cascade-deletes every plan, assignment, stop, execution
+record and image row. That is a deliberate decision, not an oversight; see
+[Key Design Decisions](#key-design-decisions) below. The `Auth` column is retained on the
+Plans table as a reminder of what it would look like if that ever changes.
+
 ### Plans
 
 | Method | Path | Description | Auth |
@@ -202,6 +235,8 @@ planned ──► enroute ──► arrived ──► completed
 | PUT | `/api/plans/<id>` | Update plan fields | None |
 | DELETE | `/api/plans/<id>` | Delete plan (cascades) | None |
 | POST | `/api/plans/<id>/confirm` | Set status → confirmed | None |
+| POST | `/api/plans/batch-delete` | Delete several plans (`plan_ids[]`) | None |
+| POST | `/api/plans/clear` | **Delete every plan and everything under it** | None |
 
 ### Assignments
 
@@ -224,7 +259,7 @@ planned ──► enroute ──► arrived ──► completed
 | DELETE | `/api/stops/<id>` | Delete stop + execution |
 | POST | `/api/stops/<id>/skip` | Mark skipped |
 | POST | `/api/stops/<id>/cancel` | Mark cancelled |
-| POST | `/api/stops/reorder` | Reorder stops (`assignment_id`, `stop_ids[]`) |
+| POST | `/api/stops/reorder` | Reorder stops (`assignment_id`, `stop_ids[]` — must name **every** stop of the assignment exactly once) |
 | POST | `/api/stops/insert` | Insert temp stop between existing stops |
 
 ### Execution
@@ -290,9 +325,30 @@ planned ──► enroute ──► arrived ──► completed
 
 4. **Excel import pipeline** — The `confirm_import` function in `plan_service.py` handles the Excel flow by parsing, validating, previewing, and persisting in one transaction per vehicle group.
 
-5. **Dashboard polls every 12s** — The dashboard endpoint returns all data in one call (`/api/execution/dashboard`). Detailed data (stops, ETA) is fetched per-selection only.
+5. **Dashboard polls every 12s** — The dashboard endpoint returns all data in one call (`/api/execution/dashboard`). Detailed data (stops, ETA) is fetched per-selection only, and each of the three detail requests paints as it arrives rather than being awaited together — `/api/eta` is an order of magnitude slower than the other two and used to gate the whole panel.
 
 6. **Plans auto-complete, they're never auto-archived** — `execution_service.py` transitions a plan's status to `completed` once every stop across every vehicle assignment under it is terminal (completed/skipped/cancelled), so finished plans stop appearing on the active dashboard on their own. There's deliberately no automatic archival/deletion of old or abandoned plans (e.g. test data whose stops were never touched) — that's a manual, explicit dispatcher action, left as a future addition pending observed need.
+
+7. **No authentication — anyone who can reach the host can change or delete anything.**
+   A shared dispatcher password (`DISPATCH_PASSWORD`, session cookie, `login_required` on
+   22 mutating endpoints) existed briefly on 2026-07-31 and was removed the same day at
+   the operator's request: this is an internal-network tool and the login step cost time
+   at every shift change. The trade accepted is that the destructive endpoints are again
+   reachable by anyone who can resolve the host, and the app binds `0.0.0.0`.
+
+   `tests/test_delivery_routes.py::TestOpenAccess` is the inverse regression guard — it
+   fails if any of the 22 endpoints starts returning 401/403/503 again, so a gate cannot
+   be reintroduced silently without the frontend being taught about it. **Revisit this
+   before the deployment becomes publicly reachable**, not after. The removed
+   implementation is described in full in `CHANGELOG.md` if it needs rebuilding.
+
+8. **Reordering is optimistic and stops carry two sequence numbers** — `planned_sequence`
+   is fixed when the plan is built; `execution_sequence` (on `stop_executions`) is what
+   everything orders by and what a reorder rewrites. Display the latter, falling back to
+   the former. The dashboard paints a move before the server confirms it and POSTs moves
+   in click order, because the server rewrites every sequence on each call and two racing
+   requests would settle on whichever finished last. Terminal stops are immovable and
+   nothing moves across one — their position is a record of what happened.
 
 ---
 
@@ -328,11 +384,12 @@ ROUTE_REFRESH_INTERVAL=Route cache refresh seconds (default: 60)
 ### Running Tests
 
 ```bash
-# All tests (49 delivery + 26 TLP)
+# Everything — 254 tests
 pytest tests/
 
-# Delivery-specific
-pytest tests/test_delivery.py -v
+# Delivery — run BOTH for any delivery change
+pytest tests/test_delivery.py -v         # 99 — service layer
+pytest tests/test_delivery_routes.py -v  # 88 — route layer
 
 # Single test class
 pytest tests/test_delivery.py::TestStopProgression -v
@@ -341,7 +398,18 @@ pytest tests/test_delivery.py::TestStopProgression -v
 pytest tests/test_delivery.py --cov=services/delivery --cov-report=term
 ```
 
-### Test Coverage
+### Two suites, and why both are needed
+
+`test_delivery.py` imports the service modules directly. That is structurally incapable
+of catching a bug that lives inside a request handler or in an assembled response — which
+is where every Critical finding in `DELIVERY_AUDIT_2026-07-31.md` lived. `test_delivery_routes.py`
+drives real HTTP through `app.test_client()` with TTAS mocked. Neither substitutes for the
+other.
+
+Frontend code has no automated coverage. See `CLAUDE.md` § Definition of Done for the
+jsdom approach used instead.
+
+### Test Coverage — services (`test_delivery.py`)
 
 | Test Class | Tests | Coverage |
 |-----------|-------|----------|
@@ -353,6 +421,17 @@ pytest tests/test_delivery.py --cov=services/delivery --cov-report=term
 | TestImageService | 5 | Upload, list, delete, edge cases |
 | TestProgress | 5 | Progress calculation, breakdown |
 | TestTransactions | 2 | Rollback on failure, cascade delete |
+
+### Test Coverage — routes (`test_delivery_routes.py`)
+
+| Area | Coverage |
+|------|----------|
+| GPS pipeline | GPS reaching the dashboard, telemetry parsed from raw TTAS keys, all five plate formats matching, 0,0 treated as no-fix, malformed coordinates not 500-ing |
+| Open access | All 22 mutating endpoints asserted **reachable** — fails if authentication is reintroduced; `/login` asserted to 404 |
+| Execution lifecycle | Full progression, the double-tap 409, skip/cancel with reasons, plan auto-completion, temp-stop insertion |
+| Reorder validation | Full/partial/foreign-id cases, and that no duplicate `execution_sequence` is left behind |
+| Excel import | Plate variants collapsing to one assignment, unknown plates rejected with nothing written |
+| Uploads | Accepted image types, rejected `.html`/`.svg`/`.php`, oversized/empty, traversal confined to the upload root |
 
 ### Manual Test Checklist
 
@@ -366,7 +445,12 @@ pytest tests/test_delivery.py --cov=services/delivery --cov-report=term
 - [ ] Cancel stop — verify status becomes `cancelled`
 - [ ] Verify execution persists after page refresh
 - [ ] Add duplicate assignment — verify stops copy correctly
-- [ ] Reorder stops via drag-and-drop
+- [ ] Reorder stops via drag-and-drop (plan builder, Step 3)
+- [ ] Reorder stops via the ▲/▼ controls (dashboard timeline) — confirm a completed stop can't move and nothing moves across it
+- [ ] Click a stop in the timeline — verify the map centres on it and Follow switches off
+- [ ] Switch basemap (Satellite / Streets / Muted) — verify the choice survives a reload
+- [ ] Click the satellite map — verify a capture date appears; switch to Streets and verify clicking does nothing
+- [ ] Select a different vehicle — verify the right panel clears immediately and the stop list appears well before ETAs do
 - [ ] Use station search — verify auto-fill
 - [ ] Use map picker — verify lat/lng populated
 - [ ] Test responsive layout at 768px width
@@ -396,13 +480,22 @@ pip install -r requirements.txt
 # Development
 python app.py
 
-# Production (Gunicorn)
-gunicorn -w 4 -b 0.0.0.0:5000 app:app
+# Production (Gunicorn) — this is what render.yaml runs
+gunicorn wsgi:app
 ```
+
+**The target is `wsgi:app`, not `app:app`.** `app.py` (file) and `app/` (package) share
+the name `app`, and Python resolves `import app` to the package, so `app:app` cannot reach
+the Flask instance. An earlier revision of this document specified `-w 4 ... app:app`;
+both halves were wrong.
+
+Note that `render.yaml` passes no `--workers`/`--threads`, so production runs a **single
+synchronous worker** — see Known Limitations.
 
 ### Environment
 
-Create `.env` from `.env.example` with all required keys.
+Create `.env` from `.env.example` with all required keys. There is no authentication
+variable; `DISPATCH_PASSWORD` was removed on 2026-07-31 and is ignored if still present.
 
 ---
 
@@ -414,3 +507,13 @@ Create `.env` from `.env.example` with all required keys.
 4. **N+1 in get_plan** — Loading a plan with N assignments issues N+1 queries (1 for plan, 1 for assignments list, N for each assignment's stops). Acceptable for typical plan sizes (< 20 assignments).
 5. **Page refresh loses unsaved auto-save timer** — The `beforeunload` handler warns users, but a crash during auto-save could lose the current save operation.
 6. **TTAS session expires** — The fleet session cookie expires periodically. The app retries with a fresh session on failure.
+
+7. **Requests are serialised in production** — `render.yaml` runs `gunicorn wsgi:app` with no `--workers`/`--threads`, i.e. one synchronous worker, and `/api/execution/dashboard` performs a blocking TTAS HTTP fetch inside the request. A dispatcher action landing mid-poll waits behind that fetch no matter what the frontend does. The obvious fix is worker/thread flags, but this SQLite database has no `PRAGMA journal_mode=WAL` — adding concurrency without WAL trades the latency for "database is locked" errors. Treat WAL and concurrency as one decision.
+
+8. **No authentication** — see Key Design Decisions #7. Deliberate, and a real exposure if this ever leaves the internal network.
+
+9. **The map depends on three third-party hosts** — `unpkg.com` (Leaflet), `server.arcgisonline.com` (satellite tiles *and* the imagery capture-date query) and `basemaps.cartocdn.com` (street/muted tiles, satellite labels). On a filtered network the map degrades quietly rather than erroring, so allow-list them explicitly. Satellite tiles are also heavier than vector-styled street tiles on a slow link.
+
+10. **A stop with no coordinates can't be located or routed** — it still appears in the timeline and counts toward progress, but has no map marker, is skipped by the route line, and clicking it reports that it isn't on the map.
+
+11. **`.vehicle-list` / `.vehicle-card` has an unfixed flex bug** — the same defect fixed in `.timeline-item` on 2026-07-31 (a flex-column child with no `flex-shrink: 0`, so cards squash instead of the container scrolling). More visible there because the card has no `overflow: hidden`, so text spills between cards. Left alone under scope control; a one-line CSS fix.

@@ -32,6 +32,72 @@ The shared-password gate added earlier the same day was removed at the operator'
 
 Now `position: fixed`, placed by `positionManagePlans()` from the button's `getBoundingClientRect()`: right-aligned to the button where there is room, then clamped to the viewport on every side, with `max-height` set to the space actually remaining below the button so the Delete/Clear row stays reachable. Repositions on `resize`; Escape closes it. `.manage-plans-list` lost its fixed `max-height: 280px` in favour of `flex: 1; min-height: 0` so the panel height governs.
 
+### Fixed — vehicle plate numbers rendered as bare white text on the map
+
+Reported as "the plate number is white and the map is almost white". It was not a colour choice — the dark chip behind the plate was not being drawn behind the plate.
+
+`L.divIcon` is built with `iconSize: [0, 0]`, so the hosting `.leaflet-marker-icon` really is 0×0. `.vehicle-marker-label` is a block-level child, so its used width resolved to `0`; the painted background box was just the 12px of horizontal padding, while `white-space: nowrap` pushed the plate text outside the box entirely. The result was near-white `--text-primary` type sitting directly on near-white OSM tiles, with a small dark sliver to its left. Fixed with `width: max-content`, which sizes the box to the plate. Shadow deepened slightly for a light basemap.
+
+### Fixed — clicking a vehicle took ~15 seconds to update the right panel
+
+Two independent causes, both in `loadAssignmentDetail`/`selectAssignment`. The click was already firing its requests immediately — the delay was in what was done with them.
+
+**1. `Promise.all` gated the whole panel on the slowest request.** The three detail calls went out together and *nothing* painted until all three resolved. `/api/stops` and `/api/execution/progress` read local SQLite and answer in milliseconds; `/api/eta` issues one OpenRouteService call per remaining stop, serially, each with a 30-second server-side timeout. So the stop list — the thing the dispatcher actually clicked for — waited on routing. They are now awaited separately and each paints on arrival: stops first, then progress, then ETAs filling in behind. An ETA failure no longer counts as a detail-load failure; the timeline, stops and route stay on screen.
+
+**2. The previous vehicle's data stayed on screen throughout.** `selectAssignment` emptied `state.selectedStops` and called `renderAll()`, whose right-panel branch is `if (state.selectedStops.length > 0)` — false, so it did nothing, and the timeline, map stops, route line and info bar all kept showing the *previously* selected truck. For those seconds the dispatcher was looking at another vehicle's stops with no indication anything was loading. `selectAssignment` now clears all four immediately and the timeline shows "Loading stops…", so "nothing selected" and "selected, waiting on the server" are visibly different states.
+
+The three call sites that painted the right panel from state were collapsed into one `paintAssignmentDetail()`, since it now runs repeatedly with partial state and all of them have to agree.
+
+Verified under jsdom driving the real modules against a stubbed API with controllable timing: all three requests fire on click, stale rows clear instantly, the stop list paints while the ETA is still hanging, progress and ETA each patch in on arrival, a superseded click is dropped rather than painted, and a rejected ETA leaves the stops intact.
+
+**Not fixed — the server serialises these requests.** `render.yaml` runs `gunicorn wsgi:app` with no `--workers`/`--threads`, which is one synchronous worker, and `/api/execution/dashboard` performs a blocking TTAS HTTP fetch inside the request. A click landing mid-poll therefore still queues behind that fetch no matter what the frontend does. The fix is a `startCommand` change, but adding concurrency to a SQLite database with no `PRAGMA journal_mode=WAL` (see CLAUDE.md) trades this delay for "database is locked" errors, so it is not a drive-by — flagged for a deliberate decision.
+
+### Added — click the satellite map for the imagery capture date
+
+Clicking the map while the Satellite basemap is active queries Esri's World_Imagery `identify` endpoint and shows, in a popup at that point, when the imagery under it was actually taken, plus source, sensor, resolution and positional accuracy. It matters operationally: a yard photographed in 2016 may not be the yard the driver is looking at, and nothing else on the dashboard hints at how old the picture is.
+
+Bound only while Satellite is selected — on the street layers there is no imagery to date. Marker clicks don't reach the map in Leaflet, so clicking a vehicle or a stop can't trigger it.
+
+Four things about this API were established by querying it, not assumed, and each would have produced a wrong or broken feature:
+
+- **`returnGeometry=false` is mandatory, not cosmetic.** Every result carries a detailed footprint polygon; with geometry left on, a *single-result* response measured ~75 KB.
+- **`layers=all` is unusable here.** One click returned 100 records with `exceededTransferLimit: true`. `layers=visible` makes the service scale-filter to the layers actually drawn at the current zoom.
+- **Two attribute schemas come back in the same response.** The footprint layers (0-4) use `DATE (YYYYMMDD)` / `RESOLUTION (M)` / `ACCURACY (M)` / `SOURCE_INFO`; the per-zoom metadata layers (5-18) use `SRC_DATE` / `SRC_RES` / `SRC_ACC` / `NICE_NAME`. Reading only one set silently yields a blank popup on half the layers.
+- **Every value is a string, and a missing value is the literal `"Null"`** — not JSON `null`, not `""`. An unguarded read renders "Captured: Null".
+
+Dates are normalised to ISO `yyyy-mm-dd`. The compact `20241229` form is preferred because it is unambiguous; `SRC_DATE2` arrives as US `12/29/2024` and is parsed by hand, since `new Date()` on that string is locale-dependent and would land on a different day — or an invalid date — in a d/m/y locale.
+
+A point is covered by several overlapping footprints, so the popup picks the one whose cache-level range covers the zoom being viewed, then the sharpest, then the newest. ArcGIS reports its own failures with HTTP 200 and an `error` object, so `resp.ok` alone is not enough; there is also a 10-second abort.
+
+Verified under jsdom against the exact payload Esri returned for Ho Chi Minh City, plus synthetic cases: request parameters and `lng,lat` ordering, the real payload rendering `2024-12-29 / Vivid Advanced · Vantor / WV02 / 0.5 m/pixel / ± 8.47 m`, an all-`"Null"` response failing honestly instead of inventing a date, HTTP-200-with-error, HTTP 503, the `SRC_*` schema with a US-format date, zoom-range preference beating a newer-but-wrong-tier record, and no request at all being issued on the Streets basemap.
+
+### Added — clicking a stop locates it on the map
+
+The timeline said *which* stop; the map said *where*. Connecting the two took a manual pan. Clicking a timeline row — or the pinned current-stop card — now centres the map on that stop and opens its popup, via a new `DASH.map.focusStop()`.
+
+- **Zoom is raised to 15 only if the view is further out than that.** A dispatcher already at street level keeps their level; one looking at the whole city gets pulled close enough for the stop to mean anything.
+- **Follow mode switches off.** It re-centres on the vehicle every poll, so leaving it on would drag the view off the stop within 12 seconds — the same class of complaint as the autopan bug above. `state.setFollowMode()` was extracted so the timeline can do this and keep the button label in sync.
+- **A stop with no coordinates has no marker**, so `focusStop()` returns false and the caller toasts rather than leaving a click that silently did nothing.
+- The reorder buttons already `stopPropagation()`, so moving a stop doesn't also fly the map to it. On the current-stop card, clicks on a `button`, `a` or `input` are ignored — Advance/Skip/Cancel, the `tel:` link and the reason input all live in there.
+
+Verified under jsdom with real Leaflet: centre and zoom after a row click, zoom preserved when already at 17, follow flipped off, the no-coordinates toast with the map staying put, the reorder button firing a reorder without moving the map, the card locating on a background click, and the `tel:` link ignored.
+
+**Known rough edge:** at ≤768px the timeline is a slide-over that covers the map, so on a phone the pan happens underneath a panel you then have to close. Locating and expanding share one click, and making that click also dismiss the panel would fire on every collapse too — left as-is rather than guessed at.
+
+### Added — switchable basemap, satellite by default
+
+A single basemap was tried first (CARTO Positron, on the reasoning that a desaturated base leaves the vehicle chip / current stop / route line as the only saturated colour) and the operator found it bland. Which basemap reads best is a matter of taste and lighting, not something one default gets right for everyone, so it became the dispatcher's choice instead of another guess:
+
+- **Satellite** (default) — Esri World Imagery, paired with CARTO's transparent `dark_only_labels` tiles. The overlay is not optional: imagery carries no street names, so without it you can see the depot roof but not which road it is on.
+- **Streets** — CARTO Voyager. Proper colour, calmer than raw OSM.
+- **Muted** — CARTO Positron.
+
+Leaflet's `L.control.layers` at `topleft`, stacking under the zoom buttons — `.map-controls` owns the top right and the vehicle info bar owns the bottom. The selection persists in `localStorage` under `dashboard_basemap`, wrapped in try/catch on both read and write since private-browsing mode throws on access, not only on write. The control is restyled to the dashboard's dark palette rather than sitting on the map as Leaflet's default white rectangle.
+
+**Marker contrast had to become basemap-independent.** With the base switchable, a marker now has to survive both a near-white street map and dark satellite imagery. The vehicle chip and the stop dots each carry a dark fill/ring *and* a 1px light outer ring via `box-shadow` — the dark part defines them on light tiles, the light part on imagery. The stop dots' original plain white border did neither: it vanished on light tiles and took the pale grey `planned` state with it.
+
+Verified under jsdom with real Leaflet: satellite plus its label overlay load by default, the control offers all three, switching swaps the tile layer and writes to storage, a fresh load restores the saved choice, and the autopan suppression from the previous fix still holds afterwards.
+
 ### Fixed — the map snapped back to the selected vehicle on every poll
 
 Panning away to look at a street was impossible: within ~12 seconds the map dragged itself back onto the vehicle. Nothing in this codebase was calling `setView`/`panTo` on a poll — it was Leaflet's `Popup._adjustPan()`, which pans the map to keep an open popup in view and is on by default. `zoomToVehicle()` opens the selected vehicle's popup, and for a moving truck **two** separate paths reached `_adjustPan()` on every single poll:

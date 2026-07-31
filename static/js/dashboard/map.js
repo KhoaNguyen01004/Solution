@@ -51,6 +51,235 @@ window.DASH = window.DASH || {};
     }
   }
 
+  // ── Basemaps ───────────────────────────────────────────────────
+  // Satellite by default, with Streets and Muted available from the layer
+  // control. The choice is a matter of taste and lighting conditions rather
+  // than something one default gets right for everyone, so it is the
+  // dispatcher's to make and it persists.
+  const BASEMAP_STORAGE_KEY = 'dashboard_basemap';
+
+  function readSavedBasemap() {
+    // Private-browsing mode throws on access, not just on write.
+    try { return localStorage.getItem(BASEMAP_STORAGE_KEY); } catch { return null; }
+  }
+
+  function saveBasemap(name) {
+    try { localStorage.setItem(BASEMAP_STORAGE_KEY, name); } catch { /* not fatal */ }
+  }
+
+  let activeBasemap = null;
+
+  function addBasemaps(map) {
+    const CARTO_ATTR = '&copy; OpenStreetMap contributors &copy; CARTO';
+
+    const layers = {
+      // Imagery carries no street names at all, so it is paired with CARTO's
+      // transparent label tiles — the "dark" variant is light type meant to sit
+      // on a dark background, which is what imagery is. Without the overlay a
+      // dispatcher can see the depot roof but can't tell which road it is on.
+      Satellite: L.layerGroup([
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+          maxZoom: 19,
+          attribution: 'Imagery &copy; Esri, Maxar, Earthstar Geographics',
+        }),
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/dark_only_labels/{z}/{x}/{y}{r}.png', {
+          maxZoom: 19,
+          subdomains: 'abcd',
+          attribution: CARTO_ATTR,
+        }),
+      ]),
+      Streets: L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+        maxZoom: 19,
+        subdomains: 'abcd',
+        attribution: CARTO_ATTR,
+      }),
+      Muted: L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+        maxZoom: 19,
+        subdomains: 'abcd',
+        attribution: CARTO_ATTR,
+      }),
+    };
+
+    const saved = readSavedBasemap();
+    activeBasemap = layers[saved] ? saved : 'Satellite';
+    layers[activeBasemap].addTo(map);
+
+    // topleft, stacking under the zoom buttons — .map-controls owns the top
+    // right corner and the vehicle info bar owns the bottom.
+    L.control.layers(layers, null, { position: 'topleft' }).addTo(map);
+    map.on('baselayerchange', (e) => {
+      activeBasemap = e.name;
+      saveBasemap(e.name);
+    });
+  }
+
+  // ── Imagery capture date ───────────────────────────────────────
+  // Clicking the satellite basemap asks Esri when the imagery under that point
+  // was actually taken. It matters operationally: a warehouse yard photographed
+  // in 2016 may not be the yard a driver is looking at, and the dashboard
+  // otherwise gives no clue how old what you're seeing is.
+  //
+  // Only wired up while Satellite is the active basemap — on the street layers
+  // there is no imagery to date, and a stray click should do nothing.
+  const IMAGERY_IDENTIFY_URL =
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/identify';
+  const IMAGERY_TIMEOUT_MS = 10000;
+
+  function toNumber(value) {
+    if (value == null) return null;
+    const n = parseFloat(value);
+    return isNaN(n) ? null : n;
+  }
+
+  // Every attribute comes back as a *string*, and a missing value as the
+  // literal "Null" — not JSON null, not an empty string. Two schemas are in
+  // play across the layers this returns: the footprint layers (0-4) use
+  // "DATE (YYYYMMDD)" / "RESOLUTION (M)" / "SOURCE_INFO", the per-zoom metadata
+  // layers (5-18) use SRC_DATE / SRC_RES / NICE_NAME. Read both.
+  function attr(attrs, ...names) {
+    for (const name of names) {
+      const value = attrs[name];
+      if (value != null && value !== '' && value !== 'Null') return value;
+    }
+    return null;
+  }
+
+  // Returns ISO yyyy-mm-dd. The compact "20241229" form is unambiguous and
+  // preferred; SRC_DATE2 arrives as US "12/29/2024", which is parsed by hand
+  // because new Date() on that string is locale-dependent — in a d/m/y locale
+  // it silently yields a different day, or an invalid date for 12/29.
+  function parseImageryDate(attrs) {
+    const compact = attr(attrs, 'DATE (YYYYMMDD)', 'SRC_DATE');
+    if (compact && /^\d{8}$/.test(String(compact))) {
+      const s = String(compact);
+      return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+    }
+    const slashed = attr(attrs, 'SRC_DATE2', 'DATE');
+    const m = slashed && String(slashed).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (m) return `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
+    return null;
+  }
+
+  function pickBestImageryResult(results, zoom) {
+    const candidates = (results || []).map((r) => {
+      const a = r.attributes || {};
+      return {
+        date: parseImageryDate(a),
+        product: attr(a, 'SOURCE_INFO', 'NICE_NAME'),
+        source: attr(a, 'SOURCE', 'NICE_DESC'),
+        sensor: attr(a, 'DESCRIPTION', 'SRC_DESC'),
+        resolution: toNumber(attr(a, 'RESOLUTION (M)', 'SRC_RES')),
+        accuracy: toNumber(attr(a, 'ACCURACY (M)', 'SRC_ACC')),
+        minLevel: toNumber(attr(a, 'MinMapLevel', 'FROM_CACHE_LEVEL')),
+        maxLevel: toNumber(attr(a, 'MaxMapLevel', 'TO_CACHE_LEVEL')),
+      };
+      // A record with no capture date can't answer the question that was asked.
+    }).filter((c) => c.date);
+
+    if (candidates.length === 0) return null;
+
+    // A point is covered by several overlapping footprints at different zoom
+    // ranges. Prefer one whose cache-level range actually covers the zoom being
+    // looked at, then the sharpest, then the most recent.
+    const covering = candidates.filter(
+      (c) => c.minLevel != null && c.maxLevel != null && zoom >= c.minLevel && zoom <= c.maxLevel
+    );
+    const pool = covering.length > 0 ? covering : candidates;
+    pool.sort((a, b) => {
+      const ra = a.resolution == null ? Infinity : a.resolution;
+      const rb = b.resolution == null ? Infinity : b.resolution;
+      if (ra !== rb) return ra - rb;
+      return b.date.localeCompare(a.date);
+    });
+    return pool[0];
+  }
+
+  function identifyImagery(latlng) {
+    const bounds = mapInstance.getBounds();
+    const size = mapInstance.getSize();
+    const params = new URLSearchParams({
+      f: 'json',
+      geometry: `${latlng.lng},${latlng.lat}`,
+      geometryType: 'esriGeometryPoint',
+      sr: '4326',
+      // 'visible' makes the service scale-filter to the layers actually drawn
+      // at this zoom. 'all' returns every overlapping footprint — measured at
+      // 100 records with exceededTransferLimit:true on a single click.
+      layers: 'visible',
+      tolerance: '3',
+      mapExtent: [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()].join(','),
+      imageDisplay: `${size.x},${size.y},96`,
+      // Not cosmetic. Each footprint is a detailed polygon; leaving geometry on
+      // turned a single-result response into ~75 KB.
+      returnGeometry: 'false',
+    });
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), IMAGERY_TIMEOUT_MS);
+
+    return fetch(`${IMAGERY_IDENTIFY_URL}?${params.toString()}`, { signal: controller.signal })
+      .then((resp) => {
+        if (!resp.ok) throw new Error(`Esri returned HTTP ${resp.status}`);
+        return resp.json();
+      })
+      .then((body) => {
+        // ArcGIS reports its own failures with HTTP 200 and an `error` object,
+        // so resp.ok is not enough.
+        if (body.error) throw new Error(body.error.message || 'Esri rejected the query');
+        const best = pickBestImageryResult(body.results, mapInstance.getZoom());
+        if (!best) throw new Error('Esri publishes no capture date for this point');
+        return best;
+      })
+      .catch((e) => {
+        if (e.name === 'AbortError') throw new Error('Esri did not respond within 10s');
+        throw e;
+      })
+      .then(
+        (v) => { clearTimeout(timeout); return v; },
+        (e) => { clearTimeout(timeout); throw e; }
+      );
+  }
+
+  function imageryInfoHtml(info, latlng) {
+    const rows = [
+      ['Captured', info.date],
+      ['Source', [info.product, info.source].filter(Boolean).join(' · ') || null],
+      ['Sensor', info.sensor],
+      ['Resolution', info.resolution != null ? `${info.resolution} m/pixel` : null],
+      ['Accuracy', info.accuracy != null ? `± ${info.accuracy} m` : null],
+    ].filter((row) => row[1]);
+
+    return `
+          <div class="imagery-info">
+            <strong>Satellite imagery</strong>
+            <table>${rows.map((row) =>
+              `<tr><th>${escapeHtml(row[0])}</th><td>${escapeHtml(String(row[1]))}</td></tr>`).join('')}</table>
+            <span class="imagery-coords">${latlng.lat.toFixed(5)}, ${latlng.lng.toFixed(5)}</span>
+          </div>`;
+  }
+
+  function showImageryInfo(latlng) {
+    const popup = L.popup({ className: 'imagery-popup', maxWidth: 280 })
+      .setLatLng(latlng)
+      .setContent('<div class="imagery-info">Checking imagery date…</div>')
+      .openOn(mapInstance);
+
+    identifyImagery(latlng)
+      .then((info) => {
+        // The dispatcher may have clicked elsewhere or closed this while the
+        // request was out; writing into a dead popup would reopen nothing but
+        // could resurrect stale content if Leaflet is mid-teardown.
+        if (popup.isOpen()) popup.setContent(imageryInfoHtml(info, latlng));
+      })
+      .catch((err) => {
+        if (!popup.isOpen()) return;
+        popup.setContent(
+          `<div class="imagery-info"><strong>Imagery date unavailable</strong>` +
+          `<span class="imagery-error">${escapeHtml(err.message)}</span></div>`
+        );
+      });
+  }
+
   function statusColor(status) {
     const map = {
       completed: '#2ea043',
@@ -100,10 +329,14 @@ window.DASH = window.DASH || {};
         zoom: 11,
       });
 
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 19,
-        attribution: '&copy; OpenStreetMap contributors',
-      }).addTo(mapInstance);
+      addBasemaps(mapInstance);
+
+      // Marker clicks don't reach the map in Leaflet, so this can't fire from
+      // clicking a vehicle or a stop.
+      mapInstance.on('click', (e) => {
+        if (activeBasemap !== 'Satellite') return;
+        showImageryInfo(e.latlng);
+      });
 
       vehicleMarkerLayer = L.layerGroup().addTo(mapInstance);
       stopMarkerLayer = L.layerGroup().addTo(mapInstance);
@@ -309,6 +542,22 @@ window.DASH = window.DASH || {};
         entry.marker.openPopup();
         currentZoomAssignment = assignmentId;
       }
+    },
+
+    // Centres the map on one stop and opens its popup. Returns false when the
+    // stop has no marker — a stop with no coordinates never got one — so the
+    // caller can say so rather than leaving a click that silently did nothing.
+    //
+    // Zooms in only if the view is currently further out than 15. A dispatcher
+    // who has deliberately zoomed to street level keeps that level; one looking
+    // at the whole city gets pulled in close enough for the stop to mean
+    // something.
+    focusStop(stopId) {
+      const entry = stopMarkers.get(stopId);
+      if (!entry || !mapInstance) return false;
+      mapInstance.setView(entry.marker.getLatLng(), Math.max(mapInstance.getZoom(), 15));
+      entry.marker.openPopup();
+      return true;
     },
 
     // Re-centers on the vehicle without forcing zoom or popping its popup

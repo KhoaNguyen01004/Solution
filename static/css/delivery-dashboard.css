@@ -524,6 +524,8 @@
 
 /* ── Pinned current-stop card ─────────────────────────────── */
 .current-stop-card {
+    /* Clicking the card locates the stop on the map (see timeline.js). */
+    cursor: pointer;
     flex-shrink: 0;
     padding: 10px 12px;
     background: rgba(56,139,253,0.06);
@@ -841,24 +843,144 @@
 
 /* ── Map markers (Leaflet overrides) ──────────────────────── */
 .vehicle-marker-label {
+    /* width:max-content is the fix for the plate reading as bare white text on
+       the map. Leaflet builds this marker with iconSize [0,0], so the hosting
+       .leaflet-marker-icon is literally 0x0 and this block-level child resolved
+       to width:0 — the painted box was just the 12px of horizontal padding,
+       while white-space:nowrap pushed the plate itself outside it. The dark
+       chip sat behind almost none of the text, leaving near-white type directly
+       on near-white OSM tiles. Sizing the box to its content puts the whole
+       plate back on the chip. */
+    width: max-content;
     background: var(--surface-2);
     border: 2px solid var(--accent);
     border-radius: 4px;
     padding: 2px 6px;
     font-size: 10px;
     font-weight: 700;
+    line-height: 1.4;
     color: var(--text-primary);
     white-space: nowrap;
     text-align: center;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    /* Hairline light ring outside the chip. The basemap is now switchable, so
+       a marker has to survive both a near-white street map and dark satellite
+       imagery — the dark chip separates it from the former, this ring from the
+       latter. */
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.6), 0 2px 6px rgba(0,0,0,0.5);
 }
 
 .stop-marker-icon {
     width: 14px;
     height: 14px;
     border-radius: 50%;
-    border: 2px solid #fff;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+    /* Dark ring plus a light outer hairline, for the same reason as the vehicle
+       chip above: the dark ring defines the dot on a light street map, the
+       light ring defines it on satellite imagery. A plain white border (the
+       original) vanished on light tiles and took the pale grey "planned" state
+       with it. */
+    border: 2px solid rgba(13,17,23,0.85);
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.7), 0 1px 4px rgba(0,0,0,0.45);
+}
+
+/* ── Imagery capture-date popup ───────────────────────────── */
+.imagery-popup .leaflet-popup-content-wrapper {
+    background: var(--surface-2);
+    color: var(--text-primary);
+    border: 1px solid var(--border-hover);
+    border-radius: var(--radius);
+    box-shadow: 0 8px 28px rgba(0,0,0,0.55);
+}
+
+.imagery-popup .leaflet-popup-tip {
+    background: var(--surface-2);
+}
+
+.imagery-popup .leaflet-popup-content {
+    margin: 10px 12px;
+}
+
+.imagery-popup a.leaflet-popup-close-button {
+    color: var(--text-secondary);
+}
+
+.imagery-info {
+    font-size: 11.5px;
+    line-height: 1.5;
+}
+
+.imagery-info strong {
+    display: block;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    margin-bottom: 4px;
+}
+
+.imagery-info table {
+    border-collapse: collapse;
+    width: 100%;
+}
+
+.imagery-info th {
+    text-align: left;
+    font-weight: 500;
+    color: var(--text-secondary);
+    padding-right: 10px;
+    white-space: nowrap;
+    vertical-align: top;
+}
+
+.imagery-info td {
+    color: var(--text-primary);
+}
+
+.imagery-coords,
+.imagery-error {
+    display: block;
+    margin-top: 5px;
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+/* ── Basemap switcher ─────────────────────────────────────── */
+/* Leaflet's layer control ships white-on-white; restyled to match the rest of
+   the dashboard rather than sitting on the map as a bright rectangle. */
+.leaflet-control-layers {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.45);
+    color: var(--text-primary);
+}
+
+.leaflet-control-layers-toggle {
+    background-color: var(--surface-2);
+    border-radius: var(--radius);
+}
+
+.leaflet-control-layers-expanded {
+    padding: 8px 10px;
+}
+
+.leaflet-control-layers-list label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 2px 0;
+}
+
+.leaflet-control-layers-list input[type="radio"] {
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.leaflet-control-layers-separator {
+    border-top-color: var(--border);
 }
 
 .stop-marker-icon.completed { background: var(--success); }
