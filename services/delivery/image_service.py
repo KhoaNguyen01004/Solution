@@ -1,5 +1,6 @@
-import os
 import logging
+import re
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -11,15 +12,91 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 UPLOAD_ROOT = BASE_DIR / "DeliveryPlans"
 
+# Only image types the dashboard actually renders. The stored file is served
+# back by GET /api/images/<id>/file via send_file(), which infers Content-Type
+# from the extension — so an uploaded .html or .svg would be served as
+# text/html or image/svg+xml from the application's own origin, i.e. stored
+# XSS with full session access (audit S-05). SVG is excluded deliberately: it
+# is an image format that can execute script.
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
+
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB — phone photos, not video
+
+_UNSAFE_SEGMENT_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+class UploadRejected(ValueError):
+    """Raised when an upload fails validation. Carries a user-safe message."""
+
+
+def _safe_path_segment(value: Optional[str], fallback: str) -> str:
+    """Reduce a user-supplied string to one safe filesystem path component.
+
+    ``station_code`` and ``category`` are attacker-controlled (Excel import,
+    POST /api/stops, and the upload form) and were previously interpolated
+    straight into the upload path, so a value of ``../../../static/js`` let
+    mkdir + save write anywhere inside the repository (audit S-04).
+
+    Separators and traversal sequences are stripped rather than escaped, and
+    a value that reduces to nothing (or to a bare dot sequence) falls back to
+    a constant so the path always has a well-formed component.
+    """
+    text = (value or "").strip()
+    text = text.replace("/", "_").replace("\\", "_")
+    text = _UNSAFE_SEGMENT_CHARS.sub("_", text)
+    text = text.strip("._")
+    if not text or set(text) <= {".", "_"}:
+        return fallback
+    return text[:64]
+
+
+def _validate_upload(file_storage) -> str:
+    """Check extension and size. Returns the normalized extension."""
+    original_name = file_storage.filename or ""
+    ext = Path(original_name).suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise UploadRejected(
+            f"Unsupported file type '{ext or original_name}'. "
+            f"Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+        )
+
+    # FileStorage wraps a SpooledTemporaryFile; seek to the end to size it
+    # without reading the whole payload into memory, then rewind so save()
+    # still writes the complete file.
+    stream = file_storage.stream
+    stream.seek(0, 2)
+    size = stream.tell()
+    stream.seek(0)
+    if size > MAX_UPLOAD_BYTES:
+        raise UploadRejected(
+            f"File is {size // 1024 // 1024} MB; the limit is "
+            f"{MAX_UPLOAD_BYTES // 1024 // 1024} MB."
+        )
+    if size == 0:
+        raise UploadRejected("File is empty.")
+
+    return ext
+
 
 def ensure_folder(category: str, plan_date: str, plate: str, station_code: str) -> Path:
     try:
         dt = datetime.fromisoformat(plan_date)
     except (ValueError, TypeError):
         dt = datetime.now()
-    folder = UPLOAD_ROOT / str(dt.year) / f"{dt.month:02d}" / f"{dt.day:02d}" / plate / station_code / category
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder
+
+    folder = (UPLOAD_ROOT / str(dt.year) / f"{dt.month:02d}" / f"{dt.day:02d}"
+              / _safe_path_segment(plate, "unknown-vehicle")
+              / _safe_path_segment(station_code, "unknown-station")
+              / _safe_path_segment(category, "extra"))
+
+    # Belt and braces: even with every segment sanitized, confirm the
+    # resolved path is still inside UPLOAD_ROOT before creating it.
+    resolved = folder.resolve()
+    if not resolved.is_relative_to(UPLOAD_ROOT.resolve()):
+        raise UploadRejected("Invalid upload destination.")
+
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
 
 
 def upload_image(db_path: str, stop_id: int, file_storage,
@@ -50,10 +127,17 @@ def upload_image(db_path: str, stop_id: int, file_storage,
         plate = plate or stop_info["plate_number"]
         station_code = station_code or stop_info["station_code"]
 
+        ext = _validate_upload(file_storage)
+
         folder = ensure_folder(category, plan_date, plate, station_code)
         original_name = file_storage.filename or f"image_{datetime.now().timestamp()}"
-        ext = Path(original_name).suffix if original_name else ""
-        filename = f"{int(datetime.now().timestamp())}{ext}"
+        # Timestamp alone is second-granularity, so two photos of the same
+        # stop and category taken in the same second collided and one
+        # silently overwrote the other — two DB rows pointing at one file,
+        # i.e. lost proof-of-delivery evidence (audit C-08). The uuid suffix
+        # keeps the sortable timestamp prefix while making collision
+        # impossible.
+        filename = f"{int(datetime.now().timestamp())}-{uuid.uuid4().hex[:8]}{ext}"
         file_path = folder / filename
 
         file_storage.save(str(file_path))

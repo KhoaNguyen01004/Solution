@@ -52,8 +52,9 @@ truck_load_planner/   3D bin-packing engine; geometry/aabb.py is the single cano
 services/delivery/    Plan/execution/tracking/ETA/image services + routes.py. Unrelated
                       to app/services/ above — same parent word, different packages
 static/js/utils.js    Shared ApiClient (fetch wrapper) + UI (.toast(), .escapeHtml())
-                      namespace. 3 pages still use the legacy global showToast():
-                      locations.js, trip-history.js, manage-trips.js
+                      namespace. 1 page still uses the legacy global showToast():
+                      locations.js. (Was 3 — trip-history.js and manage-trips.js
+                      were deleted 2026-07-31 with the trip pages.)
 ```
 
 `templates/` — one HTML page per entry, matching `static/js/` filenames.

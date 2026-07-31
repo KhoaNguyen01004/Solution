@@ -8,8 +8,18 @@ const ApiClient = {
     async fetch(url, opts = {}) {
         const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
         const resp = await fetch(this.BASE + url, { ...opts, headers });
+
         const data = await resp.json();
-        if (!data.success) throw new Error(data.message || 'Unknown error');
+        if (!data.success) {
+            // Carry the structured body on the Error so callers can act on it
+            // (e.g. an `unknown_vehicle` rejection needs `redirect_to` and the
+            // prefill fields, not just the message). Existing callers that
+            // only read err.message are unaffected.
+            const err = new Error(data.message || 'Unknown error');
+            err.data = data;
+            err.status = resp.status;
+            throw err;
+        }
         return data;
     },
 

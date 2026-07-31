@@ -1,3 +1,4 @@
+import io
 import os
 import sys
 import json
@@ -14,6 +15,7 @@ from services.delivery import execution_service
 from services.delivery import eta_service
 from services.delivery import image_service
 from services.delivery import tracking_service
+from services import vehicle_identity
 from services.delivery.database import init_delivery_tables
 from app.db import DatabaseManager
 
@@ -21,6 +23,25 @@ from app.db import DatabaseManager
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def isolated_upload_root(tmp_path, monkeypatch):
+    """Keep uploaded test images out of the repository.
+
+    image_service derives UPLOAD_ROOT from its own file location, so the image
+    tests were writing real .jpg files into the project's DeliveryPlans/ folder
+    and leaving them behind — dozens had accumulated across previous runs. It
+    also made test_delete_image_removes_file depend on the checkout being
+    writable, which it isn't on every machine.
+    """
+    from services.delivery import image_service
+
+    root = tmp_path / "DeliveryPlans"
+    root.mkdir()
+    monkeypatch.setattr(image_service, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(image_service, "UPLOAD_ROOT", root)
+    yield root
+
 
 @pytest.fixture
 def db_path():
@@ -220,44 +241,106 @@ class TestEtaService:
 # 1b. Tracking Service Tests (defensive speed parsing)
 # ===========================================================================
 
+def _raw_ttas(**overrides):
+    """A raw TTAS DevList item — the actual input contract of
+    normalize_gps_position(). Keys are TTAS's own, NOT normalize_vehicle()'s
+    output names."""
+    item = {
+        "biensoxe": "50E-18463",
+        "latitude": "10.8",
+        "longitude": "106.6",
+        "speed": "Chạy 42km/h",
+        "ad3": "Nổ",
+        "trktime": "2026-07-30 10:00:00",
+        "driver": "Nguyen Van A",
+    }
+    item.update(overrides)
+    return item
+
+
 class TestTrackingService:
-    """Tests for tracking_service.py: TTAS speed_status is a Vietnamese
-    status phrase, not clean numeric data — these confirm the parser is
-    defensive rather than assuming a clean format."""
+    """Tests for tracking_service.py.
 
-    def test_normalize_gps_position_parses_embedded_speed(self):
-        result = tracking_service.normalize_gps_position({
-            "latitude": 10.8, "longitude": 106.6, "speed_status": "Chạy 42km/h",
-            "vehicle_status": "moving", "last_update": "2026-07-30T10:00:00",
-        })
+    These previously fed hand-written dicts keyed on speed_status /
+    vehicle_status / last_update — the OUTPUT names of normalize_vehicle(),
+    not the raw TTAS input names the function actually receives. They passed
+    against a function that could never work in production (audit C-02/T-02).
+    They now use real raw-TTAS field names.
+    """
+
+    def test_emits_device_name_and_plate_key(self):
+        # The regression that broke the entire dashboard: no device_name was
+        # emitted, so no GPS position could ever be matched to a vehicle.
+        result = tracking_service.normalize_gps_position(_raw_ttas())
+        assert result["device_name"] == "50E-18463"
+        assert result["plate_key"] == "18463"
+
+    @pytest.mark.parametrize("plate,expected_key", [
+        ("50E-18463", "18463"),
+        ("50E18463", "18463"),
+        ("50E 18463", "18463"),
+        ("18463", "18463"),
+        ("50e-18463", "18463"),
+    ])
+    def test_plate_key_is_stable_across_formats(self, plate, expected_key):
+        result = tracking_service.normalize_gps_position(_raw_ttas(biensoxe=plate))
+        assert result["plate_key"] == expected_key
+
+    def test_reads_raw_ttas_field_names(self):
+        result = tracking_service.normalize_gps_position(_raw_ttas())
+        assert result["speed"] == "Chạy 42km/h"       # from "speed", not "speed_status"
+        assert result["engine_status"] == "Nổ"         # from "ad3"
+        assert result["last_update"] == "2026-07-30 10:00:00"  # from "trktime"
+        assert result["driver_name"] == "Nguyen Van A"  # from "driver"
+        assert result["vehicle_status"] == "running"    # derived from the speed phrase
+
+    def test_coordinates_are_floats(self):
+        result = tracking_service.normalize_gps_position(_raw_ttas())
+        assert result["lat"] == pytest.approx(10.8)
+        assert result["lng"] == pytest.approx(106.6)
+
+    def test_missing_coordinates_become_none_not_zero(self):
+        # safe_float() coerces junk to 0.0; 0,0 is the Gulf of Guinea, not a
+        # vehicle position, so it must be reported as "no fix".
+        result = tracking_service.normalize_gps_position(
+            _raw_ttas(latitude=None, longitude=None)
+        )
+        assert result["lat"] is None
+        assert result["lng"] is None
+
+    def test_malformed_coordinates_do_not_raise(self):
+        # A bare float() here used to raise ValueError inside a list
+        # comprehension and 500 the whole dashboard request.
+        result = tracking_service.normalize_gps_position(_raw_ttas(latitude="", longitude="n/a"))
+        assert result["lat"] is None and result["lng"] is None
+
+    def test_vehicle_status_stopped_engine_on_vs_off(self):
+        on = tracking_service.normalize_gps_position(_raw_ttas(speed="Dừng đỗ", ad3="Nổ"))
+        off = tracking_service.normalize_gps_position(_raw_ttas(speed="Dừng đỗ", ad3="Tắt"))
+        assert on["vehicle_status"] == "stopped_engine_on"
+        assert off["vehicle_status"] == "stopped_engine_off"
+
+    def test_speed_parses_embedded_number(self):
+        result = tracking_service.normalize_gps_position(_raw_ttas(speed="Chạy 42km/h"))
         assert result["speed_kmh"] == 42.0
-        assert result["speed"] == "Chạy 42km/h"
 
-    def test_normalize_gps_position_speed_none_when_unparseable(self):
-        result = tracking_service.normalize_gps_position({
-            "latitude": 10.8, "longitude": 106.6, "speed_status": "Dừng đỗ",
-        })
-        assert result["speed_kmh"] is None
-
-    def test_normalize_gps_position_speed_none_when_missing(self):
-        result = tracking_service.normalize_gps_position({"latitude": 10.8, "longitude": 106.6})
-        assert result["speed_kmh"] is None
-
-    def test_normalize_gps_position_parses_decimal_speed(self):
-        result = tracking_service.normalize_gps_position({
-            "latitude": 10.8, "longitude": 106.6, "speed_status": "Chạy 37.5 km/h",
-        })
+    def test_speed_parses_decimal(self):
+        result = tracking_service.normalize_gps_position(_raw_ttas(speed="Chạy 37.5 km/h"))
         assert result["speed_kmh"] == 37.5
 
-    def test_normalize_gps_position_never_defaults_to_zero(self):
+    def test_speed_none_when_unparseable(self):
+        result = tracking_service.normalize_gps_position(_raw_ttas(speed="Dừng đỗ"))
+        assert result["speed_kmh"] is None
+
+    def test_speed_none_when_missing(self):
+        result = tracking_service.normalize_gps_position(_raw_ttas(speed=""))
+        assert result["speed_kmh"] is None
+
+    def test_speed_never_defaults_to_zero(self):
         # A genuine 0 km/h reading and "we don't know" must stay distinguishable.
-        moving_unparseable = tracking_service.normalize_gps_position({
-            "latitude": 10.8, "longitude": 106.6, "speed_status": "unknown state",
-        })
-        assert moving_unparseable["speed_kmh"] is None
-        stopped = tracking_service.normalize_gps_position({
-            "latitude": 10.8, "longitude": 106.6, "speed_status": "Chạy 0km/h",
-        })
+        unparseable = tracking_service.normalize_gps_position(_raw_ttas(speed="unknown state"))
+        assert unparseable["speed_kmh"] is None
+        stopped = tracking_service.normalize_gps_position(_raw_ttas(speed="Chạy 0km/h"))
         assert stopped["speed_kmh"] == 0.0
 
 
@@ -509,14 +592,22 @@ class TestStopReordering:
 # ===========================================================================
 
 class FakeFileStorage:
-    """Mimics Flask's FileStorage for testing."""
+    """Mimics Werkzeug's FileStorage for testing.
+
+    Now exposes ``.stream`` because that is what a real FileStorage provides
+    and what image_service._validate_upload seeks over to size the upload
+    without buffering it. The previous fake had only ``.filename`` and
+    ``.save()``, which let it pass tests that a real upload could not.
+    """
     def __init__(self, content: bytes, filename: str):
         self.content = content
         self.filename = filename
+        self.stream = io.BytesIO(content)
 
     def save(self, path):
+        self.stream.seek(0)
         with open(path, "wb") as f:
-            f.write(self.content)
+            f.write(self.stream.read())
 
 
 class TestImageService:
@@ -638,12 +729,23 @@ class TestProgress:
         assert prog["remaining"] == 1
 
     def test_progress_empty(self, db_path):
+        """An assignment with no stops has no stops.
+
+        This test previously asserted `total == 1` with the comment "fallback
+        to avoid div-by-zero" — it encoded audit bug C-09 as intended
+        behaviour. The `or 1` guard belonged on the division, not the total,
+        and the wrong version made the dashboard report "1 remaining" for an
+        assignment that had nothing in it.
+        """
         plan_id = _create_plan(db_path)
         assignment_id = _create_vehicle_assignment(db_path, plan_id)
 
         prog = execution_service.get_assignment_progress(db_path, assignment_id)
-        assert prog["total"] == 1  # fallback to avoid div-by-zero
+        assert prog["total"] == 0
+        assert prog["completed"] == 0
+        assert prog["remaining"] == 0
         assert prog["progress_pct"] == 0.0
+        assert prog["breakdown"] == {}
 
     def test_dashboard_data(self, db_path):
         plan_id = _create_plan(db_path, "Dash Plan")
@@ -689,3 +791,346 @@ class TestTransactions:
         assert plan_service.get_plan(db_path, plan_id) is None
         assert plan_service.get_assignment(db_path, assignment_id) is None
         assert len(plan_service.list_stops(db_path, assignment_id)) == 0
+
+
+# ===========================================================================
+# 8. Vehicle Identity Service (Phase 2 — audit C-05, L-03, §5)
+# ===========================================================================
+
+def _add_vehicle(db_path, plate):
+    with DatabaseManager(db_path).connect() as conn:
+        conn.execute("INSERT INTO vehicles (plate_number) VALUES (?)", (plate,))
+        return conn.execute("SELECT id FROM vehicles WHERE plate_number = ?", (plate,)).fetchone()["id"]
+
+
+def _count_vehicles(db_path):
+    with DatabaseManager(db_path).connect() as conn:
+        return conn.execute("SELECT COUNT(*) c FROM vehicles").fetchone()["c"]
+
+
+class TestVehicleIdentity:
+    """services/vehicle_identity.py — the resolver that replaces five
+    mutually incompatible plate-matching schemes (audit §5)."""
+
+    @pytest.mark.parametrize("stored,lookup,matched_by", [
+        ("50E-18463", "50E-18463", "exact"),
+        ("50E-18463", "50E18463", "canonical"),
+        ("50E-18463", "50E 18463", "canonical"),
+        ("50E-18463", "50e-18463", "canonical"),
+        ("50E-18463", "  50E-18463  ", "exact"),
+        ("50E-18463", "18463", "serial"),
+        ("50E18463", "50E-18463", "canonical"),
+    ])
+    def test_resolves_every_plate_format(self, db_path, stored, lookup, matched_by):
+        vid = _add_vehicle(db_path, stored)
+        with DatabaseManager(db_path).connect() as conn:
+            ref = vehicle_identity.resolve(conn, lookup)
+        assert ref is not None, f"{lookup!r} failed to resolve against stored {stored!r}"
+        assert ref.id == vid
+        assert ref.matched_by == matched_by
+
+    def test_unknown_plate_returns_none_and_never_creates(self, db_path):
+        before = _count_vehicles(db_path)
+        with DatabaseManager(db_path).connect() as conn:
+            assert vehicle_identity.resolve(conn, "99Z-00000") is None
+        assert _count_vehicles(db_path) == before
+
+    @pytest.mark.parametrize("empty", ["", "   ", None])
+    def test_empty_identifier_resolves_to_none(self, db_path, empty):
+        with DatabaseManager(db_path).connect() as conn:
+            assert vehicle_identity.resolve(conn, empty) is None
+
+    def test_full_plate_wins_over_bare_serial_duplicate(self, db_path):
+        """The exact duplicate shape merge_duplicate_vehicles.py cleans up:
+        a stray '09473' row alongside the real '50H-09473'."""
+        full = _add_vehicle(db_path, "50H-09473")
+        _add_vehicle(db_path, "09473")
+        with DatabaseManager(db_path).connect() as conn:
+            ref = vehicle_identity.resolve(conn, "09473")
+        assert ref.id == full and ref.plate_number == "50H-09473"
+
+    def test_ambiguous_serial_refuses_to_guess(self, db_path):
+        """Two different full plates sharing a 5-digit serial must not be
+        silently collapsed — stops would attach to the wrong truck."""
+        a = _add_vehicle(db_path, "50H-18463")
+        _add_vehicle(db_path, "51C-18463")
+        with DatabaseManager(db_path).connect() as conn:
+            assert vehicle_identity.resolve(conn, "18463") is None
+            # An exact plate is still unambiguous and must still resolve.
+            assert vehicle_identity.resolve(conn, "50H-18463").id == a
+
+    def test_module_exposes_no_write_path(self):
+        """Adding a vehicle is a Vehicle Management action. This module must
+        never grow a create/insert helper — that is how duplicate rows got
+        into `vehicles` in the first place."""
+        writes = [n for n in dir(vehicle_identity)
+                  if any(w in n.lower() for w in ("create", "insert", "add", "save"))
+                  and not n.startswith("_")]
+        assert writes == [], f"vehicle_identity must stay read-only, found: {writes}"
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("50E-18463", "50E18463"),
+        ("50e 18463", "50E18463"),
+        ("  50E--18463 ", "50E18463"),
+        ("", ""),
+        (None, ""),
+    ])
+    def test_canonical_plate(self, raw, expected):
+        assert vehicle_identity.canonical_plate(raw) == expected
+
+
+class TestImportVehicleResolution:
+    """confirm_import must resolve plate variants onto existing rows instead
+    of silently creating duplicates (audit C-05) and must not split one truck
+    across two assignments (audit L-03)."""
+
+    def _rows(self, *vehicle_keys):
+        return [
+            {"vehicle": v, "sequence": i + 1, "station_code": f"S{i+1}",
+             "station_name": f"Stop {i+1}", "lat": 10.8, "lng": 106.6}
+            for i, v in enumerate(vehicle_keys)
+        ]
+
+    def test_plate_variants_resolve_to_one_existing_vehicle(self, db_path):
+        vid = _add_vehicle(db_path, "50E-18463")
+        before = _count_vehicles(db_path)
+        plan_id = _create_plan(db_path)
+
+        # Four spellings of the same truck in one file.
+        summary = plan_service.confirm_import(
+            db_path, plan_id,
+            self._rows("50E-18463", "50E18463", "50E 18463", "18463"),
+        )
+
+        assert _count_vehicles(db_path) == before, "import created duplicate vehicles (C-05)"
+        assert summary["assignments_created"] == 1, "one truck split into multiple assignments (L-03)"
+        assert summary["stops_created"] == 4
+
+        plan = plan_service.get_plan(db_path, plan_id)
+        assert len(plan["assignments"]) == 1
+        assert plan["assignments"][0]["vehicle_id"] == vid
+
+    def test_unknown_vehicle_raises_and_writes_nothing(self, db_path):
+        _add_vehicle(db_path, "50E-18463")
+        before = _count_vehicles(db_path)
+        plan_id = _create_plan(db_path)
+
+        with pytest.raises(plan_service.UnknownVehicles) as exc:
+            plan_service.confirm_import(db_path, plan_id, self._rows("50E-18463", "99Z-00000"))
+
+        assert "99Z-00000" in exc.value.identifiers
+        assert "50E-18463" not in exc.value.identifiers
+        # The whole import is one transaction — a partial write would leave
+        # the plan half-imported with no way to tell.
+        assert _count_vehicles(db_path) == before
+        assert plan_service.get_plan(db_path, plan_id)["assignments"] == []
+        assert plan_service.get_plan(db_path, plan_id)["status"] == "draft"
+
+    def test_import_never_creates_a_vehicle_under_any_flag(self, db_path):
+        """There is no override. An unknown plate always aborts, and no
+        keyword argument can turn the import into a vehicle-creation path."""
+        before = _count_vehicles(db_path)
+        plan_id = _create_plan(db_path)
+
+        with pytest.raises(plan_service.UnknownVehicles):
+            plan_service.confirm_import(db_path, plan_id, self._rows("51D-77777"))
+        assert _count_vehicles(db_path) == before
+
+        import inspect
+        params = inspect.signature(plan_service.confirm_import).parameters
+        assert set(params) == {"db_path", "plan_id", "import_data"}, \
+            "confirm_import must not accept a vehicle-creation escape hatch"
+
+    def test_error_names_every_unknown_plate_once(self, db_path):
+        """Variants of the same unknown plate collapse to one entry, so the
+        dispatcher sees one problem to fix rather than three."""
+        plan_id = _create_plan(db_path)
+        with pytest.raises(plan_service.UnknownVehicles) as exc:
+            plan_service.confirm_import(
+                db_path, plan_id, self._rows("51D-77777", "51D77777", "77777")
+            )
+        assert len(exc.value.identifiers) == 1
+
+    def test_plan_marked_confirmed_once(self, db_path):
+        _add_vehicle(db_path, "50E-18463")
+        _add_vehicle(db_path, "50H-93571")
+        plan_id = _create_plan(db_path)
+
+        summary = plan_service.confirm_import(
+            db_path, plan_id, self._rows("50E-18463", "50H-93571"),
+        )
+
+        assert summary["plan_confirmed"] is True
+        plan = plan_service.get_plan(db_path, plan_id)
+        assert plan["status"] == "confirmed"
+        assert plan["imported_at"] is not None
+
+    def test_empty_import_leaves_plan_in_draft(self, db_path):
+        """Used to return success while the plan silently stayed 'draft' and
+        never reached the dashboard (audit L-06) — now reported honestly."""
+        plan_id = _create_plan(db_path)
+        summary = plan_service.confirm_import(db_path, plan_id, [])
+        assert summary["plan_confirmed"] is False
+        assert summary["assignments_created"] == 0
+        assert plan_service.get_plan(db_path, plan_id)["status"] == "draft"
+
+
+class TestPreviewImportResolution:
+    def test_preview_reports_resolution_when_given_a_db(self, db_path):
+        _add_vehicle(db_path, "50E-18463")
+        rows = [
+            {"vehicle": "50E18463", "sequence": 1, "station_code": "S1", "lat": 10.8, "lng": 106.6},
+            {"vehicle": "99Z-00000", "sequence": 1, "station_code": "S2", "lat": 10.8, "lng": 106.6},
+        ]
+        preview = plan_service.preview_import(rows, db_path=db_path)
+
+        assert preview["vehicles_checked"] is True
+        assert preview["unknown_vehicles"] == ["99Z-00000"]
+        by_id = {a["vehicle_identifier"]: a for a in preview["assignments"]}
+        assert by_id["50E18463"]["resolved"] is True
+        assert by_id["50E18463"]["resolved_plate"] == "50E-18463"
+        assert by_id["50E18463"]["matched_by"] == "canonical"
+        assert by_id["99Z-00000"]["resolved"] is False
+
+    def test_preview_without_db_keeps_old_behaviour(self, db_path):
+        rows = [{"vehicle": "50E-18463", "sequence": 1, "station_code": "S1"}]
+        preview = plan_service.preview_import(rows)
+        assert preview["vehicles_checked"] is False
+        assert preview["total_assignments"] == 1
+        assert preview["unknown_vehicles"] == []
+
+
+# ===========================================================================
+# 9. Execution correctness (Phase 3 — audit C-07, C-09, reorder validation)
+# ===========================================================================
+
+class TestAdvanceAtomicity:
+    """A stop must not be walked two steps by one accidental double-tap
+    (audit C-07). Dispatch is used on phones; a double-tap is routine."""
+
+    def _stop(self, db_path):
+        plan_id = _create_plan(db_path)
+        assignment_id = _create_vehicle_assignment(db_path, plan_id)
+        return _create_stop(db_path, assignment_id, 1)
+
+    def test_double_advance_with_expected_status_is_refused(self, db_path):
+        stop_id = self._stop(db_path)
+
+        ok, msg = execution_service.advance_stop(db_path, stop_id, expected_status="planned")
+        assert ok and msg == "advanced"
+        assert execution_service.get_stop_execution(db_path, stop_id)["status"] == "arrived"
+
+        # The second tap carries the same token the button was rendered with.
+        ok, msg = execution_service.advance_stop(db_path, stop_id, expected_status="planned")
+        assert ok is False
+        assert "already" in msg.lower()
+        # Critically: still 'arrived', not skipped through to 'completed'.
+        assert execution_service.get_stop_execution(db_path, stop_id)["status"] == "arrived"
+
+    def test_arrival_is_not_erased_by_a_double_tap(self, db_path):
+        """The damage wasn't only the status — arrival and departure were
+        stamped in the same second, destroying dwell time."""
+        stop_id = self._stop(db_path)
+        execution_service.advance_stop(db_path, stop_id, expected_status="planned")
+        execution_service.advance_stop(db_path, stop_id, expected_status="planned")
+
+        e = execution_service.get_stop_execution(db_path, stop_id)
+        assert e["actual_arrival_at"] is not None
+        assert e["actual_departure_at"] is None, "stop was completed by the second tap"
+
+    def test_deliberate_two_step_progression_still_works(self, db_path):
+        """The guard must not break the normal flow: a dispatcher advancing
+        twice, each time from the status actually on screen."""
+        stop_id = self._stop(db_path)
+
+        ok, msg = execution_service.advance_stop(db_path, stop_id, expected_status="planned")
+        assert (ok, msg) == (True, "advanced")
+        ok, msg = execution_service.advance_stop(db_path, stop_id, expected_status="arrived")
+        assert (ok, msg) == (True, "completed")
+        assert execution_service.get_stop_execution(db_path, stop_id)["status"] == "completed"
+
+    def test_advance_without_token_still_supported(self, db_path):
+        """expected_status is optional — older callers keep working."""
+        stop_id = self._stop(db_path)
+        assert execution_service.advance_stop(db_path, stop_id)[0] is True
+        assert execution_service.get_stop_execution(db_path, stop_id)["status"] == "arrived"
+
+    def test_cannot_advance_a_terminal_stop(self, db_path):
+        stop_id = self._stop(db_path)
+        execution_service.skip_stop(db_path, stop_id, "no access")
+        ok, msg = execution_service.advance_stop(db_path, stop_id)
+        assert ok is False and "skipped" in msg
+
+
+class TestReorderValidation:
+    """reorder_stops accepted any list and applied it stop-by-stop, so a
+    partial list left duplicate execution_sequence values and ids from another
+    assignment silently no-opped while reporting success."""
+
+    def _assignment_with_stops(self, db_path, n=3):
+        plan_id = _create_plan(db_path)
+        assignment_id = _create_vehicle_assignment(db_path, plan_id)
+        ids = [_create_stop(db_path, assignment_id, i) for i in range(1, n + 1)]
+        return assignment_id, ids
+
+    def test_full_reorder_succeeds(self, db_path):
+        aid, ids = self._assignment_with_stops(db_path)
+        ok, msg = execution_service.reorder_stops(db_path, aid, [ids[2], ids[0], ids[1]])
+        assert ok is True and msg == "reordered"
+        assert [s["id"] for s in plan_service.list_stops(db_path, aid)] == [ids[2], ids[0], ids[1]]
+
+    def test_partial_list_is_rejected(self, db_path):
+        aid, ids = self._assignment_with_stops(db_path)
+        before = [s["id"] for s in plan_service.list_stops(db_path, aid)]
+
+        ok, msg = execution_service.reorder_stops(db_path, aid, [ids[2], ids[1]])
+        assert ok is False and "missing" in msg
+
+        # Nothing partially applied — no duplicate sequences left behind.
+        assert [s["id"] for s in plan_service.list_stops(db_path, aid)] == before
+        seqs = [s["execution_sequence"] for s in plan_service.list_stops(db_path, aid)]
+        assert len(seqs) == len(set(seqs)), f"duplicate execution_sequence values: {seqs}"
+
+    def test_foreign_stop_ids_are_rejected(self, db_path):
+        aid, ids = self._assignment_with_stops(db_path, n=1)
+        other_aid, other_ids = self._assignment_with_stops(db_path, n=1)
+
+        ok, msg = execution_service.reorder_stops(db_path, aid, other_ids)
+        assert ok is False
+        assert "not in this assignment" in msg
+
+    def test_duplicate_ids_are_rejected(self, db_path):
+        aid, ids = self._assignment_with_stops(db_path, n=2)
+        ok, msg = execution_service.reorder_stops(db_path, aid, [ids[0], ids[0]])
+        assert ok is False and "duplicate" in msg.lower()
+
+    def test_empty_assignment_is_rejected(self, db_path):
+        plan_id = _create_plan(db_path)
+        aid = _create_vehicle_assignment(db_path, plan_id)
+        ok, msg = execution_service.reorder_stops(db_path, aid, [])
+        assert ok is False and "no stops" in msg
+
+
+class TestProgressWithoutStops:
+    """audit C-09 — `total = sum(...) or 1` leaked a division guard into the
+    reported totals."""
+
+    def test_dashboard_reports_zero_not_one(self, db_path):
+        plan_id = _create_plan(db_path, "Empty")
+        plan_service.update_plan(db_path, plan_id, status="confirmed")
+        _create_vehicle_assignment(db_path, plan_id)
+
+        entry = execution_service.get_dashboard_data(db_path)[0]
+        assert entry["progress"]["total"] == 0
+        assert entry["progress"]["remaining"] == 0, "dispatcher would chase a stop that doesn't exist"
+        assert entry["progress"]["progress_pct"] == 0.0
+
+    def test_percentage_still_correct_with_stops(self, db_path):
+        plan_id = _create_plan(db_path)
+        aid = _create_vehicle_assignment(db_path, plan_id)
+        ids = [_create_stop(db_path, aid, i) for i in range(1, 5)]
+        execution_service.skip_stop(db_path, ids[0], "x")
+
+        prog = execution_service.get_assignment_progress(db_path, aid)
+        assert (prog["total"], prog["completed"], prog["remaining"]) == (4, 1, 3)
+        assert prog["progress_pct"] == 25.0

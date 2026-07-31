@@ -117,6 +117,9 @@
     const resp = await fetch(url, opts);
     if (!resp.ok) {
       const body = await resp.json().catch(() => ({}));
+
+      // Delivery endpoints return raw JSON rather than utils.js's
+      // {success: ...} envelope, so this page can't use ApiClient directly.
       throw new Error(body.error || body.message || `HTTP ${resp.status}`);
     }
     return resp.json();

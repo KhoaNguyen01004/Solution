@@ -719,11 +719,41 @@ async function saveEntry() {
         await loadDashboard();
         await loadProfiles();
     } catch (err) {
-        UI.toast(err.message, 'error');
+        if (!handleUnknownVehicle(err)) UI.toast(err.message, 'error');
     } finally {
         btn.disabled = false;
         btn.textContent = editingId ? 'Save Changes' : 'Save Entry';
     }
+}
+
+// ── Unknown vehicle → Vehicle Management ───────────────────────
+// The server no longer creates a vehicle for an unrecognised plate, because
+// that silently added rows to core fleet data (and, matching on the exact
+// plate string, created duplicates of trucks that were already registered).
+// Matching is loose — exact, then ignoring case/separators, then on the
+// 5-digit serial — so this only fires for a plate genuinely not in the fleet.
+// When it does, send the user to register it with everything we already know
+// pre-filled, rather than making them retype it.
+function handleUnknownVehicle(err) {
+    const info = err && err.data;
+    if (!info || info.error_code !== 'unknown_vehicle') return false;
+
+    const v = info.unknown_vehicle || {};
+    const entered = v.entered || '';
+    const suggested = v.suggested_plate || entered;
+
+    const proceed = confirm(
+        `"${entered}" is not a registered vehicle, so nothing was saved.\n\n` +
+        `Add it to Vehicle Management now?\n` +
+        `The form will be pre-filled with plate ${suggested}` +
+        (v.current_driver ? ` and driver ${v.current_driver}` : '') + `.`
+    );
+    if (proceed && info.redirect_to) {
+        window.location.href = info.redirect_to;
+    } else {
+        UI.toast(info.message, 'error', 6000);
+    }
+    return true;
 }
 
 // ── Delete Entry ───────────────────────────────────────────────

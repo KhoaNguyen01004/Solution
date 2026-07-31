@@ -31,6 +31,20 @@ def create_app():
     app = Flask(__name__, static_folder="../static", template_folder="../templates")
     app.secret_key = config.SECRET_KEY
 
+    # Session cookie hardening. Kept even though no route reads the session
+    # today (the dispatcher login was removed 2026-07-31): these are defaults
+    # for the whole app, and re-deriving them later is easy to get wrong.
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=not config.FLASK_DEBUG,
+        # Hard ceiling on request bodies — Werkzeug rejects anything larger
+        # before it reaches a view, so an oversized upload can't exhaust
+        # memory or disk. image_service enforces its own tighter per-file
+        # limit with a friendlier error.
+        MAX_CONTENT_LENGTH=config.MAX_UPLOAD_MB * 1024 * 1024,
+    )
+
     # Shared runtime state
     from app.services.locations import load_known_locations
     from app.services.ttas_client import create_fleet_session

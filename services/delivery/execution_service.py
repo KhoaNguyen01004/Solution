@@ -87,7 +87,28 @@ def _update_execution(db_path: str, stop_id: int, **kwargs):
         return ok
 
 
-def advance_stop(db_path: str, stop_id: int):
+#: Advancing is a two-step walk: planned → arrived → completed.
+_ADVANCE_TRANSITIONS = {"planned": "arrived", "arrived": "completed"}
+
+
+def advance_stop(db_path: str, stop_id: int, expected_status: Optional[str] = None):
+    """Move a stop one step along planned → arrived → completed.
+
+    ``expected_status`` is the status the caller believes the stop is in —
+    the one the dispatcher could actually see when they pressed the button.
+    When supplied and it no longer matches, the request is refused.
+
+    Both guards exist because this is not idempotent and a double-click sent
+    two requests: the first moved planned → arrived, the second arrived →
+    completed, so **one accidental double-tap marked a stop delivered with no
+    arrival record**, stamping arrival and departure in the same second and
+    destroying dwell time (audit C-07). On a mobile dispatch UI that is a
+    routine mis-tap, not an edge case.
+
+    The UPDATE additionally carries ``AND status = ?``, so if two requests do
+    arrive together only one can affect a row — the loser sees rowcount 0 and
+    reports the conflict rather than double-stepping.
+    """
     with DatabaseManager(db_path).connect() as conn:
         c = conn.cursor()
         c.execute("SELECT * FROM stop_executions WHERE stop_id = ?", (stop_id,))
@@ -96,22 +117,37 @@ def advance_stop(db_path: str, stop_id: int):
             return False, "Stop execution not found"
 
         status = execution["status"]
+
+        if expected_status is not None and status != expected_status:
+            return False, (
+                f"This stop is already '{status}', not '{expected_status}' — "
+                f"someone else may have advanced it. Refresh to see the current state."
+            )
+
+        target = _ADVANCE_TRANSITIONS.get(status)
+        if target is None:
+            return False, f"Cannot advance stop in status '{status}'"
+
         now = datetime.now().isoformat()
 
-        if status == "planned":
+        if target == "arrived":
             c.execute("""
                 UPDATE stop_executions SET status = 'arrived', actual_arrival_at = ?,
-                    updated_at = ? WHERE stop_id = ?
+                    updated_at = ? WHERE stop_id = ? AND status = 'planned'
             """, (now, now, stop_id))
-        elif status == "arrived":
+        else:
             c.execute("""
                 UPDATE stop_executions SET status = 'completed', actual_departure_at = ?,
-                    completed_at = ?, updated_at = ? WHERE stop_id = ?
+                    completed_at = ?, updated_at = ? WHERE stop_id = ? AND status = 'arrived'
             """, (now, now, now, stop_id))
+
+        if c.rowcount == 0:
+            # Another request won the transition between our SELECT and UPDATE.
+            return False, "This stop was just advanced by another request. Refresh to see the current state."
+
+        if target == "completed":
             _maybe_complete_plan(conn, _get_plan_id_for_stop(conn, stop_id))
             return True, "completed"
-        else:
-            return False, f"Cannot advance stop in status '{status}'"
 
         return True, "advanced"
 
@@ -131,18 +167,56 @@ def cancel_stop(db_path: str, stop_id: int, reason: str = ""):
 
 
 def reorder_stops(db_path: str, assignment_id: int, stop_ids_in_order: list[int]):
+    """Renumber an assignment's stops. Returns ``(ok, message)``.
+
+    The supplied list must name every stop of the assignment exactly once.
+    Previously any list was accepted and applied stop-by-stop, so:
+
+      - a **partial** list renumbered only the stops it named, leaving the
+        others on their old sequence — three stops reordered with two ids
+        produced execution_sequences ``[1, 1, 2]``. Nothing enforces
+        uniqueness on that column, so ``ORDER BY execution_sequence`` became
+        non-deterministic and ``get_current_stop``'s ``LIMIT 1`` could return
+        either of the tied stops — i.e. the dashboard could show the wrong
+        next stop.
+      - ids belonging to a **different** assignment matched no row (the
+        subquery filtered them out) yet the function still returned success,
+        so a caller got a silent no-op.
+    """
+    requested = list(stop_ids_in_order or [])
+
     with DatabaseManager(db_path).connect() as conn:
         c = conn.cursor()
+        c.execute(
+            "SELECT id FROM delivery_plan_stops WHERE vehicle_assignment_id = ?",
+            (assignment_id,)
+        )
+        actual = {r["id"] for r in c.fetchall()}
+
+        if not actual:
+            return False, "Assignment has no stops to reorder"
+        if len(set(requested)) != len(requested):
+            return False, "Duplicate stop ids in the requested order"
+        if set(requested) != actual:
+            missing = sorted(actual - set(requested))
+            unknown = sorted(set(requested) - actual)
+            problems = []
+            if missing:
+                problems.append(f"missing stop(s) {missing}")
+            if unknown:
+                problems.append(f"stop(s) {unknown} not in this assignment")
+            return False, (
+                "Reorder must list every stop of the assignment exactly once — "
+                + "; ".join(problems)
+            )
+
         now = datetime.now().isoformat()
-        for idx, stop_id in enumerate(stop_ids_in_order):
-            new_seq = idx + 1
+        for idx, stop_id in enumerate(requested, start=1):
             c.execute("""
                 UPDATE stop_executions SET execution_sequence = ?, updated_at = ?
-                WHERE stop_id = ? AND stop_id IN (
-                    SELECT id FROM delivery_plan_stops WHERE vehicle_assignment_id = ?
-                )
-            """, (new_seq, now, stop_id, assignment_id))
-        return True
+                WHERE stop_id = ?
+            """, (idx, now, stop_id))
+        return True, "reordered"
 
 
 def insert_temp_stop(db_path: str, assignment_id: int, after_sequence: int,
@@ -194,6 +268,29 @@ def insert_temp_stop(db_path: str, assignment_id: int, after_sequence: int,
         return stop_id
 
 
+def _progress_from_counts(counts: dict) -> dict:
+    """Build the progress block from a status → count mapping.
+
+    Single home for this computation, which previously existed twice —
+    verbatim, including its bug — in get_assignment_progress and
+    get_dashboard_data (audit duplicate-logic cluster 5).
+
+    The bug: ``total = sum(counts.values()) or 1`` guarded against
+    ZeroDivisionError by falsifying the total, so an assignment with no stops
+    reported ``total: 1, remaining: 1`` and a dispatcher went looking for a
+    stop that did not exist (audit C-09). Only the division needs guarding.
+    """
+    total = sum(counts.values())
+    completed = counts.get("completed", 0) + counts.get("skipped", 0) + counts.get("cancelled", 0)
+    return {
+        "total": total,
+        "completed": completed,
+        "remaining": total - completed,
+        "progress_pct": round(completed / total * 100, 1) if total else 0.0,
+        "breakdown": counts,
+    }
+
+
 def get_assignment_progress(db_path: str, assignment_id: int) -> dict:
     with DatabaseManager(db_path).connect() as conn:
         c = conn.cursor()
@@ -205,18 +302,7 @@ def get_assignment_progress(db_path: str, assignment_id: int) -> dict:
             GROUP BY e.status
         """, (assignment_id,))
         counts = {r["status"]: r["count"] for r in c.fetchall()}
-
-        total = sum(counts.values()) or 1
-        completed = counts.get("completed", 0) + counts.get("skipped", 0) + counts.get("cancelled", 0)
-        remaining = total - completed
-
-        return {
-            "total": total,
-            "completed": completed,
-            "remaining": remaining,
-            "progress_pct": round(completed / total * 100, 1),
-            "breakdown": counts,
-        }
+        return _progress_from_counts(counts)
 
 
 def get_dashboard_data(db_path: str):
@@ -294,17 +380,7 @@ def get_dashboard_data(db_path: str):
         for a in assignments:
             aid = a["assignment_id"]
             a["current_stop"] = current_stop_by_aid.get(aid)
-
-            counts = counts_by_aid.get(aid, {})
-            total = sum(counts.values()) or 1
-            completed = counts.get("completed", 0) + counts.get("skipped", 0) + counts.get("cancelled", 0)
-            a["progress"] = {
-                "total": total,
-                "completed": completed,
-                "remaining": total - completed,
-                "progress_pct": round(completed / total * 100, 1),
-                "breakdown": counts,
-            }
+            a["progress"] = _progress_from_counts(counts_by_aid.get(aid, {}))
             result.append(a)
 
         return result

@@ -13,12 +13,54 @@ let selectedIds = new Set();
 const diagram = { currentVehicleId: null };
 
 document.addEventListener('DOMContentLoaded', () => {
-    loadVehicles();
+    loadVehicles().then(openPrefilledFromQuery);
     loadTypes();
     window.addEventListener('resize', () => {
         if (diagram3D.currentVehicleId) selectVehicleForDiagram(diagram3D.currentVehicleId);
     });
 });
+
+// ── Arrive-with-prefill (?new=1&plate=…&driver=…) ───────────────
+// Other pages (fuel logging, delivery import) refuse to create a vehicle for
+// an unrecognised plate and send the user here instead. They pass along what
+// they already know so the Add Vehicle form opens pre-filled — the values are
+// only ever suggestions in an editable form, never written without the user
+// pressing Save. Size and dimensions are deliberately NOT pre-filled: nothing
+// upstream knows them, and guessing core specs is exactly what we're avoiding.
+function openPrefilledFromQuery() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('new') !== '1') return;
+
+    const plate = (params.get('plate') || '').trim();
+    const driver = (params.get('driver') || '').trim();
+
+    // If it turns out the vehicle already exists (someone else added it, or
+    // the user came back after registering), edit it instead of offering a
+    // duplicate.
+    const existing = allVehicles.find(
+        v => (v.plate_number || '').toUpperCase() === plate.toUpperCase()
+    );
+    if (existing) {
+        UI.toast(`${existing.plate_number} is already registered.`, 'info', 5000);
+        openModal(existing.plate_number);
+    } else {
+        openModal(null);
+        const plateField = document.getElementById('field-plate');
+        const driverField = document.getElementById('field-driver');
+        if (plateField) plateField.value = plate;
+        if (driverField) driverField.value = driver;
+        if (plate) {
+            UI.toast(
+                `Review and save to register ${plate}. Check the plate format and add the vehicle type and dimensions.`,
+                'info', 7000
+            );
+        }
+        (document.getElementById('field-type') || plateField)?.focus();
+    }
+
+    // Drop the query string so a refresh doesn't reopen the dialog.
+    window.history.replaceState({}, '', window.location.pathname);
+}
 
 // ── Vehicles ───────────────────────────────────────────────────
 async function loadVehicles() {

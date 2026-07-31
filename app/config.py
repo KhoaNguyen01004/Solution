@@ -55,3 +55,8 @@ FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))
 FLASK_DEBUG = os.getenv("FLASK_DEBUG", "true").lower() == "true"
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
+
+# Upper bound on any request body (Flask MAX_CONTENT_LENGTH). Sized for a
+# multi-photo proof-of-delivery upload plus an Excel plan import; the
+# per-file image limit in services/delivery/image_service.py is tighter.
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "25"))

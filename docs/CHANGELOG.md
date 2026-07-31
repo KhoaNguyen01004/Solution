@@ -1,5 +1,310 @@
 # Changelog
 
+## 2026-07-31 — Removed dispatcher authentication; stop reordering on the dashboard; Plans panel positioning
+
+Three operator-requested changes to the delivery/dispatch module.
+
+### Removed — the dispatcher password (reverses audit C-04)
+
+The shared-password gate added earlier the same day was removed at the operator's request: anyone who can reach the app can now change a plan. This is a deliberate reversal of a security fix, recorded plainly rather than buried — the trade accepted is that `POST /api/plans/clear`, which cascade-deletes every plan, assignment, stop, execution record and image row, is again reachable by anyone who can resolve the host. The app binds `0.0.0.0`. **If this is ever exposed beyond the internal network, this decision needs revisiting.**
+
+- Deleted `app/auth.py` and `templates/login.html`. `/login`, `/logout` and `/api/auth/status` no longer exist.
+- Dropped all 22 `@login_required` decorators from `services/delivery/routes.py` and the import behind them.
+- `app/config.py`: `DISPATCH_PASSWORD` and `SESSION_LIFETIME` removed (with the now-unused `timedelta` import). `SECRET_KEY` and the `SESSION_COOKIE_*` hardening stay — they are app-wide defaults, and no route reads the session today.
+- Frontend: `handleAuthFailure()` gone from `static/js/utils.js`, and the 401-redirect / 503-message branches gone from `static/js/dashboard/api.js` and `static/js/delivery-plan-builder.js`. Non-OK responses fall through to the same error path they always did — verified `ApiClient.fetch`'s behaviour for a non-OK, non-auth response is byte-for-byte what it was.
+- `.env` still carries a `DISPATCH_PASSWORD` line. It is gitignored and now unread; harmless, but worth deleting by hand.
+- `docs/DELIVERY_AUDIT_2026-07-31.md` was left as written. It is a record of what the audit found, not a statement of current configuration.
+
+### Added — reorder stops from the dashboard
+
+`POST /api/stops/reorder` has existed since the delivery module was built and **no UI had ever called it** — resequencing a live route meant editing the plan in the builder. The timeline panel now has up/down controls on each stop.
+
+- Up/down buttons rather than drag-and-drop: the plan builder's Step 3 already has HTML5 drag, but those events don't fire on touch, and this panel is used on a phone in the cab.
+- **Terminal stops are immovable, and nothing moves across one.** A completed / skipped / cancelled stop's position is a record of what happened; renumbering around it would rewrite history. A direction is disabled when the neighbour in that direction is terminal.
+- **Optimistic.** The new order paints before the request goes out — a dispatcher resequencing a route does several stops at a time and a round trip plus an ETA recompute per click is unusable. Moves are POSTed strictly in click order through a promise chain (`state.reorderStops` in `dashboard/main.js`), because the server rewrites every `execution_sequence` on each call and two racing requests would settle on whichever finished last, not on what was clicked last. Exactly one refresh runs when a burst settles.
+- A poll landing mid-reorder is suppressed (`pendingReorders` guard in `loadAssignmentDetail`), and `detailGeneration` is bumped on each move so a load already in flight is dropped. Without both, a background poll a second later visibly snaps the list back to the old order.
+- **`timeline.js`'s rebuild key is now order-independent** (sorted stop ids). It was `list.map(s => s.id).join(',')`, so a reorder counted as a new set and wiped the container — collapsing every stop and closing any open photo gallery, which is precisely the state a dispatcher is mid-way through using when they resequence. Nodes are now moved with `insertBefore` instead.
+- **Sequence badges now show `execution_sequence`, falling back to `planned_sequence`.** The whole dashboard *orders* by `execution_sequence`; `planned_sequence` is fixed at plan-build time. Showing the latter meant a reordered route rendered as 1, 3, 2 — the list order was right and the numbers on it disagreed. Fixed in the timeline badge, the pinned current-stop card, and the map's stop popup.
+
+### Fixed — the Plans (⚙) panel opened off-screen
+
+`.manage-plans-dropdown` was `position: absolute; right: 0` against `.manage-plans-wrap`, pinning the panel's *right* edge to the button's right edge. `.dashboard-header` is `flex-wrap: wrap`, so at narrower widths the button moves; once it sits near the left of a wrapped row, a 320px panel extends past the left edge of the viewport and only part of it is visible. `.dashboard-shell`'s `overflow: hidden` separately clipped the bottom.
+
+Now `position: fixed`, placed by `positionManagePlans()` from the button's `getBoundingClientRect()`: right-aligned to the button where there is room, then clamped to the viewport on every side, with `max-height` set to the space actually remaining below the button so the Delete/Clear row stays reachable. Repositions on `resize`; Escape closes it. `.manage-plans-list` lost its fixed `max-height: 280px` in favour of `flex: 1; min-height: 0` so the panel height governs.
+
+### Fixed — the map snapped back to the selected vehicle on every poll
+
+Panning away to look at a street was impossible: within ~12 seconds the map dragged itself back onto the vehicle. Nothing in this codebase was calling `setView`/`panTo` on a poll — it was Leaflet's `Popup._adjustPan()`, which pans the map to keep an open popup in view and is on by default. `zoomToVehicle()` opens the selected vehicle's popup, and for a moving truck **two** separate paths reached `_adjustPan()` on every single poll:
+
+1. `popup.setContent()` → `DivOverlay.update()` → `_adjustPan()` — the popup text carries GPS coordinates and speed, so it differs every poll.
+2. `marker.setLatLng()` → fires `move` → `Layer._movePopup()` → `popup.setLatLng()` → `_adjustPan()`.
+
+`updateVehicles`/`updateStops` now run both through a `withoutAutoPan()` helper that flips `popup.options.autoPan` off for the duration and restores it. Suppressed for background updates only — opening a popup still auto-pans (`Popup.onAdd` → `update` → `_adjustPan`), which is what keeps a popup readable when its marker sits near the edge of the map.
+
+Automatic view changes are now limited to Follow mode (`panTo`, explicitly opted into). Zoom-on-select is unchanged: it fires from `selectAssignment()`, which is a direct response to a click and already returns early if the assignment is already selected.
+
+Verified against real Leaflet 1.9.4 under jsdom rather than by inspection: two simulated polls produce four `_adjustPan()` calls (two per poll — confirming both paths were live), all with `autoPan` false, and the map centre after panning away is bit-identical before and after. The same harness with the helper neutered reproduces the bug — centre moves from 10.95/106.90 to 10.874/106.675, i.e. back onto the truck.
+
+### Fixed — map control buttons became unreadable on hover
+
+`.map-control-btn:hover` was `background: rgba(255,255,255,0.12)`. The base state is opaque `--surface-2`, so hovering *replaced* it with 12% white — effectively transparent, letting the OSM tiles through under near-white `--text-primary` text. Zoom Vehicle / Follow / Google Maps / GPS were least readable exactly when pointed at. Hover is now opaque `--surface-3` with an accent border, and `.active:hover` (Follow when engaged) darkens to `--accent-hover` instead of dropping to the neutral hover, which read as "turning off".
+
+### Fixed — the timeline panel would not scroll
+
+Expanding a few stops pushed the rest out of sight with no scrollbar. `.timeline` is a flex column with `overflow-y: auto`, but `.timeline-item` never set `flex-shrink`, so it defaulted to `1`: once the items were collectively taller than the panel the browser squashed them to fit rather than overflowing, and `overflow-y: auto` had nothing to scroll. Each item also carries `overflow: hidden`, so the squashed bodies were clipped rather than merely cramped — which is why the content looked like it had vanished instead of looking compressed. `.timeline-item` is now `flex-shrink: 0`.
+
+**The same defect exists in `.vehicle-list` / `.vehicle-card` in the left panel** (same flex-column-plus-`overflow-y:auto` shape, no `flex-shrink` on the card). It is more visible there because there is no `overflow: hidden` on the card, so text spills between cards instead of being clipped. Left alone per scope control — noted here for whoever picks it up.
+
+### Testing
+- `pytest tests/` — **254 passed, 0 failed.** (258 before: the 8 removed authentication tests were replaced by 4 open-access ones.)
+- `tests/test_delivery_routes.py`: the `auth_client` fixture is gone, all 82 uses now take the plain `client`. `TestAuthentication` became `TestOpenAccess` — the inverse regression guard, failing if any of the 22 mutating endpoints ever returns 401/403/503 again, plus an assertion that `/login` 404s. The existing reorder-validation tests were already route-level and needed no change.
+- All modified JavaScript checked with `node --check`.
+- `create_app()` verified to build and register 107 routes with no `/login` among them.
+
+### Not done
+- No confirmation step was added in front of the now-ungated destructive endpoints beyond the `confirm()` dialogs already in the UI.
+- The plan builder's Step 3 reordering was left alone — the operator confirmed it is already workable.
+
+## 2026-07-31 — Removed the Trip Management / Trip History pages (superseded by Dispatch)
+
+Both pages were the original dispatch UI. The delivery dashboard was later built as a separate implementation rather than reusing them, leaving two pages doing the same job. Dispatch is the one that matches current requirements, so the older pair is gone.
+
+### Removed
+- `templates/manage-trips.html`, `templates/trip-history.html`
+- `static/js/manage-trips.js`, `static/js/trip-history.js`
+- Page routes `/manage-trips` and `/trip-history`
+- The "Trips ▾" nav dropdown from all 7 remaining templates (removed whole, not just its two links — otherwise an empty dropdown button would be left behind)
+- Eight endpoints whose only callers were those two pages, verified by scanning every surviving `static/js/**` and `templates/*.html` file rather than by assumption: `/api/set-destination`, `/api/trips/history`, `/api/trip-history`, `/api/clear-trip`, `/api/update-trip`, `/api/clear-all-trips`, `/api/geofence-events`. `app/routes/trips.py` drops from 782 to ~500 lines.
+  - This also closes the duplicate-endpoint item at `docs/CODEBASE_ANALYSIS_REPORT.md:183` — `/api/trips/history` and `/api/trip-history` both routed to the same function; both are now gone.
+
+### Kept, deliberately
+- **`/api/route-data`, `/api/advance-trip`, `/api/cancel-trip`** — these are *not* trip-page endpoints. `static/js/map.js` on the main fleet map calls all three, so removing `app/routes/trips.py` wholesale would have broken the landing page. This was the main risk in the request and the reason the module was narrowed rather than deleted.
+- **`/api/refresh-routes` and the background route-refresh thread** — left untouched pending a decision (see below). `/api/refresh-routes` now has no in-app caller, but `app.py` documents it as the external-scheduler entry point for production, which is exactly the mechanism a fix would use.
+
+### Consequence worth knowing
+`/api/set-destination` was the **only** way to create a `vehicle_trips` row, and it lived on the Trip Management page. Nothing can create a trip any more, so the main map's surviving route-line / advance / cancel code operates on a table that is empty and can no longer be populated through the UI. Those code paths are effectively vestigial. `map.js` was left alone — it is the landing page and its cleanup was not part of this request. Recorded here rather than actioned silently.
+
+### Not touched
+- `vehicle_trips` and `geofence_events` tables — both are empty (0 rows), harmless, and `scripts/migrate_to_delivery.py` still reads `vehicle_trips`. Dropping them is a separate decision.
+- The Vietnamese internship report at repo root still documents the removed pages; it is explicitly out of scope per `CLAUDE.md`.
+- `graphify-out/` still lists the deleted files — regenerate with `graphify update .`.
+
+### Documentation
+- `CLAUDE.md`: the "3 pages still use the legacy global `showToast()`" note is now 1 page (`locations.js`) — the other two were the deleted files.
+- `README.md`: `trips.py`'s description narrowed to what it actually does now.
+
+### Testing
+- `pytest` — **258 passed, 0 failed**, unchanged. No test referenced the removed pages or endpoints, which is itself a data point: the route-layer suite added in Phase 5 covers delivery, not trips.
+- Verified `create_app()` still builds and registers 110 routes, that none of the removed paths resolve, and that the four intended survivors do.
+
+## 2026-07-31 — Delivery Module Phases 4 & 5: Frontend Hardening + Route-Layer Test Suite
+
+Final remediation phases against `docs/DELIVERY_AUDIT_2026-07-31.md`. Each Phase 4 finding was re-verified by execution before implementation, following the C-06 retraction in Phase 3. All three held.
+
+### Fixed — frontend
+- **Stale responses could overwrite the current selection (F-05)** — `loadAssignmentDetail()` wrote `state.selectedStops` / `selectedEta` unconditionally once its three requests resolved. The 12-second poll calls it too, so a click landing mid-poll was the common case: the previously-selected vehicle's detail could resolve *after* the newly-clicked one and overwrite it, leaving the vehicle list highlighting one truck while the timeline, map stops and info bar showed another. Added a monotonic generation token — a load writes only if it is still the newest and the assignment is still selected.
+- **Unknown ETAs displayed as "ETA: 0 min" (L-10)** — `Math.round(null / 60)` is `0` in JavaScript, and `eta_service` sets `eta_seconds: None` for any stop without coordinates. The info bar therefore told a dispatcher the truck was arriving *now* when the truth was "unknown". `timeline.js` already guarded this with a `typeof` check; `main.js` did not. Verified in Node before fixing.
+- **A throwing error-handler could kill polling permanently (F-06)** — `isPolling = false` sat after the try/catch rather than in a `finally`, so anything thrown from the catch block latched the flag and disabled both the 12-second poll and manual refresh for the rest of the session, with the status pill frozen on its last value. Now in `finally`; verified by driving a tick whose error handler itself throws and confirming subsequent ticks still run.
+- **Refreshes after an action were silently dropped (F-04)** — `refreshNow()` returned immediately if a poll was in flight, so the refresh chained onto a successful Advance/Skip/Cancel was thrown away and the dispatcher saw no change for up to 12 seconds *on an action they had just taken*. This directly undermined the Phase 3 double-tap fix: the first tap succeeded, nothing visibly happened, and a second tap was the natural response. Requests are now coalesced — a refresh arriving mid-poll runs when the in-flight tick finishes. Verified: three refreshes fired during one slow tick produce exactly one catch-up run, with no overlap.
+- **Background tabs polled forever (P-08)** — added `visibilitychange` handling; the interval is cleared while the tab is hidden and resumes with an immediate catch-up tick. Dispatchers leave this page open all day.
+- **No client-side request timeout (P-08)** — `/api/eta` issues one ORS call per remaining stop, serially, each with a 30-second server timeout, so a slow route could hang well past the poll interval and freeze the dashboard behind a green "Live" pill. `api.js` now aborts at 20 seconds with a clear message.
+
+### Added — route-layer test suite (T-01)
+**`tests/test_delivery_routes.py`, 92 tests.** The audit's most consequential structural finding was that all 49 existing tests imported service modules directly and **nothing exercised the route layer** — which is exactly where every Critical bug lived. C-01 was one line inside a request handler; C-02/C-03 were only observable in an assembled response; C-04 is a property of routes; C-05's duplicate write sat behind an endpoint. A service-level suite is structurally incapable of catching any of them.
+
+Coverage, driving real HTTP through `app.test_client()` with TTAS mocked:
+- **GPS pipeline** — GPS reaching the dashboard, telemetry parsed from raw TTAS keys, all five plate formats matching one vehicle, unknown plates not matching, 0,0 reported as no-fix, malformed coordinates not 500-ing, failures surfaced rather than hidden, and ETA not double-normalized.
+- **Authentication** — all 22 mutating endpoints parametrized and asserted to reject anonymous callers; read endpoints asserted to stay open; wrong password, logout, and the fail-closed 503 when `DISPATCH_PASSWORD` is unset.
+- **Execution lifecycle** — full progression, the double-tap 409 leaving `actual_departure_at` unset, skip/cancel with reasons, current-stop advancement, plan auto-completion, temp-stop insertion reopening a completed plan, and empty-assignment progress.
+- **Reorder validation** — full, partial and foreign-id cases, including an assertion that no duplicate `execution_sequence` values are left behind.
+- **Excel import** — plate variants collapsing to one assignment with no new vehicles, unknown plates rejected with nothing written, and that no request flag can turn the import into a vehicle-creation path.
+- **Uploads** — accepted image types, rejected `.html`/`.svg`/`.php`/`.txt`/extensionless, oversized and empty rejection, traversal in `category` confined to the upload root, two same-second uploads both surviving, and round-tripping an uploaded file back through `send_file`.
+
+### Fixed — test isolation
+**The image tests were writing into the repository.** `image_service` derives `UPLOAD_ROOT` from its own file location, so every run left real `.jpg` files in `DeliveryPlans/`; dozens had accumulated. It also made `test_delete_image_removes_file` depend on the checkout being writable — which is why that test failed on every run throughout this work. An autouse fixture in both delivery test files now redirects `BASE_DIR`/`UPLOAD_ROOT` to a per-test temp directory.
+
+**The suite is fully green for the first time: 258 passed, 0 failed.** The single failure reported in the Phase 1-3 entries above was this, not a code defect.
+
+### Testing
+- `pytest tests/` (excluding the non-pytest helper scripts) — **258 passed, 0 failed**, up from a 48-passed baseline before this work.
+- Polling behaviour verified by executing the module under a browser-like shim rather than by inspection: refresh coalescing, no overlapping ticks, and survival of a throwing error handler.
+- All modified JavaScript checked with `node --check`.
+
+### Still open (not in scope for these phases)
+- **P-01 / P-02 remain the biggest risk.** Fixing C-01 restored the synchronous TTAS fetch and serial ORS calls into the request path. With 36 vehicles the dashboard will be slower than the broken version was. The audit's Phase 3 proposal — a GPS adapter with a background refresher and parallel/batched ORS — is unimplemented.
+- `_route_cache` in `eta_service` is still unbounded (T-10); `get_plan` still N+1 (P-03); missing indexes D-03/D-04 and the duplicate index D-02 are untouched.
+- Vehicle identity is centralized for delivery and fuel only; `oil.py` and `fleet.py` keep their own inline plate handling.
+- **Verify the Render persistent disk (D-10).** Still the cheapest high-value check available, and everything above is moot without it.
+
+## 2026-07-31 — Delivery Module Phase 3: Execution Correctness (and one retracted audit finding)
+
+Third remediation phase against `docs/DELIVERY_AUDIT_2026-07-31.md`. Before implementing, each Phase 3 finding was re-verified by running it. Two held, one did not.
+
+### Retracted — audit findings C-06 and F-01 were wrong
+
+The audit claimed the dashboard's rebuild cache key `list.map(s => s.id).join(',')` "encodes set membership, not order", so reordering stops produced an identical key and the UI never re-rendered. Rated High / Confirmed.
+
+`Array.prototype.join` preserves order. `[10,11,12].join(',')` is `"10,11,12"`; `[11,10,12].join(',')` is `"11,10,12"`. The key is order-sensitive, a reorder changes it, and both `timeline.js` and `map.js` do rebuild. Verified in Node against the exact expression, and end-to-end: `list_stops()` returns `[3,2,1]` after reordering `[1,2,3]`.
+
+Compounding it, **no frontend code calls `POST /api/stops/reorder` at all** — the only "reorder" match in `static/js/` is a drag handle in the plan *builder*, which reorders locally before save. The dashboard has no reorder UI, so the scenario could not arise either way.
+
+Root cause of the mistake: the "set key" phrasing in the surrounding source comments was taken at face value rather than checked against what `join` does, and the finding was rated Confirmed without executing anything. Both entries are struck through in place in the audit with the disproving evidence, and the document now carries a warning that any remaining "Confirmed" label is provisional until re-verified by execution.
+
+### Fixed
+- **A double-tap on Advance marked a stop delivered with no arrival record (C-07)** — confirmed by execution: two calls took a stop `planned` → `arrived` → `completed`, stamping `actual_arrival_at` and `actual_departure_at` **in the same second** and destroying dwell time. If it was the last stop, `_maybe_complete_plan` fired and the plan left the dashboard's active view entirely. On a mobile dispatch UI an impatient second tap is routine, not an edge case.
+  - `advance_stop()` now takes an optional `expected_status` — the status the dispatcher's screen was actually showing. When it no longer matches, the move is refused with a message telling them to refresh.
+  - The UPDATE additionally carries `AND status = ?`, so if two requests do arrive together only one can affect a row; the loser sees `rowcount == 0` and reports the conflict instead of double-stepping. This closes the genuine race, not just the double-click.
+  - `POST /api/execution/advance` returns **409** with `conflict: true` for a stale advance, so the client can distinguish "you're out of date, refresh" from "malformed request".
+  - `timeline.js` renders the button with `data-expected-status`, disables it for the duration of the request, and holds an in-flight token per stop+action so a second tap is dropped client-side before it ever becomes a request.
+  - `expected_status` is optional throughout — callers that omit it keep the previous behaviour.
+- **Assignments with no stops reported "1 remaining" (C-09)** — `total = sum(counts.values()) or 1` put a division guard on the total rather than the division, so an empty assignment showed `total: 1, remaining: 1` on its vehicle card and info bar, and a dispatcher went looking for a stop that did not exist. Only the division needed guarding.
+  - The seven-line progress computation existed **twice, verbatim including the bug**, in `get_assignment_progress` and `get_dashboard_data`. Extracted to `_progress_from_counts()` — one home, one fix (audit duplicate-logic cluster 5).
+- **`reorder_stops` validated nothing (recorded as C-06b)** — the real bug in the function C-06 wrongly accused. It accepted any list and applied it stop-by-stop:
+  - a **partial** list renumbered only the stops it named, producing `execution_sequence` values of `[1, 1, 2]`. Nothing enforces uniqueness on that column, so `ORDER BY execution_sequence LIMIT 1` in `get_current_stop` became non-deterministic — **the dashboard could show the wrong next stop**;
+  - ids from a **different** assignment matched no row yet the function returned `True`, so the caller got a silent no-op.
+
+  It now requires the list to name every stop of the assignment exactly once, returns `(ok, message)` matching `advance_stop`'s convention, and names precisely what's wrong (`missing stop(s) [...]` / `stop(s) [...] not in this assignment`). The route surfaces that message instead of a generic "Reorder failed".
+
+### Already done
+Phase 3 item 4 (L-06, the plan-status UPDATE inside the per-vehicle loop) was completed in Phase 2 — restructuring that loop made leaving the bug in place indefensible.
+
+### Testing
+- `pytest tests/test_delivery.py` — **98 passed, 1 failed**, up from 86. The failure remains the sandbox `unlink` permission artifact documented in the Phase 1 entry.
+- 12 new tests across `TestAdvanceAtomicity`, `TestReorderValidation` and `TestProgressWithoutStops`, including assertions that the deliberate two-step progression still works and that a failed double-tap leaves `actual_departure_at` unset.
+- 12 end-to-end checks through `app.test_client()`: the double-tap returning 409 with the stop still `arrived`, the genuine second step still succeeding, partial and full reorders, and an empty assignment reporting zero through the dashboard endpoint.
+- **`test_progress_empty` was rewritten.** It asserted `total == 1` with the comment *"fallback to avoid div-by-zero"* — it encoded C-09 as intended behaviour, the same category of problem as the GPS contract tests corrected in Phase 1. Two of the three tests changed in these phases were wrong rather than merely outdated.
+
+## 2026-07-31 — Core Fleet Data Is Now Read-Only to Background Processes
+
+Follow-on to Phase 2, at the user's direction and widened beyond the delivery module. The rule: **`vehicles` is the source of truth, and only a human editing Vehicle Management may change it.** New data flowing into the system may read and link to a vehicle, never create one, and never silently alter core fields — plate number, vehicle type, dimensions, or driver name.
+
+Phase 2 stopped the delivery import from creating vehicles. This entry removes every remaining path.
+
+### Fixed
+- **Logging fuel created vehicles and overwrote the driver name (`app/routes/fuel.py`)** — the worst of the remaining offenders, and live on every fuel entry. `INSERT INTO vehicles ... ON CONFLICT(plate_number) DO UPDATE SET current_driver = ...` meant:
+  - a plate not stored byte-identically created a new vehicle, so logging fuel for `50E18463` while the fleet held `50E-18463` produced a duplicate truck — the same root cause as C-05, still shipping;
+  - whatever name was typed on the fuel form silently became the vehicle's official `current_driver`. A relief driver covering one shift would permanently overwrite the assigned driver, with nothing shown to anyone.
+
+  Both removed. The plate is now resolved through `services.vehicle_identity` (exact → canonical → 5-digit serial) and the fuel row is stored under the fleet's canonical plate. The same check was added to the edit path, so an edit can't introduce an unknown plate either.
+- **The boot migration re-ran that upsert across all fuel history on every startup (`app/database/migrations.py`)** — `backfill_vehicles_from_fuel_log` is now **link-only**: it resolves unlinked `fuel_log` rows onto existing vehicles and normalises their plate, and never inserts or edits a vehicle. Plates matching nothing are left alone and named in a warning log rather than conjured into existence.
+- **`scripts/migrate_to_delivery.py` created a vehicle for any key it couldn't find** — now resolves everything up front and aborts with the full list of unregistered plates, refusing to run rather than inventing rows.
+
+### Changed — unknown vehicle now prompts instead of failing
+Rejecting an entry outright would block someone standing at a petrol station. Instead, an unrecognised plate returns **409** with a structured body, and the UI offers to go register it:
+- `services/vehicle_identity.unknown_vehicle_response()` returns `error_code`, a plain-language `message`, a `redirect_to` URL, and an `unknown_vehicle` block carrying what's already known.
+- `suggest_plate_format()` turns `51D99999` into `51D-99999` (two province digits, one-or-two series letters, 4-5 digit serial) so the form arrives with a well-formed plate. It is a *suggestion in an editable field* — it never rewrites stored data, and returns the input unchanged when the shape isn't recognised.
+- `static/js/fuel-efficiency.js` catches the rejection, confirms with the user, and redirects. `static/js/vehicle-management.js` reads `?new=1&plate=…&driver=…`, opens the Add Vehicle dialog pre-filled, focuses the type field, and clears the query string so a refresh doesn't reopen it. If the vehicle turns out to already exist it opens it for editing instead of offering a duplicate.
+- **Dimensions are deliberately not pre-filled.** Nothing upstream knows them, and guessing core specs is the behaviour being removed.
+- `ApiClient.fetch` (`static/js/utils.js`) now attaches the response body and status to the thrown `Error` (`err.data`, `err.status`). Callers reading only `err.message` are unaffected.
+
+Because matching is loose, this prompt fires only for a truck genuinely not in the fleet — not for a formatting difference. `50E-18463`, `50E18463`, `50E 18463`, `50e-18463`, `18463` and a padded ` 18463 ` all resolve to the same vehicle, verified by test.
+
+### Reviewed and left alone
+- **`app/routes/fleet.py`** — Vehicle Management. The legitimate owner; creating and editing a vehicle is the explicit point of the request.
+- **`services/google_sheet_service.py`** — already correct. It resolves on the 5-digit serial and skips unknown plates with a warning; its docstring already said *"the system never creates new vehicles from sync data."*
+- **`truck_load_planner/routes.py`** — writes `container_configs`, which is user-driven container spec management, not automatic.
+- **The one-time `tlp_trucks` → `container_configs` migration** (`migrations.py`) is the single remaining place outside Vehicle Management that writes a core field (`container_config_id`, i.e. dimensions). Kept: it does not act on new data, it relocates dimensions the user already entered from a retired table, and it is double-guarded to run once per database lifetime. It now **logs a warning naming what it changed** — the objection was to silent alteration, not to migration.
+
+### Added
+- **`tests/test_vehicle_core_data.py`** — 36 tests asserting the invariant directly, so it can't quietly regress:
+  - the boot migration links fuel history without modifying `vehicles`, and does not overwrite `current_driver` from a fuel form;
+  - a static scan of ten modules for `INSERT INTO vehicles` and for `UPDATE vehicles SET` touching `plate_number` / `vehicle_type` / `current_driver`;
+  - an assertion that `container_config_id` is written in exactly one file;
+  - `vehicle_identity` exposes no write helper of any kind;
+  - the loose-match sweep, so the "new vehicle" prompt can't start false-firing on a format variant.
+
+### Testing
+- `pytest tests/test_delivery.py tests/test_vehicle_core_data.py tests/test_scorer.py` — **148 passed, 1 failed**. The single failure is the sandbox `unlink` permission artifact documented in the Phase 1 entry, unrelated and expected to pass on Windows.
+- 15 end-to-end checks through `app.test_client()` confirming the vehicles table is byte-identical before and after fuel logs submitted under a *different* driver name — the exact scenario that previously rewrote `current_driver`.
+- Two bugs were caught by the new tests rather than by review: the dimension-writing migration above, and (during Phase 2) a mis-grouped bare serial.
+
+### Note
+While editing `app/routes/fuel.py` I initially split its `from app import config, state` import and briefly broke the module; caught by a syntax/import check before any test run. Flagging it because the file is large and worth a skim on your side.
+
+## 2026-07-31 — Delivery Module Phase 2: Vehicle Identity Service
+
+Second remediation phase against `docs/DELIVERY_AUDIT_2026-07-31.md`. Closes C-05 (Excel import silently creating duplicate vehicle rows), L-03 (one truck split across two assignments), T-12 (the duplicate-merge script gone stale), and — unavoidably, see below — L-06.
+
+The audit found seven plate-identity implementations with five incompatible semantics, and a canonical normalizer (`services/plate_utils.py`) that the delivery module had never imported. Phase 1 pointed delivery's GPS matching at it; this phase gives the whole concern a home.
+
+### Added
+- **`services/vehicle_identity.py`** — resolution only. **The module has no write path at all**: there is no `create_vehicle()`, no insert, no upsert. `resolve()` returns a `VehicleRef` or `None`, and adding a truck to the fleet is a Vehicle Management action (`app/routes/fleet.py`), never a side effect of importing a spreadsheet. A test asserts the module never grows a write helper.
+  - Match precedence, strictest first: exact `plate_number` → canonical (case/separator-insensitive, matching what `ttas_client.py` already does for TTAS report dropdowns) → 5-digit serial via `normalize_plate`. `matched_by` on the result records which strategy won, so a dispatcher can be told *why* a plate matched. Confirmed against real fleet data: `50E-18463`, `50E18463`, `50E 18463`, `50e-18463`, `18463` and even an en-dash `50E–18463` all resolve to the same vehicle row.
+  - **Ambiguity is refused, not guessed.** Two genuinely different full plates sharing a serial (`50H-18463` / `51C-18463`) disable serial matching for that serial and log a warning, rather than attaching stops to whichever truck happened to be indexed first.
+  - **Bare-serial duplicate rows lose to full plates**, including on exact match. A row whose `plate_number` is just `09473` is a known artifact of the old Google Sheet sync that `tests/merge_duplicate_vehicles.py` exists to delete; new assignments must not attach to a row a future merge will remove. This surfaced as a genuine test failure during the phase and the resolver was corrected, not the test.
+  - `VehicleIndex` is built once per operation rather than per lookup — `app/routes/fuel.py` currently re-scans the whole `vehicles` table on every insert (audit P-06) and this is the seam to fix that behind later.
+  - **Deliberately not built: a `vehicle_aliases` table.** `normalize_plate` already collapses every variant present in this fleet's data, so an alias registry would be an empty table solving a problem that does not exist yet. `resolve()` is the seam if genuinely arbitrary aliases ever appear.
+
+### Fixed
+- **Excel import created duplicate vehicles on any plate-format variance (C-05)** — `confirm_import` built `{plate_number: id}` and did exact-string lookup; a miss ran `INSERT INTO vehicles`. A spreadsheet saying `50E18463` against a stored `50E-18463` produced a 37th vehicle with no type, no driver and no GPS association, polluting `/api/fleet/vehicles`, the TLP picker and fuel/oil reporting — and the delivery assignment attached to the phantom, so it could never match GPS even after Phase 1. Import now resolves through `vehicle_identity`; an unrecognised plate raises `UnknownVehicles` and the whole import rolls back with nothing written.
+  - **Imports never create vehicles, under any circumstance.** There is no override flag. An unknown plate in a plan is a typo or an unregistered truck — not a format this resolver can't handle, since it already matches on the 5-digit serial regardless of how the sheet spelled it. `confirm_import`'s signature is asserted in tests to have no creation escape hatch.
+  - `POST /api/plans/import/save` returns **409** (not 400 — the request is well-formed, it conflicts with fleet state) carrying `unknown_vehicles`, naming exactly which plates to check.
+- **One truck imported as two assignments (L-03)** — grouping keyed on the raw spreadsheet string, so a file mixing `50E-18463` and `50E18463` split one driver's stops across two dashboard rows. Rows now group by *resolved vehicle id*. **Unresolved identifiers group by their 5-digit serial**, since that is what distinguishes a vehicle in this fleet — so `51D-77777`, `51D77777` and a bare `77777` are reported as one problem to fix rather than three. (Caught by a test written for this phase: canonical-form grouping collapsed the first two but not the bare serial.)
+- **`preview_import` now reports resolution** when given a `db_path` — each assignment carries `resolved`, `resolved_plate`, `matched_by`, and the response carries `unknown_vehicles`. Unknown plates surface at preview time rather than as a failure at save time. The parameter is optional and the old behaviour is preserved without it.
+- **`tests/merge_duplicate_vehicles.py` was stale (T-12)** — `INTEGER_FK_TABLES` listed only `fuel_log` and `tlp_load_plans`. The delivery module shipped after that script was written, so merging a duplicate would either abort on the `vehicles` DELETE (`vehicle_assignments.vehicle_id` has no `ON DELETE` action, and `DatabaseManager` enables FK enforcement) or, with FKs off, leave every assignment pointing at a deleted vehicle. Added `("vehicle_assignments", "vehicle_id")`.
+- **Plan status UPDATE ran inside the per-vehicle loop (L-06)** — scheduled for Phase 3, but this phase restructured that exact loop and leaving a known bug in freshly-written code was indefensible. It now runs once after the loop, and only when at least one assignment was created: an empty import used to return success while the plan silently stayed `draft` and never reached the dashboard. **Phase 3 item 4 is therefore already complete.**
+
+### Changed
+- `confirm_import` returns a summary dict (`assignments_created`, `stops_created`, `plan_confirmed`) instead of a bare `True`, and the route passes it through. `plan_confirmed: false` is how an empty import now reports itself honestly.
+
+### Still open: other paths that auto-create vehicles
+Delivery no longer writes to `vehicles`. Three other places still do, and two of them can create the same duplicates C-05 created. Documented, not changed — they are outside this phase's scope and touch live fuel/oil data.
+- **`app/routes/fuel.py:437`** — logging fuel upserts the vehicle by exact `plate_number`. `ON CONFLICT(plate_number)` only matches a byte-identical string, so recording fuel against `50E18463` while the fleet holds `50E-18463` **creates a duplicate row today**. Same root cause as C-05, still live, and the highest-value next target for `vehicle_identity`.
+- **`app/database/migrations.py:179`** — `backfill_vehicles_from_fuel_log` upserts vehicles from `fuel_log` on every boot, with its own inline copy of the last-5-digit logic.
+- **`scripts/migrate_to_delivery.py:84`** — one-off migration script, same exact-match-then-insert pattern.
+- `app/routes/fleet.py:65` is the legitimate one: Vehicle Management, where adding a truck is the explicit point of the request.
+
+### Testing
+- `pytest tests/test_delivery.py` — **86 passed, 1 failed**, up from 59 after Phase 1. The single failure is the same analysis-sandbox `unlink` permission artifact documented in the Phase 1 entry; unchanged by this phase and expected to pass on Windows.
+- 27 new tests across `TestVehicleIdentity`, `TestImportVehicleResolution` and `TestPreviewImportResolution`, including a parametrized sweep of all seven stored/lookup format combinations, the ambiguous-serial refusal, the bare-serial-duplicate preference, an assertion that a rejected import writes **nothing** (vehicle count unchanged, plan still `draft`), and a signature assertion that `confirm_import` cannot be talked into creating a vehicle.
+- 12 end-to-end checks through `app.test_client()` covering the strict-import behaviour, plus the earlier full merge-script scenario: a delivery assignment pointing at a duplicate `09473` row is correctly repointed to `50H-09473` and the duplicate deleted — the exact operation that would have silently orphaned data before the FK-list fix.
+
+### Notes
+- **The Excel import pipeline has no frontend consumer.** `delivery-plan-builder.js` builds plans manually through the already-correct `vehicle_id` path and never calls `/api/plans/import/*`. The 409 change therefore has no UI blast radius.
+- `merge_duplicate_vehicles.py` still has no guard for missing tables (it would already fail this way on `tlp_load_plans`). Any database the app has booted against will have `vehicle_assignments`, since `create_app()` calls `init_delivery_tables()` unconditionally, so the added entry does not create a new realistic failure path. Left as-is rather than widen this phase's footprint.
+- Vehicle identity is now centralized *for the delivery module only*. `fleet.py`, `fuel.py`, `oil.py` and `migrations.py` still carry their own inline variants (audit duplicate-logic cluster 1). Migrating them is deliberately deferred — delivery had zero production rows and was a zero-risk proving ground; fuel and oil have live data and working reports.
+
+## 2026-07-31 — Delivery Module Phase 1: GPS Pipeline Repair + Security Hardening
+
+First remediation phase against `docs/DELIVERY_AUDIT_2026-07-31.md` (68 findings). Closes the five Critical items and the two highest-severity security findings. The audit's central conclusion drove the ordering: the dashboard's GPS was not "unreliable", it was **dead**, and had been since the module was written — four defects stacked on top of each other, only the last of which was the plate-format mismatch the team had identified.
+
+### Fixed
+
+- **GPS pipeline was entirely non-functional (C-01)** — `services/delivery/routes.py` did `from app import fetch_vehicle_data` inside a bare `except Exception`. That name resolves to the `app` **package**, which has never exported it (it lives in `app/services/ttas_client.py`; `app.py` and `app/routes/trips.py` both import it correctly). Every call raised `ImportError`, was swallowed, and returned `([], "error", ...)` — so `/api/execution/dashboard` never attached a `gps` key to any assignment, `/api/eta` always returned "Vehicle GPS not available", no map marker was ever created, and Zoom/Follow/Open-in-Google-Maps were permanent no-ops. Now imported at module scope from `app.services.ttas_client`, so a regression of this kind aborts `create_app()` instead of silently degrading one request at a time. `_ttas_vehicles()` keeps a narrow `except` but logs a traceback rather than flattening it into an empty list.
+- **GPS normalization read the wrong dict schema (C-02)** — `tracking_service.normalize_gps_position()` read `speed_status` / `vehicle_status` / `engine_status` / `last_update` / `driver_name`, which are the *output* key names of `normalize_vehicle()`, from *raw* TTAS DevList items whose keys are `speed` / `ad3` / `trktime` / `driver` / `biensoxe`. Every one of those resolved to its default, and no `device_name` was emitted at all — so even with C-01 fixed there was nothing to match a position to a vehicle on. Rewritten to delegate raw-key parsing to `normalize_vehicle()` rather than reimplement it: that function already owns the six-key plate fallback chain, the Vietnamese speed-phrase → status derivation, and `safe_float`/`clean_text` coercion, and duplicating it would create a second source of truth for TTAS's field names. Also emits `plate_key` (the normalized 5-digit serial) so callers never have to re-derive it.
+  - Related, same root cause: `routes.py`'s ETA handler called `normalize_gps_position()` a **second** time on an already-normalized dict, whose keys are `lat`/`lng` rather than `latitude`/`longitude` — coercing both to `0.0` and placing the vehicle at 0°N 0°E. Removed.
+  - `safe_float()` returns `0.0` (not `None`) for missing coordinates, so an exact 0,0 reading is now reported as `lat: None, lng: None` — "no fix" rather than a position in the Gulf of Guinea. The frontend's existing `if (!gps || gps.lat == null)` guard already handles it.
+- **Plate matching (C-03)** — `.strip().lower()` on both sides matched only byte-identical strings, and was also inconsistent with the rest of the codebase (`fleet.py`/`fuel.py`/`oil.py` all use `.upper()`). Both sides now go through `services.plate_utils.normalize_plate` — the canonical, already-documented normalizer that `google_sheet_service.py` and `merge_duplicate_vehicles.py` use but which the delivery module had never imported. `50E-18463`, `50E18463`, `50E 18463`, `50e-18463` and `18463` now all resolve to the same vehicle. New `_gps_by_plate_key()` helper indexes positions once per request and warns on serial collisions instead of silently keeping an arbitrary one.
+- **No authentication on any endpoint (C-04)** — including `POST /api/plans/clear`, which cascade-deletes every plan, assignment, stop, execution record and image row, and was reachable unauthenticated on a publicly-deployed host. New `app/auth.py`: session-based login against a shared `DISPATCH_PASSWORD`, `hmac.compare_digest` comparison, `@login_required` applied to all **22** mutating endpoints. GET endpoints deliberately left open so the 12-second dashboard poll keeps working — locking reads risked taking dispatch dark for less exposure removed than it sounds (stop addresses and manager phone numbers remain readable without auth; tracked as follow-up, not fixed here).
+  - **Fails closed**: with `DISPATCH_PASSWORD` unset, mutating endpoints return 503 rather than allowing access. An unset secret must not silently reopen the hole. **This means the variable has to be set before deploying** — see Deployment note below.
+  - Session cookies hardened in `create_app()`: `HttpOnly`, `SameSite=Lax` (which also blocks the cross-site POSTs that would be the CSRF vector against the newly-protected endpoints — a mitigation, not a substitute for CSRF tokens), `Secure` outside debug, 14-day lifetime.
+- **Stored XSS in the dispatcher dashboard (S-02)** — `map.js`, `timeline.js` and `main.js` each carried a private `escapeHtml` that built a text node and read back `.innerHTML`. Per the HTML fragment-serialization algorithm that escapes only `&`, `<`, `>` and NBSP — **not quotes** — while the canonical `UI.escapeHtml` in `utils.js` (already loaded by the same page, already used correctly by `vehicle-list.js`) does escape both quote characters. All three sinks were attribute-context: `map.js` `title="${escapeHtml(s.station_name)}"` and `timeline.js` `title=`/`alt="${escapeHtml(img.category)}"`, where `station_name` comes from Excel import or `POST /api/stops` and `category` comes straight from an unvalidated form field. All three private copies replaced with `UI.escapeHtml`. This is the same class of bug the 2026-07-29 refactor fixed elsewhere — these three files were missed then.
+- **Stored XSS via plan status (S-03)** — `main.js`'s manage-plans list interpolated raw `p.status` into both a `class` attribute and a text node with no escaping, and `PUT /api/plans/<id>` accepts arbitrary strings for it (no `CHECK` constraint on the column). The class now maps onto a known-status allowlist and the display value is escaped. The server-side status enum remains open — deferred to Phase 4 where it belongs with the other schema constraints.
+- **Path traversal to arbitrary in-repo file write (S-04)** — `image_service.ensure_folder()` interpolated `station_code` and `category` straight into the upload path, both attacker-controlled, so `../../../static/js` let `mkdir(parents=True)` + `save()` write into served static directories. New `_safe_path_segment()` strips separators and traversal sequences, falls back to a constant when a value reduces to nothing, and caps length; `ensure_folder()` additionally re-checks containment under `UPLOAD_ROOT` after resolution. `serve_image` re-checks containment too, since rows written before this fix could still point outside.
+- **Unrestricted upload type and size (S-05)** — no extension allowlist, no size cap, no MIME check, and `serve_image` hands the stored path to `send_file()`, which infers `Content-Type` from the extension — so an uploaded `.html` or `.svg` was served as `text/html`/`image/svg+xml` from the application's own origin. Added `ALLOWED_EXTENSIONS` (SVG excluded deliberately: it is an image format that can execute script), a 10 MB per-file limit sized without buffering the payload, and a 25 MB `MAX_CONTENT_LENGTH` ceiling on all request bodies. Rejections surface as 400 with a readable message via the new `UploadRejected` exception.
+- **Image filename collisions destroyed evidence (C-08)** — not in the Phase 1 brief, but fixed here because it is a two-line change inside the exact function being hardened for S-05. Filenames were `{unix_seconds}{ext}`, so two photos of the same stop and category in the same second silently overwrote each other, leaving two DB rows pointing at one file. Now suffixed with 8 hex chars of a UUID, keeping the sortable timestamp prefix.
+
+### Added
+- `app/auth.py`, `templates/login.html` (styled from the existing `style.css` variables), `GET /api/auth/status` so the frontend can show a login/logout control without probing a mutating endpoint.
+- `app/config.py`: `DISPATCH_PASSWORD`, `SESSION_LIFETIME`, `MAX_UPLOAD_MB`. Deliberately **not** added to `required_env_vars` — that would make the app refuse to boot for every existing deployment; `app/auth.py` fails closed per-request instead, so the failure is visible and scoped rather than silent or total.
+- `api.js` now redirects to `/login` on a 401 (preserving the return path) and surfaces the 503 "auth not configured" message verbatim rather than as a bare `HTTP 503`.
+- `/api/execution/dashboard` returns `gps_matched` and `gps_available`. The dashboard already received `gps_source`/`gps_error` and displayed neither — had the status pill shown "GPS: error" instead of a green "Live" over an empty map, C-01 would have been caught on day one. Wiring these into the UI is Phase 4.
+
+### Testing
+- `pytest tests/test_delivery.py` — **59 passed, 1 failed**, up from a 48-passed baseline. The single failure (`test_delete_image_removes_file`) is an analysis-sandbox artifact: the mounted filesystem returns `Operation not permitted` on `unlink`. Verified as environmental by re-running the identical delete flow with `UPLOAD_ROOT` pointed at a writable temp dir — passes there. **Expected to pass on Windows.**
+- 22 end-to-end checks driven through a real `app.test_client()` with a mocked TTAS payload: GPS reaching the dashboard, a `50E18463`-vs-`50E-18463` mismatch resolving, telemetry parsed from raw keys, coordinates not 0,0, every auth boundary (open GET, blocked POST/PUT/DELETE, wrong password, correct password, unconfigured 503), path-traversal neutralisation, and the upload allowlist and size cap. 22/22.
+- The three `TestTrackingService` GPS tests that the audit flagged as encoding the *wrong* contract (T-02) were rewritten rather than patched — they fed `speed_status`-keyed dicts and so passed against a function that could never work in production. Now built on a raw-TTAS fixture and expanded from 5 tests to 13, including a parametrized sweep of the five plate formats.
+- `FakeFileStorage` in the test suite gained a `.stream`, which a real Werkzeug `FileStorage` always has. Its absence had let the fake pass tests a real upload could not.
+
+### Deployment note
+**`DISPATCH_PASSWORD` must be set before the next deploy** or every mutating delivery endpoint will return 503 (reads and the rest of the app are unaffected). Not added to `render.yaml` — it is a secret and should be set in the Render dashboard, not committed.
+
+### Known limitations / deliberately not fixed here
+- Fixing C-01 restores the synchronous TTAS fetch and serial ORS calls into the request path — audit P-01/P-02. Phase 1 makes GPS *correct*, not *fast*; under 36 vehicles this will be slower than the broken version was. Ship to staging first; Phase 3 addresses it.
+- `tests/test_delivery.py`'s image tests write into the real `DeliveryPlans/` upload root rather than a temp dir, and have left ~30 stray `.jpg` files there across previous runs. Test-infrastructure fix, deferred.
+- `services/delivery/tracking_service.py` now transitively imports `app.config` (via `ttas_client`), which raises when `.env` is absent. Kept out of module scope via a deferred import so the pure-function tests still work without a configured environment, but the coupling is new.
+- Route-layer tests exist only as the ad-hoc verification script above; the permanent suite is Phase 5.
+
 ## 2026-07-30 — Documentation Reorganization: Consolidated into docs/
 
 Prompted directly by the redundancy this session's TLP work kept running into: the algorithm was documented three times (`SORTING_STRATEGY.md`, `SYSTEM.md`'s "Sorting Algorithm" section, `README.md`'s "Algorithm Reference" section) and had drifted — only `SORTING_STRATEGY.md` was kept current through Phases 1-6 above, so the other two were actively wrong (still describing the pre-Phase-1 4-term scorer, `LargestFirstStrategy`-only single-vehicle default, and pure `LargestVehicleFirstStrategy` multi-vehicle distribution). The delivery module was documented twice (`DELIVERY_MODULE.md`, and a smaller duplicate inside `SYSTEM.md`). User asked for all docs reorganized into a `docs/` folder with redundant/repetitive content removed, keeping documentation minimal.

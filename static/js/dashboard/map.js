@@ -17,11 +17,38 @@ window.DASH = window.DASH || {};
   let stopsSetKey = null; // join of stop ids currently rendered — detects assignment switch vs. same-set poll
   let lastRouteKey = null; // join of route coords — skips redundant polyline rebuilds
 
-  function escapeHtml(str) {
-    if (str == null) return '';
-    const d = document.createElement('div');
-    d.appendChild(document.createTextNode(String(str)));
-    return d.innerHTML;
+  // Canonical escaper from utils.js (loaded before this file). The private
+  // copy this replaces built a text node and read back .innerHTML, which per
+  // the HTML fragment-serialization algorithm escapes only & < > and NBSP —
+  // NOT quotes. It was used inside a title="..." attribute below, so a
+  // station_name containing a double quote broke out of the attribute
+  // (audit S-02). UI.escapeHtml escapes " and ' as well.
+  const escapeHtml = UI.escapeHtml;
+
+  // Leaflet drags the map to keep an open popup in view, from
+  // Popup._adjustPan(). That is reached by two separate paths, and a selected
+  // vehicle has its popup open (zoomToVehicle opens it), so on a moving truck
+  // BOTH fired on every 12-second poll:
+  //
+  //   1. popup.setContent()  -> DivOverlay.update()   -> _adjustPan()
+  //   2. marker.setLatLng()  -> fires 'move'          -> Layer._movePopup()
+  //                          -> popup.setLatLng()     -> _adjustPan()
+  //
+  // The result was the map yanking itself back onto the vehicle every poll,
+  // which made it impossible to pan off and study a street for more than a few
+  // seconds. Suppressed for background updates only: opening a popup still
+  // auto-pans (Popup.onAdd -> update -> _adjustPan), which is what keeps a
+  // popup usable when its marker sits near the edge of the map.
+  function withoutAutoPan(marker, fn) {
+    const popup = marker.getPopup();
+    if (!popup) { fn(); return; }
+    const previous = popup.options.autoPan;
+    popup.options.autoPan = false;
+    try {
+      fn();
+    } finally {
+      popup.options.autoPan = previous;
+    }
   }
 
   function statusColor(status) {
@@ -55,7 +82,7 @@ window.DASH = window.DASH || {};
   function stopPopupHtml(s, execStatus) {
     return `
           <div style="font-size:12px;min-width:160px;">
-            <strong>#${s.planned_sequence} ${escapeHtml(s.station_name || '')}</strong><br/>
+            <strong>#${s.execution_sequence || s.planned_sequence} ${escapeHtml(s.station_name || '')}</strong><br/>
             ${s.station_code ? 'Code: ' + escapeHtml(s.station_code) + '<br/>' : ''}
             Status: <span style="font-weight:600;">${escapeHtml(execStatus)}</span><br/>
             ${s.product_description ? 'Product: ' + escapeHtml(s.product_description) + '<br/>' : ''}
@@ -125,7 +152,7 @@ window.DASH = window.DASH || {};
         }
 
         if (entry.lat !== lat || entry.lng !== lng) {
-          entry.marker.setLatLng([lat, lng]);
+          withoutAutoPan(entry.marker, () => entry.marker.setLatLng([lat, lng]));
           entry.lat = lat;
           entry.lng = lng;
         }
@@ -140,8 +167,10 @@ window.DASH = window.DASH || {};
         }
 
         if (entry.popupHtml !== popupHtml) {
-          const popup = entry.marker.getPopup();
-          if (popup) popup.setContent(popupHtml);
+          withoutAutoPan(entry.marker, () => {
+            const popup = entry.marker.getPopup();
+            if (popup) popup.setContent(popupHtml);
+          });
           entry.popupHtml = popupHtml;
         }
       });
@@ -208,8 +237,10 @@ window.DASH = window.DASH || {};
           entry.cssClass = cssClass;
         }
         if (entry.popupHtml !== popupHtml) {
-          const popup = entry.marker.getPopup();
-          if (popup) popup.setContent(popupHtml);
+          withoutAutoPan(entry.marker, () => {
+            const popup = entry.marker.getPopup();
+            if (popup) popup.setContent(popupHtml);
+          });
           entry.popupHtml = popupHtml;
         }
       });

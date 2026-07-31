@@ -116,7 +116,9 @@ app/                            # Flask application package (see app/__init__.py
     fleet.py                     # Vehicle CRUD
     fuel.py                      # Fuel log CRUD, profiles, CSV export, Google Sheet sync
     oil.py                       # Oil maintenance CRUD, TTAS KM-log scraping
-    trips.py                     # Trip management, background route-refresh loop
+    trips.py                     # Main-map route lines + advance/cancel, background route-refresh loop
+                                 # (Trip Management / Trip History pages removed 2026-07-31 —
+                                 #  superseded by the Dispatch dashboard)
 tests/                          # All test, debug, and diagnostic files
   test_all.py                   # Unified test harness (16 subcommands)
   test_scorer.py                # Pytest unit tests (TLP scoring — 26 tests)

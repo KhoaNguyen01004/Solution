@@ -72,17 +72,42 @@ def migrate(force=False):
     assignment_seq = 0
     total_stops = 0
 
+    # Resolve every vehicle up front and abort if any is unknown. This script
+    # used to INSERT a vehicle for any key it couldn't find, which is how a
+    # migration silently populated `vehicles` with rows nobody registered.
+    # Vehicles are core data — created only through Vehicle Management.
+    from services.vehicle_identity import VehicleIndex
+
+    c.execute("SELECT id, plate_number FROM vehicles")
+    vehicle_index = VehicleIndex(c.fetchall())
+
+    resolved: dict[str, int] = {}
+    unknown: list[str] = []
+    for vehicle_key in vehicle_groups:
+        ref = vehicle_index.resolve(vehicle_key)
+        if ref is None:
+            # Legacy vehicle_trips.vehicle_id is TEXT and sometimes holds a
+            # numeric vehicles.id rather than a plate — accept that too.
+            c.execute("SELECT id FROM vehicles WHERE CAST(id AS TEXT) = ?", (str(vehicle_key),))
+            row = c.fetchone()
+            if row:
+                resolved[vehicle_key] = row["id"]
+                continue
+            unknown.append(vehicle_key)
+        else:
+            resolved[vehicle_key] = ref.id
+
+    if unknown:
+        raise SystemExit(
+            "Aborting: these vehicles from vehicle_trips are not registered in "
+            "the fleet:\n  " + "\n  ".join(sorted(unknown)) +
+            "\n\nAdd them in Vehicle Management, then re-run. "
+            "This script will not create them."
+        )
+
     for vehicle_key, vehicle_trips in vehicle_groups.items():
         assignment_seq += 1
-
-        c.execute("SELECT id FROM vehicles WHERE plate_number = ? OR CAST(id AS TEXT) = ?",
-                  (vehicle_key, vehicle_key))
-        vehicle_row = c.fetchone()
-        if vehicle_row:
-            vehicle_id = vehicle_row["id"]
-        else:
-            c.execute("INSERT INTO vehicles (plate_number) VALUES (?)", (vehicle_key,))
-            vehicle_id = c.lastrowid
+        vehicle_id = resolved[vehicle_key]
 
         driver_name = vehicle_trips[0].get("driver_name", "")
         c.execute("SELECT id FROM drivers WHERE name = ?", (driver_name,))

@@ -3,6 +3,8 @@ from datetime import date, datetime
 from typing import Optional
 
 from app.db import DatabaseManager
+from services.plate_utils import normalize_plate
+from services.vehicle_identity import build_index, canonical_plate
 
 logger = logging.getLogger(__name__)
 
@@ -385,23 +387,94 @@ def validate_import_rows(rows: list[dict]) -> list[dict]:
     return errors
 
 
-def preview_import(rows: list[dict]) -> dict:
+class UnknownVehicles(ValueError):
+    """Raised when an import references vehicles that aren't in the fleet.
+
+    Always fatal. An import never creates vehicles — not silently, and not
+    behind an opt-in flag. `vehicles` is the master table that fuel, oil, TLP
+    and delivery all key off, and letting a spreadsheet add rows to it is how
+    this codebase accumulated the duplicates `tests/merge_duplicate_vehicles.py`
+    exists to clean up (audit C-05). Adding a truck is a Vehicle Management
+    action.
+
+    In practice an unknown plate here almost always means a typo or a new
+    truck nobody registered — not a plate format this resolver can't handle,
+    since it already matches on the 5-digit serial that identifies a vehicle
+    regardless of whether the sheet wrote `50E-18463`, `50E18463` or `18463`.
+    """
+
+    def __init__(self, identifiers):
+        self.identifiers = list(identifiers)
+        listed = ", ".join(repr(i) for i in self.identifiers)
+        super().__init__(
+            f"These vehicles are not in the fleet: {listed}. "
+            "Check for a typo in the plate number, or add the vehicle under "
+            "Vehicle Management before importing."
+        )
+
+
+def _group_rows_by_vehicle(rows: list[dict], index) -> list[dict]:
+    """Group import rows by the vehicle they resolve to.
+
+    Grouping used to key on the raw spreadsheet string, so a file mixing
+    ``50E-18463`` and ``50E18463`` produced *two* assignments for one physical
+    truck and split the driver's stops across two dashboard rows (audit L-03).
+    Rows now group by resolved vehicle id.
+
+    Unresolved identifiers group by their 5-digit serial, because that is what
+    actually distinguishes a vehicle in this fleet — ``51D-77777``,
+    ``51D77777`` and a bare ``77777`` are one truck, so they must be reported
+    as one problem, not three. Falls back to canonical form (and then the raw
+    string) for the pathological case of an identifier containing no digits.
+    """
+    groups: dict = {}
+    for row in rows:
+        identifier = str(row.get("vehicle", "") or "").strip()
+        ref = index.resolve(identifier)
+        if ref:
+            key = ("id", ref.id)
+        else:
+            key = ("raw", normalize_plate(identifier)
+                          or canonical_plate(identifier)
+                          or identifier)
+
+        group = groups.get(key)
+        if group is None:
+            group = {"identifier": identifier, "ref": ref, "rows": []}
+            groups[key] = group
+        group["rows"].append(row)
+
+    for group in groups.values():
+        group["rows"].sort(key=lambda s: int(s.get("sequence", 0) or 0))
+    return list(groups.values())
+
+
+def preview_import(rows: list[dict], db_path: Optional[str] = None) -> dict:
+    """Dry-run summary shown before the dispatcher commits an import.
+
+    When ``db_path`` is supplied, each assignment additionally reports whether
+    its vehicle resolves to a fleet row and how — so unknown plates surface
+    here, before the strict check in ``confirm_import`` can surprise anyone.
+    """
     errors = validate_import_rows(rows)
     has_errors = any(e["errors"] for e in errors)
 
-    vehicle_groups = {}
-    for row in rows:
-        key = str(row.get("vehicle", "")).strip()
-        if key not in vehicle_groups:
-            vehicle_groups[key] = []
-        vehicle_groups[key].append(row)
+    if db_path:
+        with DatabaseManager(db_path).connect() as conn:
+            groups = _group_rows_by_vehicle(rows, build_index(conn))
+    else:
+        groups = _group_rows_by_vehicle(rows, _NullIndex())
 
     assignments_preview = []
-    for vehicle_key, stops in vehicle_groups.items():
-        stops = sorted(stops, key=lambda s: int(s.get("sequence", 0) or 0))
+    for group in groups:
+        ref = group["ref"]
         assignments_preview.append({
-            "vehicle_identifier": vehicle_key,
-            "stop_count": len(stops),
+            "vehicle_identifier": group["identifier"],
+            "resolved": ref is not None,
+            "vehicle_id": ref.id if ref else None,
+            "resolved_plate": ref.plate_number if ref else None,
+            "matched_by": ref.matched_by if ref else None,
+            "stop_count": len(group["rows"]),
             "stops": [
                 {
                     "sequence": s.get("sequence"),
@@ -412,9 +485,11 @@ def preview_import(rows: list[dict]) -> dict:
                     "lng": s.get("lng"),
                     "product": str(s.get("product_description", "") or ""),
                 }
-                for s in stops
+                for s in group["rows"]
             ]
         })
+
+    unknown = [a["vehicle_identifier"] for a in assignments_preview if not a["resolved"]]
 
     return {
         "total_rows": len(rows),
@@ -422,42 +497,45 @@ def preview_import(rows: list[dict]) -> dict:
         "has_errors": has_errors,
         "errors": errors,
         "assignments": assignments_preview,
+        "unknown_vehicles": unknown if db_path else [],
+        "vehicles_checked": bool(db_path),
     }
 
 
-def confirm_import(db_path: str, plan_id: int, import_data: list[dict]):
+class _NullIndex:
+    """Used when preview_import is called without a database — every
+    identifier is simply unresolved, preserving the old preview behaviour."""
+
+    def resolve(self, identifier):
+        return None
+
+
+def confirm_import(db_path: str, plan_id: int, import_data: list[dict]) -> dict:
+    """Write a parsed import into plans/assignments/stops/executions.
+
+    Vehicle identity goes through ``services.vehicle_identity``. Every plate
+    must already resolve to a fleet vehicle — an unrecognised one aborts the
+    whole import via ``UnknownVehicles`` and nothing is written. Imports do
+    not create vehicles under any circumstance.
+    """
     with DatabaseManager(db_path).connect() as conn:
         c = conn.cursor()
+        index = build_index(conn)
+        groups = _group_rows_by_vehicle(import_data, index)
 
-        c.execute("SELECT id, plate_number FROM vehicles")
-        vehicles_map = {}
-        for r in c.fetchall():
-            vehicles_map[r["plate_number"]] = r["id"]
+        unresolved = [g["identifier"] for g in groups if g["ref"] is None]
+        if unresolved:
+            raise UnknownVehicles(unresolved)
 
-        vehicle_groups = {}
-        for row in import_data:
-            key = str(row.get("vehicle", "")).strip()
-            if key not in vehicle_groups:
-                vehicle_groups[key] = []
-            vehicle_groups[key].append(row)
-
-        seq = 0
-        for vehicle_key, stops in vehicle_groups.items():
-            seq += 1
-            vehicle_id = vehicles_map.get(vehicle_key)
-            if not vehicle_id:
-                c.execute("INSERT INTO vehicles (plate_number) VALUES (?)", (vehicle_key,))
-                vehicle_id = c.lastrowid
-                vehicles_map[vehicle_key] = vehicle_id
-
+        stops_created = 0
+        for seq, group in enumerate(groups, start=1):
             c.execute(
                 "INSERT INTO vehicle_assignments (plan_id, vehicle_id, sequence) VALUES (?, ?, ?)",
-                (plan_id, vehicle_id, seq)
+                (plan_id, group["ref"].id, seq)
             )
             assignment_id = c.lastrowid
 
-            stops = sorted(stops, key=lambda s: int(s.get("sequence", 0) or 0))
-            for s in stops:
+            for s in group["rows"]:
                 planned_seq = int(s.get("sequence", 0) or 0)
                 c.execute("""
                     INSERT INTO delivery_plan_stops
@@ -482,10 +560,23 @@ def confirm_import(db_path: str, plan_id: int, import_data: list[dict]):
                     INSERT INTO stop_executions (stop_id, execution_sequence, status)
                     VALUES (?, ?, 'planned')
                 """, (stop_id, planned_seq))
+                stops_created += 1
 
+        # Once, after the loop — not once per vehicle. This UPDATE used to sit
+        # inside the per-vehicle loop, so it ran N times redundantly and, for
+        # an import that produced no groups at all, zero times: the function
+        # returned success while the plan stayed 'draft' and never appeared on
+        # the dashboard (audit L-06). Scheduled for Phase 3, but restructuring
+        # this loop made leaving the bug in place indefensible.
+        if groups:
             c.execute(
                 "UPDATE delivery_plans SET status = 'confirmed', imported_at = ? WHERE id = ?",
                 (datetime.now().isoformat(), plan_id)
             )
 
-        return True
+        return {
+            "ok": True,
+            "assignments_created": len(groups),
+            "stops_created": stops_created,
+            "plan_confirmed": bool(groups),
+        }

@@ -9,6 +9,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app import config, state
 from app.utils.export import csv_response
+from services import vehicle_identity
 
 bp = Blueprint("fuel", __name__)
 
@@ -413,37 +414,36 @@ def api_fuel_log_create():
         conn = sqlite3.connect(config.DB_PATH)
         c = conn.cursor()
 
-        # Resolve numeric-only plate to full plate if a matching vehicle exists
-        if plate.isdigit() and len(plate) == 5:
-            digits = ''.join(ch for ch in (plate or '') if ch.isdigit())
-            plate_suffix = digits[-5:] if len(digits) >= 5 else digits
-            c.execute("SELECT id, plate_number FROM vehicles")
-            for vid, vplate in c.fetchall():
-                vdigits = ''.join(ch for ch in (vplate or '') if ch.isdigit())
-                vsuffix = vdigits[-5:] if len(vdigits) >= 5 else vdigits
-                if vsuffix == plate_suffix and not (vplate.isdigit() and len(vplate) == 5):
-                    plate = vplate
-                    vehicle_id = vid
-                    break
+        # The `vehicles` table is the source of truth. This endpoint used to
+        # upsert into it — creating a vehicle for any unrecognised plate and
+        # overwriting `current_driver` from whatever name was typed on the
+        # fuel form. Both were silent background edits to core fleet data, and
+        # because the ON CONFLICT matched on the exact plate string, logging
+        # fuel for "50E18463" against a stored "50E-18463" created a duplicate
+        # row (same root cause as audit C-05).
+        #
+        # Resolution is loose (exact → canonical → 5-digit serial), so the
+        # unknown-vehicle path only triggers for a plate that genuinely isn't
+        # in the fleet, not for a formatting difference.
+        vehicle_ref = vehicle_identity.resolve(conn, plate)
+        if vehicle_ref is None:
+            conn.close()
+            return jsonify(
+                vehicle_identity.unknown_vehicle_response(plate, driver_name)
+            ), 409
+
+        # Store the fleet's canonical plate rather than whatever was typed, so
+        # fuel history stays joinable. This normalizes the *new* record only —
+        # it never rewrites the vehicle.
+        plate = vehicle_ref.plate_number
+        vehicle_id = vehicle_ref.id
+
         c.execute(
             "INSERT INTO fuel_log (license_plate, log_date, log_time, gas_store, old_km, new_km, liters, driver_name, unit_price, notes, vehicle_id, is_full_tank) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (plate, log_date, log_time, gas_store, old_km, new_km, liters, driver_name, unit_price, notes, vehicle_id, is_full_tank)
         )
         conn.commit()
         new_id = c.lastrowid
-        # Ensure vehicle exists in vehicles table (skip numeric-only plates)
-        if not (plate.isdigit() and len(plate) == 5):
-            c.execute(
-                "INSERT INTO vehicles (plate_number, current_driver) VALUES (?, ?) ON CONFLICT(plate_number) DO UPDATE SET current_driver = COALESCE(NULLIF(?, ''), current_driver)",
-                (plate, driver_name, driver_name)
-            )
-        # Link vehicle_id if not already set
-        if not vehicle_id:
-            c.execute(
-                "UPDATE fuel_log SET vehicle_id = (SELECT id FROM vehicles WHERE plate_number = ?) WHERE id = ?",
-                (plate, new_id)
-            )
-        conn.commit()
         conn.close()
 
         entry = _compute_fuel_entry({
@@ -480,6 +480,20 @@ def api_fuel_log_update(entry_id):
 
         vehicle_id = data.get("vehicle_id", existing["vehicle_id"])
         plate = (data.get("license_plate") or existing["license_plate"]).strip().upper()
+
+        # Same rule as the create path: an edit may not introduce a plate that
+        # isn't a real vehicle, and may not create one to make itself valid.
+        vehicle_ref = vehicle_identity.resolve(conn, plate)
+        if vehicle_ref is None:
+            conn.close()
+            return jsonify(
+                vehicle_identity.unknown_vehicle_response(
+                    plate, (data.get("driver_name") or existing["driver_name"] or "").strip()
+                )
+            ), 409
+        plate = vehicle_ref.plate_number
+        vehicle_id = vehicle_ref.id
+
         log_date = (data.get("log_date") or existing["log_date"]).strip()
         log_time = (data.get("log_time") or existing["log_time"]).strip()
         gas_store = (data.get("gas_store") if "gas_store" in data else existing["gas_store"]).strip()

@@ -118,13 +118,39 @@ window.DASH = window.DASH || {};
     DASH.map.zoomToVehicle(assignmentId);
   }
 
+  // Monotonic token for assignment-detail loads. Every call takes the next
+  // value; when its three requests resolve, it writes to state only if it is
+  // still the newest.
+  //
+  // Without it, a detail load for the previously-selected vehicle could
+  // resolve *after* the one the dispatcher just clicked and overwrite it —
+  // leaving the vehicle list highlighting one truck while the timeline, map
+  // stops and info bar showed another (audit F-05). The 12-second poll calls
+  // this too, so a click landing mid-poll is the common case, not a rare one.
+  let detailGeneration = 0;
+
+  // Number of stop reorders painted locally but not yet acknowledged. Declared
+  // here rather than beside state.reorderStops below because loadAssignmentDetail
+  // reads it.
+  let pendingReorders = 0;
+
   async function loadAssignmentDetail(assignmentId) {
+    const generation = ++detailGeneration;
     try {
       const [stops, progress, eta] = await Promise.all([
         DASH.api.stops(assignmentId),
         DASH.api.progress(assignmentId),
         DASH.api.eta(assignmentId),
       ]);
+
+      // Superseded while these were in flight — drop the result rather than
+      // paint stale data over the current selection.
+      if (generation !== detailGeneration) return;
+      if (state.selectedAssignmentId !== assignmentId) return;
+      // A reorder the dispatcher just made is painted locally and not yet
+      // acknowledged by the server. This response was built from the old
+      // order, so writing it would visibly snap the stops back.
+      if (pendingReorders > 0) return;
 
       // Merge execution status into stops
       state.selectedStops = stops || [];
@@ -149,7 +175,9 @@ window.DASH = window.DASH || {};
         DASH.map.followVehicle(assignmentId);
       }
     } catch (e) {
-      console.error('Failed to load assignment detail:', e);
+      if (generation === detailGeneration) {
+        console.error('Failed to load assignment detail:', e);
+      }
     }
   }
 
@@ -188,10 +216,13 @@ window.DASH = window.DASH || {};
     const p = progress || { completed: 0, total: 0, progress_pct: 0 };
     document.getElementById('vibarProgress').textContent = `Progress: ${p.completed}/${p.total} (${p.progress_pct}%)`;
 
-    const etaText = eta && eta.etas && eta.etas.length > 0
-      ? 'ETA: ' + Math.round(eta.etas[0].eta_seconds / 60) + ' min'
-      : 'ETA: --';
-    document.getElementById('vibarEta').textContent = etaText;
+    // eta_seconds is null for a stop with no coordinates, and Math.round(null/60)
+    // is 0 — so an unknown ETA rendered as a confident "ETA: 0 min", telling a
+    // dispatcher the truck is arriving now (audit L-10). timeline.js already
+    // guarded this with a typeof check; the info bar did not.
+    const firstEta = eta && eta.etas && eta.etas.length > 0 ? eta.etas[0].eta_seconds : null;
+    document.getElementById('vibarEta').textContent =
+      typeof firstEta === 'number' ? `ETA: ${Math.round(firstEta / 60)} min` : 'ETA: --';
 
     const distanceEl = document.getElementById('vibarDistance');
     if (eta && (eta.remaining_distance_km || eta.travelled_distance_km)) {
@@ -321,6 +352,42 @@ window.DASH = window.DASH || {};
     await DASH.polling.refreshNow(onPollTick);
   };
 
+  // ── Stop reordering ────────────────────────────────────────
+  // Optimistic: the new order is painted before the request goes out, because
+  // a dispatcher resequencing a live route does it several stops at a time and
+  // waiting for a round trip (plus an ETA recompute) per click is unusable.
+  //
+  // Moves are POSTed strictly in click order through a promise chain — the
+  // server rewrites every execution_sequence on each call, so two requests
+  // racing would settle on whichever finished last, not on what was clicked
+  // last. Only the final move of a burst triggers a refresh.
+  let reorderChain = Promise.resolve();
+
+  state.reorderStops = function (assignmentId, orderedStops) {
+    // Drop any assignment-detail load already in flight; it was built from
+    // the previous order and would overwrite what was just painted.
+    detailGeneration++;
+
+    state.selectedStops = orderedStops;
+    const currentStopId = getCurrentStopId(orderedStops);
+    DASH.timeline.render(orderedStops, currentStopId, state.selectedEta);
+    DASH.map.updateStops(orderedStops, currentStopId);
+    DASH.map.updateRoute(state.selectedEta, orderedStops);
+
+    const stopIds = orderedStops.map((s) => s.id);
+    pendingReorders++;
+    reorderChain = reorderChain
+      .then(() => DASH.api.reorderStops(assignmentId, stopIds))
+      .catch((err) => UI.toast(`Reorder failed: ${err.message}`, 'error', 6000))
+      .finally(() => {
+        pendingReorders--;
+        // Resync against the server once the burst settles — this is also what
+        // recomputes ETAs for the new sequence.
+        if (pendingReorders === 0) state.refreshNow();
+      });
+    return reorderChain;
+  };
+
   // ── Init ──────────────────────────────────────────────────
   function init() {
     DASH.map.init();
@@ -365,12 +432,43 @@ window.DASH = window.DASH || {};
     selectedIds: new Set(),
   };
 
+  // The panel is position:fixed, so it has to be placed against the button's
+  // viewport rect. Right-aligned to the button where there is room, then
+  // clamped to the viewport on every side — the header wraps at narrow widths
+  // and the button can end up anywhere along it, including close enough to the
+  // left edge that a right-aligned 320px panel would hang off-screen.
+  const MANAGE_PLANS_MARGIN = 8;
+
+  function positionManagePlans() {
+    const dd = document.getElementById('managePlansDropdown');
+    const btn = document.getElementById('managePlansBtn');
+    if (!dd || !btn || !dd.classList.contains('open')) return;
+
+    const rect = btn.getBoundingClientRect();
+    const m = MANAGE_PLANS_MARGIN;
+    const width = Math.min(320, window.innerWidth - m * 2);
+
+    let left = rect.right - width;
+    left = Math.min(left, window.innerWidth - width - m);
+    left = Math.max(m, left);
+
+    const top = rect.bottom + 4;
+
+    dd.style.width = `${width}px`;
+    dd.style.left = `${left}px`;
+    dd.style.top = `${top}px`;
+    // Never taller than the space left below the button, so the action row
+    // stays reachable instead of falling past the bottom of the window.
+    dd.style.maxHeight = `${Math.max(160, window.innerHeight - top - m)}px`;
+  }
+
   function toggleManagePlans(show) {
     const dd = document.getElementById('managePlansDropdown');
     if (!dd) return;
     dd.classList.toggle('open', show !== undefined ? show : !dd.classList.contains('open'));
     if (dd.classList.contains('open')) {
       populateManagePlansList();
+      positionManagePlans();
     }
   }
 
@@ -383,16 +481,22 @@ window.DASH = window.DASH || {};
       document.getElementById('deleteSelectedPlansBtn').disabled = true;
       return;
     }
+    // Plan status is stored without a CHECK constraint and PUT /api/plans/<id>
+    // accepted arbitrary strings, so p.status was an injection vector into
+    // both a class attribute and a text node (audit S-03). Map it onto a
+    // known set for the class, and escape it for display.
+    const KNOWN_STATUSES = ['draft', 'confirmed', 'executing', 'completed', 'cancelled'];
     let html = '';
     plans.forEach((p) => {
       const checked = managePlansState.selectedIds.has(p.id) ? 'checked' : '';
-      const statusClass = p.status || 'draft';
+      const rawStatus = p.status || 'draft';
+      const statusClass = KNOWN_STATUSES.includes(rawStatus) ? rawStatus : 'draft';
       html += `
         <label class="manage-plans-item">
           <input type="checkbox" value="${p.id}" ${checked}>
           <span class="plan-item-name">${escapeHtml(p.plan_name || 'Plan #' + p.id)}</span>
           <span class="plan-item-date">${escapeHtml(p.plan_date || '')}</span>
-          <span class="plan-item-status ${statusClass}">${statusClass}</span>
+          <span class="plan-item-status ${statusClass}">${escapeHtml(rawStatus)}</span>
         </label>
       `;
     });
@@ -456,22 +560,28 @@ window.DASH = window.DASH || {};
     if (deleteBtn) deleteBtn.addEventListener('click', deleteSelectedPlans);
     if (clearBtn) clearBtn.addEventListener('click', clearAllPlans);
 
-    // Close on outside click
+    // Close on outside click. The panel is still a DOM child of .manage-plans-wrap
+    // despite being position:fixed, so contains() covers clicks inside it.
     document.addEventListener('click', (e) => {
       const wrap = document.querySelector('.manage-plans-wrap');
       if (wrap && !wrap.contains(e.target)) {
         toggleManagePlans(false);
       }
     });
+
+    // A resize (or an orientation change, or the header re-wrapping) moves the
+    // button out from under an open panel.
+    window.addEventListener('resize', positionManagePlans);
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') toggleManagePlans(false);
+    });
   }
 
   // ── Utility ────────────────────────────────────────────────
-  function escapeHtml(str) {
-    if (str == null) return '';
-    const d = document.createElement('div');
-    d.appendChild(document.createTextNode(String(str)));
-    return d.innerHTML;
-  }
+  // Canonical escaper from utils.js (loaded before this file); the private
+  // copy this replaces did not escape quotes (audit S-02).
+  const escapeHtml = UI.escapeHtml;
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);

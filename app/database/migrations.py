@@ -6,6 +6,9 @@ is idempotent — safe to run on every startup. `run_all()` preserves the
 original relative execution order from init_db().
 """
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def migrate_legacy_vehicle_trips_schema(conn):
@@ -143,47 +146,61 @@ def seed_vehicle_types(conn):
 
 
 def backfill_vehicles_from_fuel_log(conn):
-    """Backfill vehicles + fuel_log.vehicle_id from existing fuel_log entries."""
+    """Link existing fuel_log rows to the vehicles they belong to.
+
+    **Link-only. This never creates a vehicle and never edits one.**
+
+    It used to upsert every distinct plate in `fuel_log` into `vehicles` on
+    each boot, with `ON CONFLICT DO UPDATE SET current_driver = ...` — so a
+    driver name typed on a fuel form silently became the vehicle's official
+    current driver, and any plate not already stored byte-identically became a
+    new vehicle row. `vehicles` is core data maintained through Vehicle
+    Management; startup code has no business editing it.
+
+    Plates are resolved through services.vehicle_identity, which matches on
+    the 5-digit serial, so `09473` and `50H-09473` link to the same vehicle.
+    Unlinkable plates are left alone and reported in the log rather than
+    conjured into existence.
+    """
+    from services.vehicle_identity import VehicleIndex
+
     c = conn.cursor()
-    c.execute("SELECT DISTINCT license_plate, driver_name FROM fuel_log WHERE license_plate IS NOT NULL AND license_plate != ''")
-    distinct_plates = c.fetchall()
+    c.execute(
+        "SELECT DISTINCT license_plate FROM fuel_log "
+        "WHERE license_plate IS NOT NULL AND license_plate != '' AND vehicle_id IS NULL"
+    )
+    unlinked_plates = [r[0] for r in c.fetchall()]
+    if not unlinked_plates:
+        return
 
-    # Pre-build a mapping of normalised suffix → (vehicle_id, plate)
     c.execute("SELECT id, plate_number FROM vehicles")
-    suffix_to_vehicle: dict[str, tuple[int, str]] = {}
-    for vid, vplate in c.fetchall():
-        digits = ''.join(ch for ch in (vplate or '') if ch.isdigit())
-        key = digits[-5:] if len(digits) >= 5 else digits
-        if key:
-            is_numeric = vplate.isdigit() and len(vplate) == 5
-            if not is_numeric or key not in suffix_to_vehicle:
-                suffix_to_vehicle[key] = (vid, vplate)
+    index = VehicleIndex(c.fetchall())
 
-    for plate, driver in distinct_plates:
-        digits = ''.join(ch for ch in (plate or '') if ch.isdigit())
-        suffix = digits[-5:] if len(digits) >= 5 else digits
-
-        # Skip purely numeric 5-digit plates — never create duplicate vehicles
-        if plate.isdigit() and len(plate) == 5:
-            match = suffix_to_vehicle.get(suffix)
-            if match:
-                orig_id, orig_plate = match
-                c.execute(
-                    "UPDATE fuel_log SET license_plate = ?, vehicle_id = ? WHERE license_plate = ? AND vehicle_id IS NULL",
-                    (orig_plate, orig_id, plate)
-                )
+    linked, unresolved = 0, []
+    for plate in unlinked_plates:
+        ref = index.resolve(plate)
+        if ref is None:
+            unresolved.append(plate)
             continue
+        # Normalise the fuel_log row onto the fleet's canonical plate and link
+        # it. This edits fuel history (operational data), never the vehicle.
+        c.execute(
+            "UPDATE fuel_log SET license_plate = ?, vehicle_id = ? "
+            "WHERE license_plate = ? AND vehicle_id IS NULL",
+            (ref.plate_number, ref.id, plate)
+        )
+        linked += c.rowcount
 
-        # Upsert vehicle for normal (full) plates
-        c.execute(
-            "INSERT INTO vehicles (plate_number, current_driver) VALUES (?, ?) ON CONFLICT(plate_number) DO UPDATE SET current_driver = COALESCE(NULLIF(?, ''), current_driver)",
-            (plate, driver or '', driver or '')
-        )
-        c.execute(
-            "UPDATE fuel_log SET vehicle_id = (SELECT id FROM vehicles WHERE plate_number = ?) WHERE vehicle_id IS NULL AND license_plate = ?",
-            (plate, plate)
-        )
     conn.commit()
+
+    if linked:
+        logger.info("Linked %d fuel_log row(s) to existing vehicles.", linked)
+    if unresolved:
+        logger.warning(
+            "%d fuel_log plate(s) match no registered vehicle and were left "
+            "unlinked — add them in Vehicle Management if they are real: %s",
+            len(unresolved), ", ".join(sorted(unresolved)[:20]),
+        )
 
 
 def migrate_tlp_extensions(conn2):
@@ -207,11 +224,29 @@ def migrate_tlp_extensions(conn2):
     if 'vehicle_id' not in lpcols:
         c2.execute("ALTER TABLE tlp_load_plans ADD COLUMN vehicle_id INTEGER DEFAULT NULL")
 
-    # Migrate tlp_trucks → container_configs + features (one-time)
+    # Migrate tlp_trucks → container_configs + features (one-time).
+    #
+    # This is the only place outside Vehicle Management that writes a core
+    # vehicle field (container_config_id, i.e. the vehicle's dimensions), and
+    # it is deliberately kept: it does not act on new data, it relocates
+    # dimensions the user already entered from the retired `tlp_trucks` table
+    # into `container_configs`. Double-guarded — it runs only when
+    # `container_configs` is empty AND `tlp_trucks` still exists, so it fires
+    # once in a database's lifetime and is inert thereafter.
+    #
+    # It logs what it changed. A migration that rewrites core fleet data
+    # without saying so is the thing being avoided, not migration itself.
     try:
         existing = c2.execute("SELECT id FROM container_configs LIMIT 1").fetchone()
         if not existing:
             trucks = c2.execute("SELECT * FROM tlp_trucks").fetchall()
+            if trucks:
+                logger.warning(
+                    "One-time migration: moving %d vehicle container spec(s) from "
+                    "the retired tlp_trucks table into container_configs, and "
+                    "relinking vehicles.container_config_id. Verify dimensions in "
+                    "Vehicle Management afterwards.", len(trucks),
+                )
             for t in trucks:
                 c2.execute("""
                     INSERT INTO container_configs (name, cargo_length_mm, cargo_width_mm, cargo_height_mm, payload_kg)

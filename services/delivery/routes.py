@@ -5,6 +5,16 @@ from flask import Blueprint, jsonify, request, send_file, current_app
 from datetime import datetime
 from pathlib import Path
 
+# Module scope, and from app.services.ttas_client — not `from app import ...`.
+# The old deferred `from app import fetch_vehicle_data` inside a bare
+# `except Exception` resolved to the app *package*, which never exported that
+# name, so every call raised ImportError, was swallowed, and returned an empty
+# vehicle list. GPS silently never worked (audit C-01). Importing at module
+# scope means a regression of this kind aborts create_app() instead of
+# degrading one request at a time.
+from app.services.ttas_client import fetch_vehicle_data
+from services.plate_utils import normalize_plate
+
 from . import plan_service
 from . import execution_service
 from . import eta_service
@@ -28,12 +38,45 @@ def _ors_config():
 
 
 def _ttas_vehicles():
+    """Live GPS for the whole fleet, normalized.
+
+    Returns ``(positions, source, error)``. ``fetch_vehicle_data`` already
+    handles its own live→sample fallback and never raises, so the only
+    exceptions reachable here are genuine bugs in normalization — logged with
+    a traceback rather than flattened into an empty list, so the next C-01
+    cannot hide.
+    """
     try:
-        from app import fetch_vehicle_data
         raw, source, err = fetch_vehicle_data()
         return [tracking_service.normalize_gps_position(v) for v in raw], source, err
     except Exception as e:
-        return [], "error", str(e)
+        logger.exception("GPS normalization failed")
+        return [], "error", f"{type(e).__name__}: {e}"
+
+
+def _gps_by_plate_key(positions):
+    """Index GPS positions by 5-digit plate serial.
+
+    ``normalize_plate`` collapses the ``50E-18463`` / ``50E18463`` /
+    ``50E 18463`` / ``18463`` variants that TTAS and the ``vehicles`` table
+    disagree about onto one key (audit C-03). The previous
+    ``.strip().lower()`` on both sides matched only byte-identical strings —
+    and matched nothing at all, since the GPS side of the comparison read a
+    field that was never emitted.
+    """
+    by_key = {}
+    for position in positions:
+        key = position.get("plate_key")
+        if not key:
+            continue
+        if key in by_key:
+            logger.warning(
+                "Two GPS devices share plate serial %s (%r and %r) — keeping the first",
+                key, by_key[key].get("device_name"), position.get("device_name"),
+            )
+            continue
+        by_key[key] = position
+    return by_key
 
 
 # ===========================
@@ -137,7 +180,10 @@ def import_parse():
     file.save(str(tmp_path))
     try:
         rows = plan_service.parse_excel_rows(str(tmp_path))
-        preview = plan_service.preview_import(rows)
+        # db_path lets the preview report which plates resolve to fleet
+        # vehicles, so unknown ones surface here rather than as a failure at
+        # save time.
+        preview = plan_service.preview_import(rows, db_path=_db())
         return jsonify(preview)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -154,9 +200,18 @@ def import_save():
     if not plan_id or not rows:
         return jsonify({"error": "plan_id and rows are required"}), 400
     try:
-        plan_service.confirm_import(_db(), plan_id, rows)
-        return jsonify({"ok": True}), 201
+        summary = plan_service.confirm_import(_db(), plan_id, rows)
+        return jsonify(summary), 201
+    except plan_service.UnknownVehicles as e:
+        # 409, not 400: the request is well-formed, it conflicts with fleet
+        # state. The identifier list tells the dispatcher exactly which plates
+        # to check. There is no override — an import never adds vehicles.
+        return jsonify({
+            "error": str(e),
+            "unknown_vehicles": e.identifiers,
+        }), 409
     except Exception as e:
+        logger.exception("Import failed for plan %s", plan_id)
         return jsonify({"error": str(e)}), 400
 
 
@@ -295,10 +350,10 @@ def reorder_stops():
     stop_ids = data.get("stop_ids")
     if not assignment_id or not stop_ids:
         return jsonify({"error": "assignment_id and stop_ids are required"}), 400
-    ok = execution_service.reorder_stops(_db(), assignment_id, stop_ids)
+    ok, msg = execution_service.reorder_stops(_db(), assignment_id, stop_ids)
     if not ok:
-        return jsonify({"error": "Reorder failed"}), 400
-    return jsonify({"ok": True})
+        return jsonify({"error": msg}), 400
+    return jsonify({"ok": True, "status": msg})
 
 
 @bp.route("/stops/insert", methods=["POST"])
@@ -343,9 +398,18 @@ def advance_stop():
     stop_id = data.get("stop_id")
     if not stop_id:
         return jsonify({"error": "stop_id is required"}), 400
-    ok, msg = execution_service.advance_stop(_db(), stop_id)
+
+    # Optional optimistic-concurrency token: the status the dispatcher's screen
+    # was showing when they pressed Advance. Lets a double-tap (or a second
+    # dispatcher) be rejected instead of silently double-stepping the stop.
+    expected_status = data.get("expected_status")
+
+    ok, msg = execution_service.advance_stop(_db(), stop_id, expected_status=expected_status)
     if not ok:
-        return jsonify({"error": msg}), 400
+        # 409 when the stop simply moved on — the client should refresh, not
+        # treat it as a malformed request.
+        status_code = 409 if "already" in msg or "just advanced" in msg else 400
+        return jsonify({"error": msg, "conflict": status_code == 409}), status_code
     return jsonify({"ok": True, "status": msg})
 
 
@@ -353,21 +417,30 @@ def advance_stop():
 def get_dashboard():
     data = execution_service.get_dashboard_data(_db())
     vehicles, source, err = _ttas_vehicles()
-    vehicle_map = {}
-    for v in vehicles:
-        plate = (v.get("device_name") or "").strip().lower()
-        if plate:
-            vehicle_map[plate] = v
+    gps_by_key = _gps_by_plate_key(vehicles)
 
+    matched = 0
     for entry in data:
-        plate = (entry.get("plate_number") or "").strip().lower()
-        if plate in vehicle_map:
-            entry["gps"] = vehicle_map[plate]
+        key = normalize_plate(entry.get("plate_number"))
+        if key and key in gps_by_key:
+            entry["gps"] = gps_by_key[key]
+            matched += 1
+
+    if data and not matched and gps_by_key:
+        logger.warning(
+            "No assignment matched any of %d GPS positions — check plate formats",
+            len(gps_by_key),
+        )
 
     return jsonify({
         "assignments": data,
         "gps_source": source,
         "gps_error": err,
+        # Surfaced so the dashboard can show a degraded-GPS badge instead of
+        # a green "Live" pill over an empty map, which is what let C-01 go
+        # unnoticed for the module's entire life.
+        "gps_matched": matched,
+        "gps_available": len(gps_by_key),
     })
 
 
@@ -393,15 +466,15 @@ def get_eta():
 
     vehicles, _, _ = _ttas_vehicles()
     assignment = plan_service.get_assignment(_db(), assignment_id)
-    plate = (assignment.get("plate_number") or "").strip().lower() if assignment else ""
+    plate_key = normalize_plate(assignment.get("plate_number")) if assignment else ""
 
-    current_gps = None
-    for v in vehicles:
-        if (v.get("device_name") or "").strip().lower() == plate:
-            current_gps = tracking_service.normalize_gps_position(v)
-            break
+    # _ttas_vehicles() has already normalized these. The old code called
+    # normalize_gps_position() a second time here, on an already-normalized
+    # dict whose keys are lat/lng rather than latitude/longitude — which
+    # coerced both to 0.0 and placed the vehicle at 0°N 0°E (audit C-02).
+    current_gps = _gps_by_plate_key(vehicles).get(plate_key) if plate_key else None
 
-    if not current_gps:
+    if not current_gps or current_gps.get("lat") is None or current_gps.get("lng") is None:
         return jsonify({"error": "Vehicle GPS not available", "etas": []})
 
     ors_key, ors_base = _ors_config()
@@ -447,11 +520,15 @@ def upload_stop_image(stop_id):
     captured_at = request.form.get("captured_at")
     uploaded_by = request.form.get("uploaded_by", "")
 
-    img_id = image_service.upload_image(
-        _db(), stop_id, file, category=category,
-        gps_lat=gps_lat, gps_lng=gps_lng,
-        captured_at=captured_at, uploaded_by=uploaded_by,
-    )
+    try:
+        img_id = image_service.upload_image(
+            _db(), stop_id, file, category=category,
+            gps_lat=gps_lat, gps_lng=gps_lng,
+            captured_at=captured_at, uploaded_by=uploaded_by,
+        )
+    except image_service.UploadRejected as e:
+        return jsonify({"error": str(e)}), 400
+
     if not img_id:
         return jsonify({"error": "Stop not found"}), 404
     return jsonify({"id": img_id}), 201
@@ -465,7 +542,14 @@ def serve_image(image_id):
     img = image_service.get_image(_db(), image_id)
     if not img:
         return jsonify({"error": "Image not found"}), 404
-    full_path = image_service.BASE_DIR / img["relative_path"]
+
+    # relative_path is read back out of the database. Rows written before the
+    # S-04 path-traversal fix could point outside the upload root, so confirm
+    # containment here rather than trusting stored data.
+    full_path = (image_service.BASE_DIR / img["relative_path"]).resolve()
+    if not full_path.is_relative_to(image_service.UPLOAD_ROOT.resolve()):
+        logger.warning("Refusing to serve image %s outside upload root: %s", image_id, full_path)
+        return jsonify({"error": "Image not found"}), 404
     if not full_path.exists():
         return jsonify({"error": "File not found on disk"}), 404
     return send_file(str(full_path))

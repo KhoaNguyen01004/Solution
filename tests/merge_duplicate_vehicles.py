@@ -58,6 +58,13 @@ def _get_db_path() -> str:
 INTEGER_FK_TABLES: list[tuple[str, str]] = [
     ("fuel_log", "vehicle_id"),
     ("tlp_load_plans", "vehicle_id"),
+    # Added 2026-07-31. The delivery module shipped after this script was
+    # written, so vehicle_assignments was missing from the list: merging a
+    # duplicate would either abort on the vehicles DELETE (PRAGMA
+    # foreign_keys=ON, since vehicle_assignments.vehicle_id has no ON DELETE
+    # action) or, with FK enforcement off, leave every assignment pointing at
+    # a vehicle row that no longer exists (audit T-12).
+    ("vehicle_assignments", "vehicle_id"),
 ]
 
 # Tables whose rows reference a vehicle via license_plate (text).

@@ -1,8 +1,23 @@
 """
-Trip management: destinations, phase advancement, cancellation, history,
-geofence events, and the background route-refresh loop.
+Live trip routing for the main fleet map: route geometry, phase advancement,
+cancellation, and the background route-refresh loop.
 
 Extracted from app.py (Section 6.4.1, Phase 12).
+
+Scope narrowed 2026-07-31. This module used to own two pages — Trip Management
+(`/manage-trips`) and Trip History (`/trip-history`) — which were the original
+dispatch UI. The delivery dashboard superseded them rather than reusing them,
+leaving two implementations of the same job; the pages and the eight endpoints
+only they called were removed in favour of the dashboard. See docs/CHANGELOG.md.
+
+What remains serves `static/js/map.js` on the main map page: `/api/route-data`
+for the drawn route lines, `/api/advance-trip` and `/api/cancel-trip` for the
+per-vehicle controls, plus `/api/refresh-routes` (the documented external
+scheduler hook) and the background refresher behind it.
+
+Note that nothing can create a `vehicle_trips` row any more — `/api/set-destination`
+went with the Trip Management page — so the surviving read/advance/cancel paths
+operate on a table that is currently empty and can only be populated directly.
 """
 import json
 import re
@@ -11,7 +26,7 @@ import threading
 import time
 import traceback
 
-from flask import Blueprint, jsonify, render_template, request
+from flask import Blueprint, jsonify, request
 
 from app import config, state
 from app.utils.geo import is_point_in_location, clean_text
@@ -21,262 +36,10 @@ from app.services.routing import get_routing_profile, get_route_coords
 bp = Blueprint("trips", __name__)
 
 
-@bp.route("/manage-trips")
-def manage_trips():
-    return render_template("manage-trips.html")
-
-
-@bp.route("/trip-history")
-def trip_history():
-    return render_template("trip-history.html")
-
-
-@bp.route("/api/set-destination", methods=["POST"])
-def set_destination():
-    """Set or update a vehicle's destination."""
-    try:
-        data = request.json or {}
-        vehicle_id = (data.get("vehicle_id") or "").strip()
-        vehicle_name = (data.get("vehicle_name") or "").strip()
-        destination_lat = data.get("destination_lat")
-        destination_lng = data.get("destination_lng")
-        destination_name = (data.get("destination_name") or "").strip()
-        pickup_lat = data.get("pickup_lat")
-        pickup_lng = data.get("pickup_lng")
-        pickup_name = (data.get("pickup_name") or "").strip()
-        customer_name = (data.get("customer_name") or "").strip()
-        vehicle_type = (data.get("vehicle_type") or "").strip()
-
-        if not vehicle_id:
-            return jsonify({"success": False, "message": "ID required"}), 400
-
-        if destination_lat is None or destination_lng is None:
-            conn = sqlite3.connect(config.DB_PATH)
-            c = conn.cursor()
-            c.execute('DELETE FROM vehicle_trips WHERE vehicle_id = ?', (vehicle_id,))
-            conn.commit()
-            conn.close()
-            return jsonify({"success": True, "message": "All destinations cleared"})
-
-        # Validate location names against known locations
-        if destination_name and destination_name not in state.known_locations:
-            # Try fuzzy match
-            matched = None
-            dest_lower = destination_name.lower().strip()
-            for known_name in state.known_locations:
-                if dest_lower == known_name.lower().strip():
-                    matched = known_name
-                    break
-            if matched:
-                destination_name = matched
-            else:
-                print(f"Warning: destination_name '{destination_name}' not found in known locations")
-        if pickup_name and pickup_name not in state.known_locations:
-            matched = None
-            pickup_lower = pickup_name.lower().strip()
-            for known_name in state.known_locations:
-                if pickup_lower == known_name.lower().strip():
-                    matched = known_name
-                    break
-            if matched:
-                pickup_name = matched
-            else:
-                print(f"Warning: pickup_name '{pickup_name}' not found in known locations")
-
-        conn = sqlite3.connect(config.DB_PATH)
-        c = conn.cursor()
-
-        # Calculate next queue order for this vehicle
-        c.execute('''
-            SELECT COALESCE(MAX(queue_order), 0) + 1 FROM vehicle_trips WHERE vehicle_id = ?
-        ''', (vehicle_id,))
-        next_queue_order = c.fetchone()[0]
-
-        # Check if vehicle has active trip, if not set this one as active
-        c.execute('''
-            SELECT COUNT(*) FROM vehicle_trips WHERE vehicle_id = ? AND status = 'active'
-        ''', (vehicle_id,))
-        active_count = c.fetchone()[0]
-        status = 'active' if active_count == 0 else 'queued'
-
-        # Fetch driver name from vehicle data
-        driver_name = ''
-        try:
-            raw_vehicles, _, _ = fetch_vehicle_data()
-            for v in raw_vehicles:
-                vid = str(v.get("id", v.get("devimei", "")))
-                if vid == vehicle_id:
-                    driver_name = clean_text(v.get("driver") or "")
-                    break
-        except:
-            pass
-
-        c.execute('''
-            INSERT INTO vehicle_trips
-            (vehicle_id, vehicle_name, driver_name, destination_lat, destination_lng, destination_name,
-             pickup_lat, pickup_lng, pickup_name, customer_name, last_known_eta, last_known_distance, vehicle_type, status, queue_order, phase)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)
-        ''', (vehicle_id, vehicle_name, driver_name, destination_lat, destination_lng, destination_name,
-              pickup_lat, pickup_lng, pickup_name, customer_name, vehicle_type, status, next_queue_order, 1 if status == 'active' else None))
-        conn.commit()
-        conn.close()
-
-        state.last_manual_update = time.time()
-        # Refresh routes immediately to update state
-        do_refresh_route_data()
-
-        return jsonify({"success": True, "message": "Trip added successfully"})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
-
-
 @bp.route("/api/route-data")
 def get_route_data():
     with state.cache_lock:
         return jsonify(list(state.route_data_cache.values()))
-
-
-@bp.route("/api/trips/history")
-@bp.route("/api/trip-history", methods=["GET"])
-def get_trip_history():
-    try:
-        conn = sqlite3.connect(config.DB_PATH)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.execute('''
-            SELECT * FROM vehicle_trips
-            ORDER BY COALESCE(completed_at, created_at) DESC
-        ''')
-        history = []
-        for row in c.fetchall():
-            history.append(dict(row))
-        conn.close()
-        return jsonify(history)
-    except Exception as e:
-        print(f"Error getting trip history: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-
-@bp.route("/api/clear-trip", methods=["POST"])
-def clear_trip():
-    try:
-        data = request.json or {}
-        trip_id = data.get("trip_id")
-        vehicle_id = data.get("vehicle_id")
-
-        if not trip_id or not vehicle_id:
-            return jsonify({"success": False, "message": "Missing trip_id or vehicle_id"}), 400
-
-        conn = sqlite3.connect(config.DB_PATH)
-        c = conn.cursor()
-        c.execute("DELETE FROM vehicle_trips WHERE id = ? AND vehicle_id = ?", (trip_id, vehicle_id))
-        conn.commit()
-        conn.close()
-
-        do_refresh_route_data()
-
-        return jsonify({"success": True, "message": "Trip removed successfully"})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
-
-
-@bp.route("/api/update-trip", methods=["POST"])
-def update_trip():
-    try:
-        data = request.json or {}
-        trip_id = data.get("trip_id")
-
-        if not trip_id:
-            return jsonify({"success": False, "message": "Missing trip_id"}), 400
-
-        # Update fields
-        updates = []
-        params = []
-
-        if "vehicle_id" in data:
-            updates.append("vehicle_id = ?")
-            params.append(data["vehicle_id"])
-        if "vehicle_name" in data:
-            updates.append("vehicle_name = ?")
-            params.append(data["vehicle_name"])
-        if "destination_lat" in data:
-            updates.append("destination_lat = ?")
-            params.append(data["destination_lat"])
-        if "destination_lng" in data:
-            updates.append("destination_lng = ?")
-            params.append(data["destination_lng"])
-        if "destination_name" in data:
-            updates.append("destination_name = ?")
-            params.append(data["destination_name"])
-        if "pickup_lat" in data:
-            updates.append("pickup_lat = ?")
-            params.append(data["pickup_lat"])
-        if "pickup_lng" in data:
-            updates.append("pickup_lng = ?")
-            params.append(data["pickup_lng"])
-        if "pickup_name" in data:
-            updates.append("pickup_name = ?")
-            params.append(data["pickup_name"])
-        if "customer_name" in data:
-            updates.append("customer_name = ?")
-            params.append(data["customer_name"])
-        if "vehicle_type" in data:
-            updates.append("vehicle_type = ?")
-            params.append(data["vehicle_type"])
-        if "status" in data:
-            updates.append("status = ?")
-            params.append(data["status"])
-            if data["status"] == "completed":
-                updates.append("completed_at = CURRENT_TIMESTAMP")
-            else:
-                updates.append("completed_at = NULL")
-        if "queue_order" in data:
-            updates.append("queue_order = ?")
-            params.append(data["queue_order"])
-        if "phase" in data:
-            updates.append("phase = ?")
-            params.append(data["phase"])
-        if "driver_name" in data:
-            updates.append("driver_name = ?")
-            params.append(data["driver_name"])
-        if "waypoints" in data:
-            updates.append("waypoints = ?")
-            params.append(json.dumps(data["waypoints"]))
-
-        if not updates:
-            return jsonify({"success": False, "message": "No fields to update"}), 400
-
-        updates.append("updated_at = CURRENT_TIMESTAMP")
-        params.append(trip_id)
-
-        conn = sqlite3.connect(config.DB_PATH)
-        c = conn.cursor()
-        c.execute(f"UPDATE vehicle_trips SET {', '.join(updates)} WHERE id = ?", params)
-        conn.commit()
-        conn.close()
-
-        state.last_manual_update = time.time()
-        do_refresh_route_data()
-
-        return jsonify({"success": True, "message": "Trip updated successfully"})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
-
-
-@bp.route("/api/clear-all-trips", methods=["POST"])
-def clear_all_trips():
-    try:
-        conn = sqlite3.connect(config.DB_PATH)
-        c = conn.cursor()
-        c.execute("DELETE FROM vehicle_trips")
-        conn.commit()
-        conn.close()
-
-        do_refresh_route_data()
-
-        return jsonify({"success": True, "message": "All trips cleared successfully"})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
 
 
 @bp.route("/api/refresh-routes", methods=["POST"])
@@ -452,37 +215,6 @@ def api_cancel_trip():
         do_refresh_route_data()
 
         return jsonify({"success": True, "message": "Trip canceled"})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
-
-
-@bp.route("/api/geofence-events", methods=["GET"])
-def api_geofence_events():
-    """Get geofence event log, optionally filtered by vehicle_id."""
-    try:
-        vehicle_id = request.args.get("vehicle_id", "")
-        limit = int(request.args.get("limit", 100))
-
-        conn = sqlite3.connect(config.DB_PATH)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-
-        if vehicle_id:
-            c.execute('''
-                SELECT * FROM geofence_events
-                WHERE vehicle_id = ?
-                ORDER BY created_at DESC LIMIT ?
-            ''', (vehicle_id, limit))
-        else:
-            c.execute('''
-                SELECT * FROM geofence_events
-                ORDER BY created_at DESC LIMIT ?
-            ''', (limit,))
-
-        events = [dict(row) for row in c.fetchall()]
-        conn.close()
-
-        return jsonify({"success": True, "events": events})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 

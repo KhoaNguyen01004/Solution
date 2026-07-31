@@ -6,12 +6,11 @@ window.DASH = window.DASH || {};
 (function () {
   'use strict';
 
-  function escapeHtml(str) {
-    if (str == null) return '';
-    const d = document.createElement('div');
-    d.appendChild(document.createTextNode(String(str)));
-    return d.innerHTML;
-  }
+  // Canonical escaper from utils.js (loaded before this file). The private
+  // copy this replaces did not escape quotes, and was used inside title="..."
+  // and alt="..." attributes in the photo gallery — where img.category comes
+  // straight from an unvalidated form field (audit S-02).
+  const escapeHtml = UI.escapeHtml;
 
   function statusClass(status) {
     const map = {
@@ -58,6 +57,47 @@ window.DASH = window.DASH || {};
   }
 
   const ACTIONABLE = ['planned', 'arrived'];
+  const TERMINAL = ['completed', 'skipped', 'cancelled'];
+
+  function isTerminal(s) {
+    return TERMINAL.includes(s.execution_status || 'planned');
+  }
+
+  // The number shown on a stop's badge. execution_sequence is what the whole
+  // dashboard orders by and what a reorder rewrites; planned_sequence is the
+  // number the stop was given when the plan was built and never moves. Showing
+  // the latter meant a reordered route rendered as 1, 3, 2 — the list was
+  // right, the badges disagreed with it.
+  function displaySeq(s) {
+    return s.execution_sequence || s.planned_sequence || '?';
+  }
+
+  // ── Reorder ────────────────────────────────────────────────────
+  // Up/down buttons rather than drag-and-drop: this panel is used on phones in
+  // the field, where HTML5 drag events don't fire at all.
+  //
+  // A stop that is already completed, skipped or cancelled can't be moved, and
+  // nothing can be moved across one — its position is a record of what actually
+  // happened, and renumbering around it would rewrite history.
+  function moveStop(stopId, delta) {
+    const assignmentId = DASH.state.selectedAssignmentId;
+    const stops = DASH.state.selectedStops || [];
+    const from = stops.findIndex((s) => s.id === stopId);
+    const to = from + delta;
+    if (!assignmentId || from === -1 || to < 0 || to >= stops.length) return;
+    if (isTerminal(stops[from]) || isTerminal(stops[to])) return;
+
+    const reordered = stops.slice();
+    const [moved] = reordered.splice(from, 1);
+    reordered.splice(to, 0, moved);
+
+    // Renumber locally so the badges read 1..n immediately. The server does the
+    // same thing; its answer arrives with the refresh that follows.
+    DASH.state.reorderStops(
+      assignmentId,
+      reordered.map((s, i) => ({ ...s, execution_sequence: i + 1 }))
+    );
+  }
 
   // ── Actions + inline reason row — shared markup/behavior between each
   // per-stop timeline body and the pinned current-stop card, so both get
@@ -69,7 +109,7 @@ window.DASH = window.DASH || {};
     if (!ACTIONABLE.includes(execStatus)) return '';
     return `
               <div class="timeline-actions" data-actions-for="${stopId}">
-                <button class="btn-nav" data-action="advance" data-stop-id="${stopId}">Advance</button>
+                <button class="btn-nav" data-action="advance" data-stop-id="${stopId}" data-expected-status="${execStatus}">Advance</button>
                 <button class="btn-nav" data-action="skip" data-stop-id="${stopId}">Skip</button>
                 <button class="btn-danger" data-action="cancel" data-stop-id="${stopId}">Cancel</button>
               </div>
@@ -126,21 +166,40 @@ window.DASH = window.DASH || {};
     handleStopAction(parseInt(stopId, 10), action, reason);
   }
 
-  function handleStopAction(stopId, action, reason) {
+  // Guards against the same stop being actioned twice while the first request
+  // is still in flight. The server also rejects a stale advance, but stopping
+  // it here means the dispatcher never sees a confusing error for what was
+  // just an impatient second tap.
+  const inFlightStopIds = new Set();
+
+  function handleStopAction(stopId, action, reason, expectedStatus, buttonEl) {
+    const token = `${stopId}:${action}`;
+    if (inFlightStopIds.has(token)) return;
+    inFlightStopIds.add(token);
+    if (buttonEl) buttonEl.disabled = true;
+
     let promise;
     if (action === 'advance') {
-      promise = DASH.api.advance(stopId);
+      promise = DASH.api.advance(stopId, expectedStatus);
     } else if (action === 'skip') {
       promise = DASH.api.skip(stopId, reason || '');
     } else if (action === 'cancel') {
       promise = DASH.api.cancel(stopId, reason);
     } else {
+      inFlightStopIds.delete(token);
+      if (buttonEl) buttonEl.disabled = false;
       return;
     }
 
     promise
       .then(() => DASH.state.refreshNow())
-      .catch((err) => UI.toast(`${action.charAt(0).toUpperCase()}${action.slice(1)} failed: ${err.message}`, 'error'));
+      .catch((err) => UI.toast(`${action.charAt(0).toUpperCase()}${action.slice(1)} failed: ${err.message}`, 'error', 6000))
+      .finally(() => {
+        inFlightStopIds.delete(token);
+        // The button usually vanishes with the next render; re-enable anyway
+        // so a failed action stays retryable if the node survives.
+        if (buttonEl && buttonEl.isConnected) buttonEl.disabled = false;
+      });
   }
 
   // Bound once per container (a stop's body, or the pinned current-stop
@@ -151,10 +210,11 @@ window.DASH = window.DASH || {};
       const actionBtn = e.target.closest('[data-action]');
       if (actionBtn) {
         e.stopPropagation();
+        if (actionBtn.disabled) return;
         const stopId = parseInt(actionBtn.dataset.stopId, 10);
         const action = actionBtn.dataset.action;
         if (action === 'advance') {
-          handleStopAction(stopId, 'advance');
+          handleStopAction(stopId, 'advance', '', actionBtn.dataset.expectedStatus, actionBtn);
         } else {
           showReasonRow(container, actionBtn.dataset.stopId, action);
         }
@@ -251,6 +311,10 @@ window.DASH = window.DASH || {};
             <span class="timeline-seq"></span>
             <span class="timeline-station"></span>
             <span class="status-badge"></span>
+            <span class="timeline-move" data-move-for="${s.id}">
+              <button class="timeline-move-btn" data-move="up" title="Move earlier" aria-label="Move stop earlier">&#9650;</button>
+              <button class="timeline-move-btn" data-move="down" title="Move later" aria-label="Move stop later">&#9660;</button>
+            </span>
             <span class="timeline-chevron" data-chevron="${s.id}">&#9660;</span>
           </div>
           <div class="timeline-body" data-body="${s.id}">
@@ -274,7 +338,15 @@ window.DASH = window.DASH || {};
 
     // Delegated listeners bound once — survive every future content patch,
     // so action buttons never need rebinding on poll.
-    headerEl.addEventListener('click', () => {
+    headerEl.addEventListener('click', (e) => {
+      // A move button sits inside the header, whose click collapses the stop.
+      // Reordering a stop and collapsing it are unrelated intents.
+      const moveBtn = e.target.closest('[data-move]');
+      if (moveBtn) {
+        e.stopPropagation();
+        moveStop(s.id, moveBtn.dataset.move === 'up' ? -1 : 1);
+        return;
+      }
       bodyEl.classList.toggle('open');
       chevronEl.classList.toggle('open');
     });
@@ -287,6 +359,9 @@ window.DASH = window.DASH || {};
       seqEl: el.querySelector('.timeline-seq'),
       stationEl: el.querySelector('.timeline-station'),
       badgeEl: el.querySelector('.status-badge'),
+      moveWrapEl: el.querySelector('.timeline-move'),
+      moveUpEl: el.querySelector('[data-move="up"]'),
+      moveDownEl: el.querySelector('[data-move="down"]'),
       detailWrapEl,
       itemClass: '',
       detailHtml: null,
@@ -322,7 +397,12 @@ window.DASH = window.DASH || {};
 
       if (countEl) countEl.textContent = list.length;
 
-      const key = list.map((s) => s.id).join(',');
+      // Order-independent on purpose. A reorder changes the sequence but not
+      // the membership, and it is reconciled by moving the existing nodes
+      // below — wiping the container would collapse every stop and drop any
+      // open photo gallery, which is exactly the state a dispatcher is
+      // mid-way through using when they resequence a route.
+      const key = list.map((s) => s.id).sort((a, b) => a - b).join(',');
       if (key !== this._setKey) {
         // Any reason row belonged to DOM nodes being torn down below — an
         // abandoned (never confirmed/cancelled) edit must not permanently
@@ -341,14 +421,18 @@ window.DASH = window.DASH || {};
         });
       }
 
-      list.forEach((s) => {
+      list.forEach((s, idx) => {
         let entry = this._stopNodes.get(s.id);
         if (!entry) {
           entry = createStop(s);
           this._stopNodes.set(s.id, entry);
-          container.appendChild(entry.el);
         }
-        this._patchStop(entry, s, currentStopId, etaMap[s.id]);
+        // insertBefore *moves* a node that is already in the container, so
+        // this both places new stops and applies a reorder.
+        if (container.children[idx] !== entry.el) {
+          container.insertBefore(entry.el, container.children[idx] || null);
+        }
+        this._patchStop(entry, s, currentStopId, etaMap[s.id], list, idx);
       });
     },
 
@@ -359,7 +443,7 @@ window.DASH = window.DASH || {};
       this.render([], null, null);
     },
 
-    _patchStop(entry, s, currentStopId, eta) {
+    _patchStop(entry, s, currentStopId, eta, list, idx) {
       const execStatus = s.execution_status || 'planned';
       const isCurrent = currentStopId && s.id === currentStopId;
       const isCompleted = ['completed', 'skipped', 'cancelled'].includes(execStatus);
@@ -369,8 +453,19 @@ window.DASH = window.DASH || {};
         entry.itemClass = itemClass;
       }
 
-      setText(entry.seqEl, s.planned_sequence || '?');
+      setText(entry.seqEl, displaySeq(s));
       setText(entry.stationEl, s.station_name || s.station_code || 'Stop');
+
+      if (entry.moveWrapEl) {
+        const neighbours = list || [];
+        const here = idx == null ? -1 : idx;
+        const prev = here > 0 ? neighbours[here - 1] : null;
+        const next = here >= 0 ? neighbours[here + 1] : null;
+        const movable = !isTerminal(s);
+        entry.moveWrapEl.style.display = movable ? '' : 'none';
+        entry.moveUpEl.disabled = !(movable && prev && !isTerminal(prev));
+        entry.moveDownEl.disabled = !(movable && next && !isTerminal(next));
+      }
 
       const badgeClass = 'status-badge ' + statusClass(execStatus);
       if (entry.badgeEl.className !== badgeClass) entry.badgeEl.className = badgeClass;
@@ -421,7 +516,7 @@ window.DASH = window.DASH || {};
                 <span class="cs-label">Current Stop</span>
                 <span class="status-badge ${statusClass(execStatus)}">${statusLabel(execStatus)}</span>
               </div>
-              <div class="cs-station">#${stop.planned_sequence || '?'} ${escapeHtml(stop.station_name || stop.station_code || 'Stop')}</div>
+              <div class="cs-station">#${displaySeq(stop)} ${escapeHtml(stop.station_name || stop.station_code || 'Stop')}</div>
               <div class="cs-detail">
                 ${stop.address ? `<div class="cs-address">${escapeHtml(stop.address)}</div>` : ''}
                 ${stop.manager_name ? `<div class="cs-manager">${escapeHtml(stop.manager_name)}</div>` : ''}
