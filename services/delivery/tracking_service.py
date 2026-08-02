@@ -47,6 +47,7 @@ def normalize_gps_position(raw_vehicle: dict) -> dict:
     from app.services.ttas_client import normalize_vehicle
 
     vehicle = normalize_vehicle(raw_vehicle)
+    vehicle_status = vehicle.get("vehicle_status", "unknown")
 
     device_name = vehicle.get("device_name", "")
     speed_status = vehicle.get("speed_status", "")
@@ -67,7 +68,14 @@ def normalize_gps_position(raw_vehicle: dict) -> dict:
         "lng": lng,
         "speed": speed_status,
         "speed_kmh": _parse_speed_kmh(speed_status),
-        "vehicle_status": vehicle.get("vehicle_status", "unknown"),
+        "vehicle_status": vehicle_status,
+        # TTAS saying the tracker is unreachable ("MTH:6h48'"), as opposed to
+        # the dashboard inferring it from the age of the last fix. The No GPS
+        # filter keys off this: such a vehicle still *has* a position — the
+        # last one before the signal dropped — so a "no position at all"
+        # test alone would leave it out of the one list a dispatcher checks
+        # to find the trucks they cannot see.
+        "signal_lost": vehicle_status == "lost_signal",
         "engine_status": vehicle.get("engine_status", ""),
         # Raw TTAS text for display; the ISO twin for anything computing an
         # age. None means "position is real, its age is unknown" — a third
@@ -78,21 +86,64 @@ def normalize_gps_position(raw_vehicle: dict) -> dict:
     }
 
 
+# A number that carries the unit — "42km/h", "37.5 km/h", "0 km / h". This is
+# the only unambiguous reading in the phrase, so it is tried first.
+_KMH_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*km\s*/?\s*h", re.IGNORECASE)
+
+# Durations, which are what a *stopped* phrase counts: "3h30'", "25 phút",
+# "1 giờ". Stripped before any unitless fallback so a park time can never be
+# mistaken for a speed.
+_DURATION_RE = re.compile(r"\d+(?:[.,]\d+)?\s*(?:h(?!\w)|giờ|phút|ph(?!\w)|')", re.IGNORECASE)
+
+_NUMBER_RE = re.compile(r"(\d+(?:[.,]\d+)?)")
+
+
 def _parse_speed_kmh(speed_status: str) -> Optional[float]:
-    """Defensively extracts a numeric km/h reading from TTAS's raw speed
-    text — a Vietnamese status phrase (e.g. "Chạy 42km/h"), not a clean
-    number. Mirrors the extraction already used in app/routes/trips.py,
-    except this returns None (rather than defaulting to 0) when nothing
-    numeric is found, since 0 and "unknown" are different facts and this
-    value is a supplementary operational signal only — never used for ETA
-    or routing calculations.
+    """Numeric km/h from TTAS's speed text, which is a Vietnamese status
+    phrase ("Chạy 42km/h", "Dừng 3h30'") rather than a number.
+
+    Reading the *first* number in the phrase — what this did until
+    2026-08-03, and what `app/routes/trips.py` still does — is wrong for
+    every stopped vehicle: a parked truck's phrase counts how long it has
+    been parked, so "Dừng 3h30'" was reported to the dispatcher as 3 km/h,
+    and the figure grew the longer the truck sat still. Operator-reported.
+
+    The number is therefore taken only when it carries the km/h unit, and a
+    "Dừng" phrase is read as a genuine **0.0** — TTAS is stating the vehicle
+    is stopped, which is knowledge, not absence of it. `None` stays reserved
+    for a phrase this cannot interpret at all, since the dashboard renders
+    that as "no reading" rather than as a speed.
+
+    Supplementary operational signal only — never used for ETA or routing.
     """
     if not speed_status:
         return None
-    match = re.search(r"(\d+(?:\.\d+)?)", speed_status)
-    if not match:
-        return None
+
+    text = speed_status.strip()
+
+    match = _KMH_RE.search(text)
+    if match:
+        return _to_float(match.group(1))
+
+    # "Dừng đỗ", "Dừng 3h30'", "Dừng 7h44'" — stopped, and TTAS says so.
+    if text.startswith("Dừng"):
+        return 0.0
+
+    # A moving vehicle whose reading lost its unit. Durations are removed
+    # first so the fallback cannot pick a time out of the phrase; if nothing
+    # numeric survives, the reading is unknown rather than zero.
+    if text.startswith("Chạy"):
+        match = _NUMBER_RE.search(_DURATION_RE.sub(" ", text))
+        if match:
+            return _to_float(match.group(1))
+
+    return None
+
+
+def _to_float(raw: str) -> Optional[float]:
+    """TTAS is a Vietnamese-locale system; a decimal comma is plausible even
+    though every sample so far uses a point."""
     try:
-        return float(match.group(1))
+        return float(raw.replace(",", "."))
     except ValueError:
         return None

@@ -151,8 +151,11 @@ const UI = {
 };
 
 // ── Backward-compatible global aliases ────────────────────────────
-// Kept for pages not yet migrated to the UI namespace (locations.js,
-// trip-history.js, manage-trips.js call the bare global `showToast`).
+// Kept for pages not yet migrated to the UI namespace. As of 2026-08-03 that
+// is `locations.js` alone — trip-history.js and manage-trips.js were named
+// here until they were deleted with the trip pages on 2026-07-31.
+// `delivery-plan-builder.js` is not a caller: it defines its own local
+// showToast() and so shadows this one rather than using it.
 function showToast(message, type = 'info', duration = 3000) {
     UI.toast(message, type, duration);
 }

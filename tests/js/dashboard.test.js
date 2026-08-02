@@ -424,6 +424,54 @@ function stuckFor(ms) {
       clickChip('executing');
     });
 
+    // ── MTH: TTAS saying the tracker went quiet ──────────────────
+    //
+    // Operator-reported 2026-08-03. TTAS writes `MTH:6h48'` and the vehicle
+    // keeps the last fix taken before the signal dropped, so it passes a
+    // "has a position" test — and was therefore missing from the one list a
+    // dispatcher opens to find the trucks they cannot see.
+    {
+      const lost = boot({
+        assignments: [
+          makeAssignment(1),
+          makeAssignment(2, { gps: null }),
+          makeAssignment(3, { gps: makeGps(0, { signal_lost: true }) }),
+          makeAssignment(4, { gps: makeGps(45 * MIN) }),
+        ],
+        gps: { matched: 3, available: 3 },
+      });
+      await tick(lost);
+
+      function clickLostChip(value) {
+        const chip = lost.window.document
+          .querySelector(`#quickFilters .quick-chip[data-quick="${value}"]`);
+        chip.dispatchEvent(new lost.window.Event('click', { bubbles: true }));
+      }
+
+      test('the No GPS chip includes a vehicle TTAS reports as MTH', () => {
+        clickLostChip('nogps');
+        assert.ok(cardOrder(lost.window).includes('3'),
+          'a lost-signal truck is invisible in the list meant to find it');
+      });
+
+      test('a vehicle with no fix at all is still included', () => {
+        assert.ok(cardOrder(lost.window).includes('2'));
+      });
+
+      test('a merely stale fix is not treated as a lost signal', () => {
+        // 45 minutes old raises a stale chip, but TTAS has not declared the
+        // tracker unreachable — inference and declaration stay separate.
+        assert.ok(!cardOrder(lost.window).includes('4'));
+      });
+
+      test('a tracked vehicle is still excluded', () => {
+        assert.deepStrictEqual(cardOrder(lost.window).sort(), ['2', '3']);
+        clickLostChip('nogps');
+      });
+
+      lost.DASH.polling.stop();
+    }
+
     test('the field filters still work from inside the disclosure', () => {
       const field = h.window.document.getElementById('filterVehicle');
       field.value = '51C-3';

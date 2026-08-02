@@ -150,7 +150,11 @@ Never present an assumption as a verified fact.
 - Raw `sqlite3.connect()` call sites (`app/routes/*.py`, `app.py`) must close the
   connection in a `finally` — they don't get `DatabaseManager`'s automatic cleanup.
 - Frontend: use `ApiClient`/`UI` from `static/js/utils.js` for any new fetch/toast/escape
-  code. Only the 3 unmigrated pages get a pass on the legacy global `showToast()`.
+  code. Only `locations.js` gets a pass on the legacy global `showToast()` (was 3 pages;
+  the other two were deleted 2026-07-31). `delivery-plan-builder.js` is a third case —
+  it defines its own local `showToast()` shadowing the global, and also its own
+  `fetchJSON()`, because the delivery API returns raw JSON rather than `ApiClient`'s
+  `{success: ...}` envelope. Match the file you're in; don't half-migrate one of them.
 - New pages follow the existing `templates/<page>.html` + `static/js/<page>.js` pairing
   and must include the `utils.js` script tag.
 
@@ -189,6 +193,32 @@ prioritize:
 - **Panels absolutely positioned over the map** (`.map-controls`, the info bar) and
   Leaflet's own controls compete for corners; check all four before adding another.
 
+### TTAS telemetry conventions (learned the hard way, 2026-08-03)
+
+- **TTAS sends no numeric speed field.** Its `speed` key is a Vietnamese status *phrase*
+  — `Chạy 42km/h`, `Dừng 3h30'`, `MTH:6h48'` — so every km/h figure on the dashboard is
+  an extraction from prose. Never grab the first number in it: only the running phrase's
+  number is a speed, and a stopped one counts how long the vehicle has been parked. That
+  exact mistake reported a truck stopped 7h44' as doing 7 km/h.
+- **Read the phrase's meaning before its digits.** `_parse_speed_kmh` takes a number only
+  when it carries the km/h unit, maps `Dừng` to a known `0.0`, and strips durations before
+  any unitless fallback. `app/routes/trips.py:401` still runs the old first-number-wins
+  regex into `current_speed` — deliberately untouched, and known to be wrong.
+- **`None` and `0.0` are different facts** and the dashboard renders them differently
+  (blank vs a speed). `None` means "no reading we can interpret", not "stopped".
+- **TTAS's own declaration beats our inference.** `MTH:6h48'` (*mất tín hiệu*) is TTAS
+  stating the tracker is unreachable, which is stronger and earlier than deducing it from
+  a stale timestamp — a tracker reporting late is not a tracker that is gone. Hence
+  `is_lost_signal()` and the `lost_signal` vehicle status, which the No GPS filter keys
+  off. Keep the computed `gps_stale` chip alongside it: two independent paths to the same
+  conclusion is what caught this.
+- **A lost-signal vehicle still has a position** — the last fix before the signal dropped.
+  Any "does it have GPS?" test will therefore say yes. That is precisely why it went
+  missing from the No GPS filter.
+- **New phrase forms will appear.** This string is scraped, not contracted. Match
+  tolerantly (case, spacing, abbreviation) and fall through to "unknown" rather than
+  guessing.
+
 ## Scope Control
 
 - Only modify files directly related to the requested task — no unrelated cleanup,
@@ -205,15 +235,22 @@ prioritize:
 A task is done only when:
 
 - The relevant suite passes. For delivery changes run **both** `pytest tests/test_delivery.py -v`
-  (99, service layer) and `pytest tests/test_delivery_routes.py -v` (88, route layer) —
+  (223, service layer) and `pytest tests/test_delivery_routes.py -v` (135, route layer) —
   the service suite is structurally blind to bugs inside a request handler or in an
   assembled response, which is where every Critical audit finding lived. For TLP
-  scoring/placement, `pytest tests/test_scorer.py -v` (26). `pytest tests/` is 254 total.
+  scoring/placement, `pytest tests/test_scorer.py -v` (26). `pytest tests/` is 491 total.
   No CI is configured, so running these yourself is the only real verification.
 - Frontend-only changes get no pytest coverage at all. Check syntax with `node --check`,
-  and for anything with real logic (map behaviour, render ordering, response parsing),
-  drive the actual module under jsdom against a stub rather than reasoning about it — the
-  2026-07-31 dashboard work found several bugs that way that inspection had missed.
+  and drive the actual module under jsdom rather than reasoning about it — the 2026-07-31
+  dashboard work and the 2026-08-02 plan-builder work each found bugs that way that
+  inspection had missed. Two suites exist, both run with plain `node`:
+  `tests/js/dashboard.test.js` (112) and `tests/js/plan-builder.test.js` (10). jsdom is
+  dev-only and not vendored — `NODE_PATH=/path/to/node_modules node tests/js/<file>`.
+  Two dashboard ETA cases are time-of-day dependent and fail after ~23:13 local; known,
+  and not something you broke.
+- Prefer a mutation check over a green run for any bug fix: revert the fix, confirm the
+  new tests fail, restore it. Several tests in these suites passed against the broken
+  code before this was routine.
 - A `CHANGELOG.md` entry was added, in the existing dated-entry style, for
   architecturally significant changes (see the 2026-07-29 entry for expected detail).
   Skip for small, self-contained fixes.

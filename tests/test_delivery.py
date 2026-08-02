@@ -663,13 +663,20 @@ class TestTtasTimestampParsing:
         assert v["last_update"] == "01/08/2026 10:30:00"
         assert v["last_update_iso"] == "2026-08-01T10:30:00"
 
+
+class TestSpeedPhraseParsing:
+    """`_parse_speed_kmh` — TTAS sends no numeric speed field, only a
+    Vietnamese phrase, so every km/h figure on the dashboard is an extraction
+    from prose.
+
+    These lived in TestTtasTimestampParsing until 2026-08-03, which is not
+    what that class is about; they moved here when the parked-duration bug
+    below was fixed.
+    """
+
     def test_speed_parses_decimal(self):
         result = tracking_service.normalize_gps_position(_raw_ttas(speed="Chạy 37.5 km/h"))
         assert result["speed_kmh"] == 37.5
-
-    def test_speed_none_when_unparseable(self):
-        result = tracking_service.normalize_gps_position(_raw_ttas(speed="Dừng đỗ"))
-        assert result["speed_kmh"] is None
 
     def test_speed_none_when_missing(self):
         result = tracking_service.normalize_gps_position(_raw_ttas(speed=""))
@@ -681,6 +688,130 @@ class TestTtasTimestampParsing:
         assert unparseable["speed_kmh"] is None
         stopped = tracking_service.normalize_gps_position(_raw_ttas(speed="Chạy 0km/h"))
         assert stopped["speed_kmh"] == 0.0
+
+    # ── A parked truck's phrase counts hours, not km/h ──────────────────
+    #
+    # Operator-reported 2026-08-03: the dashboard showed a speed for a truck
+    # that had been standing still for hours. TTAS writes "Dừng 3h30'" — the
+    # duration it has been parked — and reading the first number in the
+    # phrase turned that into "3 km/h", growing the longer it sat.
+
+    @pytest.mark.parametrize("phrase,shown", [
+        ("Dừng 3h30'", 3),
+        ("Dừng 6h4'", 6),
+        ("Dừng 7h44'", 7),
+        ("Dừng 25 phút", 25),
+        ("Dừng 1 giờ 30 phút", 1),
+    ])
+    def test_a_park_duration_is_never_read_as_a_speed(self, phrase, shown):
+        result = tracking_service.normalize_gps_position(_raw_ttas(speed=phrase))
+        assert result["speed_kmh"] != shown, \
+            f"{phrase!r} reported as {shown} km/h — that number is the parking time"
+        assert result["speed_kmh"] == 0.0, "a stopped truck reads 0, not a duration"
+
+    def test_a_stopped_phrase_is_a_known_zero_not_an_unknown(self, ):
+        """`None` blanks the reading on the dashboard. TTAS saying "Dừng" is
+        positive knowledge that the vehicle is stopped, so it must not be
+        rendered as "no data"."""
+        result = tracking_service.normalize_gps_position(_raw_ttas(speed="Dừng đỗ"))
+        assert result["speed_kmh"] == 0.0
+
+    def test_the_stopped_reading_agrees_with_the_status(self, ):
+        """The symptom that gave this away: one payload yielding "stopped"
+        and a non-zero speed at the same time."""
+        result = tracking_service.normalize_gps_position(
+            _raw_ttas(speed="Dừng 3h30'", ad3="Tắt"))
+        assert result["vehicle_status"] == "stopped_engine_off"
+        assert result["speed_kmh"] == 0.0
+
+    def test_a_number_carrying_the_unit_still_wins(self):
+        """Guards the ordering: the unit-anchored match is tried before the
+        stopped-phrase shortcut, so a real reading is never flattened to 0."""
+        result = tracking_service.normalize_gps_position(_raw_ttas(speed="Dừng 2h10' (5 km/h)"))
+        assert result["speed_kmh"] == 5.0
+
+    @pytest.mark.parametrize("phrase,expected", [
+        ("Chạy 42km/h", 42.0),
+        ("Chạy 42 km/h", 42.0),
+        ("Chạy 42km / h", 42.0),
+        ("Chạy 42KM/H", 42.0),
+    ])
+    def test_unit_spacing_and_case_do_not_matter(self, phrase, expected):
+        result = tracking_service.normalize_gps_position(_raw_ttas(speed=phrase))
+        assert result["speed_kmh"] == expected
+
+    def test_a_decimal_comma_is_read_as_a_decimal(self):
+        """TTAS is a Vietnamese-locale system; "37,5" must not become 375."""
+        result = tracking_service.normalize_gps_position(_raw_ttas(speed="Chạy 37,5 km/h"))
+        assert result["speed_kmh"] == 37.5
+
+    def test_a_moving_phrase_that_lost_its_unit_still_reads(self):
+        result = tracking_service.normalize_gps_position(_raw_ttas(speed="Chạy 42"))
+        assert result["speed_kmh"] == 42.0
+
+    def test_an_uninterpretable_phrase_stays_unknown(self):
+        """Not 0 — the dispatcher must be able to tell "stopped" from
+        "we have no reading"."""
+        for phrase in ("unknown state", "???", "---"):
+            result = tracking_service.normalize_gps_position(_raw_ttas(speed=phrase))
+            assert result["speed_kmh"] is None, phrase
+
+
+class TestLostSignal:
+    """TTAS writes `MTH:6h48'` — *mất tín hiệu*, and how long for.
+
+    Operator-reported 2026-08-03. Such a vehicle still carries the last fix
+    taken before the signal dropped, so every "has a position?" test treats
+    it as tracked — including the dashboard's No GPS filter, which is the one
+    list a dispatcher opens to find the trucks they cannot see.
+    """
+
+    @pytest.mark.parametrize("phrase", [
+        "MTH:6h48'", "MTH: 6h48'", "MTH:6h54'", "mth:1h2'",
+        "Mất tín hiệu", "Mất tín hiệu 6h48'",
+    ])
+    def test_ttas_lost_signal_phrases_are_recognised(self, phrase):
+        from app.services.ttas_client import is_lost_signal
+        assert is_lost_signal(phrase) is True
+
+    @pytest.mark.parametrize("phrase", [
+        "Chạy 42km/h", "Dừng 3h30'", "Dừng đỗ", "", "   ", "unknown state",
+    ])
+    def test_ordinary_phrases_are_not_lost_signal(self, phrase):
+        from app.services.ttas_client import is_lost_signal
+        assert is_lost_signal(phrase) is False
+
+    def test_lost_signal_is_its_own_vehicle_status(self):
+        """Not "unknown" — that means a phrase we could not read, and the two
+        want different responses from the dispatcher."""
+        result = tracking_service.normalize_gps_position(_raw_ttas(speed="MTH:6h48'"))
+        assert result["vehicle_status"] == "lost_signal"
+        assert result["signal_lost"] is True
+
+    def test_a_tracked_vehicle_is_not_flagged(self):
+        for phrase in ("Chạy 42km/h", "Dừng 3h30'"):
+            result = tracking_service.normalize_gps_position(_raw_ttas(speed=phrase))
+            assert result["signal_lost"] is False, phrase
+
+    def test_an_unreadable_phrase_is_not_claimed_as_lost(self):
+        """Guessing "lost signal" from a phrase we simply do not understand
+        would put healthy trucks in the No GPS list."""
+        result = tracking_service.normalize_gps_position(_raw_ttas(speed="unknown state"))
+        assert result["vehicle_status"] == "unknown"
+        assert result["signal_lost"] is False
+
+    def test_the_last_known_position_is_still_reported(self):
+        """The marker stays on the map — where the truck was last seen is the
+        most useful thing left. Only the *filter* treats it as unseen."""
+        result = tracking_service.normalize_gps_position(_raw_ttas(speed="MTH:6h48'"))
+        assert result["lat"] == 10.8
+        assert result["lng"] == 106.6
+
+    def test_no_speed_is_invented_for_a_lost_vehicle(self):
+        """`MTH:6h48'` would have read as 6 km/h under the pre-2026-08-03
+        first-number-wins parse — the same bug as the parked-duration one."""
+        result = tracking_service.normalize_gps_position(_raw_ttas(speed="MTH:6h48'"))
+        assert result["speed_kmh"] is None
 
 
 # ===========================================================================

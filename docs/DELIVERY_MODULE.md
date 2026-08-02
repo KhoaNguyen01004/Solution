@@ -91,7 +91,7 @@ All steps share a single state object. Auto-save runs every 30s when dirty.
 
 | Panel | Content | Update |
 |-------|---------|--------|
-| Left (280px) | Vehicle cards with progress, status, GPS time, attention indicator (stuck/GPS-stale) | Every 12s poll |
+| Left (280px) | Vehicle cards with progress, status, GPS time, attention indicator (stuck / GPS-stale / GPS-age-unknown / no-GPS / reported-stopped), and quick filters including **No GPS** — which covers both an unmatched plate and a TTAS lost-signal (`MTH`) vehicle | Every 12s poll |
 | Center (flex) | Leaflet map: vehicle markers, stop pins, road-following route, basemap switcher, imagery capture-date popup | On selection + every poll |
 | Right (300px) | Pinned current-stop card (contact, `tel:` link, primary actions) + stop timeline with photo gallery, inline skip/cancel reason editing, and per-stop reorder controls | Progressively on selection, then every poll |
 
@@ -143,10 +143,30 @@ the *previous* truck's stops until new data arrives.
 | id | INTEGER PK | Auto-increment |
 | plan_id | INTEGER FK → delivery_plans | Cascade delete |
 | vehicle_id | INTEGER → vehicles | From master vehicle table |
-| driver_id | INTEGER → drivers | FK to drivers |
+| driver_id | INTEGER → drivers | FK to drivers. **Usually NULL** — see below |
+| driver_name_override | TEXT | Free-text driver for this plan only |
 | sequence | INTEGER | Order within plan |
 | notes | TEXT | Optional |
 | created_at | TIMESTAMP | Auto |
+
+**Which driver is shown.** Precedence is `driver_name_override` →
+`drivers.name` via `driver_id` → `vehicles.current_driver`, expressed once as
+`plan_service.DRIVER_NAME_SQL` for the plan-facing queries and inline in
+`execution_service.get_dashboard_data` / `export_service.day_summary`, whose
+fallback chains differ slightly.
+
+Most drivers have no `drivers` row at all — `plan_service.list_drivers`
+synthesises the rest from `DISTINCT vehicles.current_driver` with `id: None`,
+so the plan builder's autocomplete offers names that cannot be stored as an id
+and `driver_id` is NULL in the ordinary case. Before 2026-08-02 that meant a
+driver typed during plan creation was discarded and dispatch showed the
+vehicle's usual driver instead.
+
+The typed name deliberately outranks a linked `drivers` row: both being set
+means the dispatcher edited a prefilled value, and the edit is the newer
+intent. It also deliberately **does not create a `drivers` record** — these
+are stand-ins for one day, and the plan stays a snapshot, so reassigning a
+truck next week does not rewrite who drove it today.
 | updated_at | TIMESTAMP | Auto |
 
 ### `delivery_plan_stops`
@@ -243,7 +263,7 @@ Plans table as a reminder of what it would look like if that ever changes.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/assignments` | List (`?plan_id=`) |
-| POST | `/api/assignments` | Create (`plan_id`, `vehicle_id`, `driver_id`, `sequence`, `notes`) |
+| POST | `/api/assignments` | Create (`plan_id`, `vehicle_id`, `driver_id`, `driver_name`, `sequence`, `notes`) |
 | GET | `/api/assignments/<id>` | Get single |
 | PUT | `/api/assignments/<id>` | Update |
 | DELETE | `/api/assignments/<id>` | Delete (cascades stops) |
@@ -350,6 +370,35 @@ Plans table as a reminder of what it would look like if that ever changes.
    requests would settle on whichever finished last. Terminal stops are immovable and
    nothing moves across one — their position is a record of what happened.
 
+9. **The driver on a plan is free text, not a `drivers` record** — see
+   [`vehicle_assignments`](#vehicle_assignments). A dispatcher typing a stand-in is
+   recording who drove that day, not registering an employee, so nothing is promoted to
+   the `drivers` table and the plan keeps a snapshot that a later truck reassignment
+   cannot rewrite.
+
+10. **TTAS telemetry is prose, and is parsed by meaning rather than by digits** —
+    TTAS sends no numeric speed field. Its `speed` key is a Vietnamese status phrase:
+    `Chạy 42km/h` (running), `Dừng 3h30'` (stopped, and for how long), `MTH:6h48'`
+    (*mất tín hiệu* — signal lost, and for how long). Only the running phrase's number
+    is a speed; taking the first number in any phrase reported a truck parked 7h44' as
+    doing 7 km/h, which is how this was found. `_parse_speed_kmh` therefore requires the
+    km/h unit, reads `Dừng` as a known `0.0`, and strips durations before any fallback.
+
+    `speed_kmh` distinguishes `None` ("no reading we can interpret") from `0.0`
+    ("stopped"); the dashboard renders the first as a blank, not a speed.
+
+    `vehicle_status` has four values — `running`, `stopped_engine_on` /
+    `stopped_engine_off`, `lost_signal`, `unknown`. `lost_signal` comes from TTAS
+    *declaring* the tracker unreachable, which is deliberately preferred over inferring
+    it from a stale timestamp: a tracker reporting late is not a tracker that is gone.
+    The computed `gps_stale` chip is kept alongside it — two independent paths to the
+    same conclusion is what identified the bug.
+
+    A lost-signal vehicle **still has a position** (the last fix before the drop), so it
+    passes every "does this have GPS?" test. That is why the dashboard's **No GPS**
+    filter keys off `gps.signal_lost` as well as a missing position — it is asked "which
+    trucks can I not see?", not "which have no coordinates?".
+
 ---
 
 ## Configuration
@@ -384,12 +433,12 @@ ROUTE_REFRESH_INTERVAL=Route cache refresh seconds (default: 60)
 ### Running Tests
 
 ```bash
-# Everything — 254 tests
+# Everything — 491 tests
 pytest tests/
 
 # Delivery — run BOTH for any delivery change
-pytest tests/test_delivery.py -v         # 99 — service layer
-pytest tests/test_delivery_routes.py -v  # 88 — route layer
+pytest tests/test_delivery.py -v         # 223 — service layer
+pytest tests/test_delivery_routes.py -v  # 135 — route layer
 
 # Single test class
 pytest tests/test_delivery.py::TestStopProgression -v
@@ -406,27 +455,49 @@ is where every Critical finding in `DELIVERY_AUDIT_2026-07-31.md` lived. `test_d
 drives real HTTP through `app.test_client()` with TTAS mocked. Neither substitutes for the
 other.
 
-Frontend code has no automated coverage. See `CLAUDE.md` § Definition of Done for the
-jsdom approach used instead.
+Frontend code gets no pytest coverage. Two jsdom suites stand in, run with plain `node`:
+`tests/js/dashboard.test.js` (112) and `tests/js/plan-builder.test.js` (10). See
+`CLAUDE.md` § Definition of Done.
 
 ### Test Coverage — services (`test_delivery.py`)
 
+223 tests. Largest classes first; the long tail is listed for completeness
+because a class missing from here is how coverage silently stops being run.
+
 | Test Class | Tests | Coverage |
 |-----------|-------|----------|
-| TestEtaService | 16 | ETA calculation, ORS fallback, road geometry, route cache hit/invalidation, travelled distance |
-| TestTrackingService | 5 | Defensive TTAS speed parsing (embedded/decimal/unparseable/missing) |
+| TestEtaService | 27 | ETA calculation, ORS fallback, road geometry, route cache hit/invalidation, travelled distance |
+| TestVehicleIdentity | 19 | Plate normalization and the canonical-vehicle index |
+| TestSpeedPhraseParsing | 18 | TTAS sends a phrase, not a number — unit-anchored extraction, `Dừng` as a known 0, park durations never read as speeds |
+| TestLostSignal | 17 | `MTH:6h48'` recognised as `lost_signal`; last position still reported; no speed invented |
+| TestTtasTimestampParsing | 16 | Day-first dates, and the raw text kept alongside the ISO parse |
+| TestTrackingService | 14 | Raw-TTAS field names, `device_name`/`plate_key` emission, 0,0 as no-fix |
+| TestRevertStop | 13 | Reverting a stop to the phase it came from |
+| TestPlanDriverOverride | 13 | The driver typed in the plan outranks the vehicle default, survives a truck changing hands, and creates no `drivers` row |
+| TestProofRequired | 12 | Completion gated on both proof photo categories |
+| TestStatusHistory | 9 | Every phase change recorded |
+| TestExportNaming | 9 | Driver folder names, accent stripping, plate serials |
+| TestCanRevert | 8 | Correctability decided per plan-day |
 | TestStopProgression | 7 | Advance, skip, cancel, current stop |
-| TestPlanAutoCompletion | 4 | Plan auto-completes when all stops/assignments terminal, reopens on new stop |
+| TestImportVehicleResolution | 6 | Plate variants resolving to one vehicle on import |
 | TestStopReordering | 5 | Reorder, insert temp stop, sequence update |
-| TestImageService | 5 | Upload, list, delete, edge cases |
+| TestReorderValidation | 5 | Full/partial/foreign-id reorder rejection |
 | TestProgress | 5 | Progress calculation, breakdown |
+| TestImageService | 5 | Upload, list, delete, edge cases |
+| TestAdvanceAtomicity | 5 | Concurrent advance leaves no half-applied state |
+| TestPlanAutoCompletion | 4 | Plan auto-completes when all stops/assignments terminal, reopens on new stop |
 | TestTransactions | 2 | Rollback on failure, cascade delete |
+| TestProgressWithoutStops | 2 | An empty assignment reports 0, not 1 |
+| TestPreviewImportResolution | 2 | Import preview resolves plates the same way the import does |
 
 ### Test Coverage — routes (`test_delivery_routes.py`)
+
+135 tests.
 
 | Area | Coverage |
 |------|----------|
 | GPS pipeline | GPS reaching the dashboard, telemetry parsed from raw TTAS keys, all five plate formats matching, 0,0 treated as no-fix, malformed coordinates not 500-ing |
+| Assignment driver | A name POSTed by the plan builder reaches the dashboard, comes back on reopen, is editable by PUT, and never becomes a `drivers` row. Route-layer on purpose — the field was being dropped in the request handler, which the service suite cannot see |
 | Open access | All 22 mutating endpoints asserted **reachable** — fails if authentication is reintroduced; `/login` asserted to 404 |
 | Execution lifecycle | Full progression, the double-tap 409, skip/cancel with reasons, plan auto-completion, temp-stop insertion |
 | Reorder validation | Full/partial/foreign-id cases, and that no duplicate `execution_sequence` is left behind |

@@ -607,7 +607,7 @@ def calculate_total_weight(packages: list[dict]) -> float:
 2. Update each legacy file (`boundary.py`, `weight.py`, `volume.py`, `placement.py`, `constraints.py`) to import from `adapters.py` and delegate to `engine/` under the hood.
 3. The public API (function signatures, return types) remains identical — `session.py` and any other callers continue working without changes.
 4. Once no code outside `logistics/` imports directly from legacy files (only from `adapters.py` or `engine/`), the legacy files can be deprecated with a `warnings.warn("Use engine/ module", DeprecationWarning)`.
-5. After a full cycle of验证, delete the 5 legacy files and rename `adapters.py` → `__init__.py` to complete the migration.
+5. After a full cycle of verification, delete the 5 legacy files and rename `adapters.py` → `__init__.py` to complete the migration.
 
 **Files affected:** NEW `truck_load_planner/logistics/adapters.py`. Legacy files `boundary.py`, `weight.py`, `volume.py`, `placement.py`, `constraints.py` — internal delegation changed, public API preserved.
 
@@ -756,13 +756,27 @@ around them that change how they should be read.
 - **Item 23 (concurrency) is now blocked on WAL, and the blocker is documented in §7.1.** Production
   turned out to be a single synchronous Gunicorn worker, which hides the pooling problem
   behind request queueing and produces a user-visible latency problem instead.
-- **A route-layer test suite now exists** (`tests/test_delivery_routes.py`, 88 tests). This
+- **A route-layer test suite now exists** (`tests/test_delivery_routes.py`). This
   report's §5 testing analysis predates it; the delivery module is no longer service-tested
-  only. Total across `tests/` is 254.
+  only.
 - **Authentication was added and then removed the same day.** The delivery module is
   deliberately unauthenticated — see `docs/DELIVERY_MODULE.md` § Key Design Decisions #7
   before treating that as a finding. It is the one item in this codebase where the "obvious
   improvement" has already been made, reverted, and recorded.
+
+**Addendum 2026-08-03**: still no movement in the table, but two things bear on §3.9
+(duplicated TTAS handling) and on how §5's testing analysis should be read.
+
+- **The duplicated TTAS speed extraction was a live bug, not just duplication.**
+  `tracking_service._parse_speed_kmh` and `app/routes/trips.py:401` both took the first
+  number out of TTAS's speed *phrase*. For a stopped vehicle that phrase counts parking
+  time (`Dừng 3h30'`), so the dashboard reported a parked truck as doing 3 km/h, rising
+  the longer it sat. Fixed in `tracking_service`; **`trips.py` still has it**. Worth
+  raising above "housekeeping" — the two copies had already drifted in their `None`
+  vs `0` semantics, which is exactly how one got fixed and the other did not.
+- **Test totals in this report are point-in-time and go stale fast.** `pytest tests/` is
+  491 as of 2026-08-03 (was 254 when this was written). Treat any count here as an
+  artefact of its date; `README.md` § Running Tests carries the current figures.
 
 The wider audit that drove that work is `docs/DELIVERY_AUDIT_2026-07-31.md`, which is a
 separate, delivery-specific document; this report remains the whole-codebase view.

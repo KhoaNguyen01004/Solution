@@ -73,6 +73,13 @@ stale >15 min, and reporting ~0 km/h while not at a stop. These detect *symptoms
 having stopped*. A truck can be 90 minutes behind while moving perfectly and the
 board stays clean. This is the ceiling on everything else.
 
+> **The third proxy did not work until 2026-08-03.** TTAS sends a status phrase rather
+> than a number, and the parser took the first digits in it — so a truck stopped
+> `1h30'` read as 1 km/h and tripped the ≤2 threshold, while one stopped `3h30'` read as
+> 3 and did not. Fixed; expect more of these flags than the board previously showed.
+> A caution for the rest of this plan: a proxy that is silent is indistinguishable from
+> a proxy that is working, and this one was silent for a month.
+
 **G2 — The "Live" pill can be wrong.**
 `/api/execution/dashboard` deliberately returns `gps_source`, `gps_error`,
 `gps_matched` and `gps_available`; the code comment states this was surfaced *"so
@@ -195,6 +202,15 @@ first. This is the case that currently sorts backwards.
   removed.
 - This also relieves G6: the header's widest flexing element becomes a fixed-width
   chip row.
+
+> **Shipped, with one correction (2026-08-03).** **No GPS** was implemented as
+> `a.gps && a.gps.last_update` — vehicles with *no position at all*, i.e. a plate TTAS
+> returned no row for. That missed the case the chip is most often opened for: a truck
+> TTAS reports as `MTH:6h48'` (*mất tín hiệu*) still carries the last fix taken before
+> the signal dropped, so it passed the "has a position" test. The clause now also
+> accepts `gps.signal_lost`. The chip answers "which trucks can I not see?", not "which
+> have no coordinates?" — worth remembering when the **Behind** chip is added, since it
+> will face the same question about what the dispatcher is actually asking.
 
 ### 0.5 Keyboard
 

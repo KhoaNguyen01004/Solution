@@ -1,5 +1,125 @@
 # Changelog
 
+## 2026-08-03 — A truck TTAS says it has lost is now in the No GPS list
+
+Operator report, following the speed fix below: a vehicle that had lost GPS
+for nearly seven hours raised a "GPS stale 6h 48m" chip but did not appear
+under the dashboard's **No GPS** filter — the one list a dispatcher opens to
+find the trucks they cannot see.
+
+### Fixed — the filter tested for a position, not for reachability
+
+```js
+if (f.quick === 'nogps' && a.gps && a.gps.last_update) return false;
+```
+
+That keeps only vehicles with **no position at all** — a plate TTAS returned
+no row for, usually a mismatch in `vehicles` or a device missing from the
+account. A vehicle TTAS reports as lost still carries the last fix taken
+before the signal dropped, so it passed the "has a position" test and fell
+straight through.
+
+### Added — `MTH` is read as a state, not left as "unknown"
+
+TTAS writes `MTH:6h48'` — *mất tín hiệu*, and how long for. `is_lost_signal()`
+in `ttas_client` recognises it (plus the unabbreviated form and the spacing
+and case variants — this string is scraped, not contracted), giving a fourth
+`vehicle_status`, **`lost_signal`**, alongside running / stopped / unknown.
+`tracking_service` surfaces it as `signal_lost`, and the filter keys off that.
+
+**Declaration, not inference — chosen over widening the filter to a staleness
+threshold.** Both were on the table. TTAS stating the device is unreachable is
+a stronger fact than an old timestamp, and the two genuinely disagree: a
+tracker reporting late is not a tracker that is gone. Reusing the 15-minute
+stale threshold would have swept up every truck between reports.
+
+Deliberately unchanged as a result:
+
+- **The `gps_stale` chip still fires, with its computed duration.** It is
+  derived from `last_update_iso` and never reads the phrase, which is why it
+  independently agreed at 6h48 — the corroboration that identified this. Two
+  independent paths to the same number are worth keeping.
+- **The marker stays on the map.** Where a truck was last seen is the most
+  useful thing left about it. Only the filter treats it as unseen.
+- **The chip keeps the label "No GPS"** (operator's call) — dispatchers know
+  where it is and what they use it for.
+
+Note `MTH:6h48'` would have reported **6 km/h** under the pre-today speed
+parse: the same first-number-wins bug as the entry below, third variant.
+Already fixed there, and now pinned by a test naming this phrase.
+
+### Verification
+
+`pytest tests/` **491** (474 before). jsdom **112/112** (108 before).
+
+Mutation-checked both halves: restoring the old filter condition fails the
+two new jsdom cases, and the parked-duration mutation still fails 8 Python
+cases.
+
+## 2026-08-03 — A parked truck's speed was its parking time
+
+Operator report: a vehicle standing still on TTAS was showing a non-zero
+speed on the dispatch dashboard.
+
+### Fixed — the number came out of the wrong part of the phrase
+
+TTAS's DevList carries **no numeric speed field**. It sends a Vietnamese
+status phrase, and every km/h figure the dashboard has ever shown is an
+extraction from that prose. `normalize_vehicle` only inspects whether the
+phrase *starts with* `Chạy` or `Dừng`; `_parse_speed_kmh` then took the first
+number anywhere in the string.
+
+For a moving vehicle that number is the speed — `"Chạy 42km/h"` → 42. For a
+parked one the phrase counts **how long it has been parked**:
+
+| TTAS phrase | Meaning | Dashboard showed |
+|---|---|---|
+| `Dừng 3h30'` | stopped 3 h 30 min | 3 km/h |
+| `Dừng 6h4'` | stopped 6 h 4 min | 6 km/h |
+| `Dừng 7h44'` | stopped 7 h 44 min | 7 km/h |
+
+So the reported speed climbed the longer the truck sat still, and the same
+payload simultaneously reported `vehicle_status: stopped_engine_off` — the
+internal contradiction that identified it.
+
+The number is now taken only when it **carries the km/h unit**. A `Dừng`
+phrase reads as a genuine `0.0`, and durations are stripped before the
+unitless fallback so a time can never be picked up as a speed.
+
+**`None` still means "no reading", but `Dừng` is no longer one of them.** TTAS
+saying the vehicle is stopped is knowledge, not the absence of it, and the
+dashboard renders `None` as a blank rather than as a speed. The None-vs-0
+distinction the module was built around is intact — it now separates *stopped*
+from *uninterpretable* (`"Mất tín hiệu"`, `"---"`) instead of separating
+`Chạy 0km/h` from everything else.
+
+### Changed — the `reported_stopped` chip now fires when it should
+
+`vehicle-list.js` flags a vehicle reporting ≤2 km/h while not parked at a
+stop. Against the old parse this was effectively random: it fired for a truck
+stopped `1h30'` (→ 1 km/h) and stayed silent for one stopped `3h30'` (→ 3
+km/h). It now fires for genuinely stopped vehicles, so **expect more of these
+chips than before** — that is the proxy finally working, not a new fault. The
+`MAX_ATTENTION_CHIPS` overflow already handles a fleet parked overnight.
+
+### Not fixed — the same bug survives in `app/routes/trips.py`
+
+`trips.py:401-408` runs the identical first-number-wins regex into
+`current_speed`, and `_parse_speed_kmh`'s docstring used to point at it as the
+pattern to mirror. Left alone deliberately (scope), and recorded here so the
+next person finds it: it feeds the fleet map rather than dispatch, and its two
+trip pages were deleted 2026-07-31, so who still consumes it wants checking
+before it is touched.
+
+### Verification
+
+`pytest tests/` **474** (460 before). The speed cases also moved out of
+`TestTtasTimestampParsing` — which is about day-first dates — into
+`TestSpeedPhraseParsing`, where a reader looking for this bug would go.
+
+Mutation-checked: restoring first-number-wins fails 8 of the 18, including
+every one of the operator's real phrases.
+
 ## 2026-08-02 — The driver named in a plan is the driver dispatch shows
 
 Operator report: the plan builder prefills a driver when you pick a vehicle,

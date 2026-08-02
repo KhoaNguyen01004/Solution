@@ -10,7 +10,7 @@ Flask-based fleet management with GPS tracking, fuel monitoring, and a 3D/2D **T
 - **Truck Load Planner** (`/truck-load-planner`) — 3D/2D cargo loader with auto-arrange, stacking, step animation
 - **Vehicle Management** (`/vehicle-management`) — Vehicle CRUD and interactive 3D container diagram (Three.js)
 - **Oil Change** (`/oil-change`) — Oil change tracking
-- **Delivery Management** — Delivery plan oriented trip management with Excel import pipeline (`/delivery/new`), and an operational **Dispatch Dashboard** (`/delivery/dashboard`) with stop-level execution tracking, road-aware ETA/distance, attention indicators (stuck/GPS-stale), a pinned current-stop card with click-to-call, inline skip/cancel reason editing, a read-only photo gallery, follow-vehicle map mode, live stop reordering, click-a-stop-to-locate-it, and a switchable basemap (satellite / streets / muted) with Esri imagery capture dates
+- **Delivery Management** — Delivery plan oriented trip management with Excel import pipeline (`/delivery/new`), per-assignment driver naming that overrides the vehicle's usual driver for that plan, and an operational **Dispatch Dashboard** (`/delivery/dashboard`) with stop-level execution tracking, road-aware ETA/distance, attention indicators (stuck/GPS-stale/reported-stopped), a **No GPS** quick filter covering both unmatched plates and TTAS lost-signal (`MTH`) vehicles, a pinned current-stop card with click-to-call, inline skip/cancel reason editing, a read-only photo gallery, follow-vehicle map mode, live stop reordering, click-a-stop-to-locate-it, and a switchable basemap (satellite / streets / muted) with Esri imagery capture dates
 
 > **No authentication.** Every endpoint, including the destructive ones, is open to anyone who can reach the host — a deliberate 2026-07-31 decision for an internal-network deployment. See `docs/DELIVERY_MODULE.md` § Key Design Decisions before exposing this publicly.
 
@@ -18,32 +18,43 @@ Flask-based fleet management with GPS tracking, fuel monitoring, and a 3D/2D **T
 
 ## Running Tests
 
-### Delivery Management Tests (187 tests)
+### Delivery Management Tests (358 tests)
 ```bash
-python -m pytest tests/test_delivery.py -v         # 99 — service layer
-python -m pytest tests/test_delivery_routes.py -v  # 88 — route layer, real HTTP with TTAS mocked
+python -m pytest tests/test_delivery.py -v         # 223 — service layer
+python -m pytest tests/test_delivery_routes.py -v  # 135 — route layer, real HTTP with TTAS mocked
 ```
 
 `test_delivery.py` imports the service modules directly; `test_delivery_routes.py` drives
 `app.test_client()` end to end, which is the only suite that sees bugs living inside a
 request handler or in an assembled response. Run both for any delivery change.
 
-`pytest tests/` runs everything — **254 tests**.
+`pytest tests/` runs everything — **491 tests**.
 
-### Dispatch Dashboard Frontend Tests (34 drives, non-pytest)
+### Frontend Tests (122 drives, non-pytest)
 
 ```bash
 npm install jsdom                    # once; dev-only, not vendored
-node tests/js/dashboard.test.js
+node tests/js/dashboard.test.js      # 112 — dispatch dashboard
+node tests/js/plan-builder.test.js   # 10  — delivery plan builder
 # jsdom installed elsewhere? NODE_PATH=/path/to/node_modules node tests/js/dashboard.test.js
 ```
 
-Frontend changes get no pytest coverage at all, so this is the dashboard's only real
-verification. It drives the actual `static/js/dashboard/*` modules against the actual
-`templates/delivery-dashboard.html` (loaded from disk with its `<script>` tags stripped),
-with only the API and Leaflet map stubbed — so an element id renamed in the template but
-not in the JS fails here. Run it for any change under `static/js/dashboard/`, alongside
-`node --check` on the touched files.
+Frontend changes get no pytest coverage at all, so these are the only real verification
+those pages get. Both drive the actual `static/js/` modules against the actual template
+(loaded from disk with its `<script>` tags stripped), with only the parts that reach
+outside the page stubbed — the API and the Leaflet map for the dashboard, `fetch` for the
+builder. An element id renamed in a template but not in the JS fails here.
+
+`plan-builder.test.js` additionally records every stubbed request, so a test can assert on
+the exact payload the server would have received. That is how it catches the class of bug
+where a field is captured and rendered correctly and then simply left out of the POST.
+
+Run the matching suite for any change under `static/js/`, alongside `node --check` on the
+touched files.
+
+**Two dashboard ETA cases are time-of-day dependent** — run after ~23:13 local, a
+47-minute ETA crosses midnight and picks up the `+1d` marker the assertions do not
+expect. Known, unrelated to whatever you are changing; the fix is an injectable clock.
 
 ### Truck Load Planner Tests (31 tests)
 

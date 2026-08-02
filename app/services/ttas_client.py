@@ -201,6 +201,25 @@ def fetch_vehicle_data():
         return load_sample_data(), "sample", str(e)
 
 
+def is_lost_signal(speed_status) -> bool:
+    """True when TTAS is reporting the tracker as having lost signal.
+
+    Written `MTH:6h48'` on the tracking page — *mất tín hiệu* abbreviated,
+    followed by how long it has been out. Accepts the unabbreviated form and
+    tolerates the spacing/case variants, since this string is scraped rather
+    than contracted.
+
+    This is TTAS *stating* the device is unreachable, which is a stronger and
+    earlier fact than inferring it from the age of the last fix — the two can
+    disagree when a tracker reports late but is fine.
+    """
+    text = (speed_status or "").strip()
+    if not text:
+        return False
+    upper = text.upper()
+    return upper.startswith("MTH") or "MẤT TÍN HIỆU" in upper
+
+
 def normalize_vehicle(raw):
     speed = clean_text(raw.get("speed", ""))
     ad3 = clean_text(raw.get("ad3", ""))
@@ -211,6 +230,11 @@ def normalize_vehicle(raw):
         vehicle_status = "running"
     elif speed.startswith("Dừng"):
         vehicle_status = "stopped_engine_on" if ad3 == "Nổ" else "stopped_engine_off"
+    elif is_lost_signal(speed):
+        # TTAS's own declaration that the tracker has gone quiet, written
+        # "MTH:6h48'" — mất tín hiệu, and how long for. Distinct from
+        # "unknown", which means a phrase we could not read at all.
+        vehicle_status = "lost_signal"
 
     license_plate = (
         clean_text(raw.get("biensoxe", ""))

@@ -57,7 +57,14 @@ window.DASH = window.DASH || {};
       if (f.status && a.plan_status !== f.status) return false;
       if (f.quick === 'attention' && DASH.vehicleList.computeAttention(a).length === 0) return false;
       if (f.quick === 'executing' && a.plan_status !== 'executing') return false;
-      if (f.quick === 'nogps' && a.gps && a.gps.last_update) return false;
+      // "Vehicles I cannot see", which is two conditions, not one. A plate
+      // TTAS returned no row for has no position at all — usually a plate
+      // mismatch in `vehicles` or a device missing from the account. A
+      // vehicle TTAS reports as MTH (mất tín hiệu) still carries the last
+      // fix before the signal dropped, so it passes a "has a position" test
+      // while being exactly what this filter is asked to find.
+      if (f.quick === 'nogps'
+          && a.gps && a.gps.last_update && !a.gps.signal_lost) return false;
       return true;
     });
 
