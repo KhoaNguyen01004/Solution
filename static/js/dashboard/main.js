@@ -12,16 +12,27 @@ window.DASH = window.DASH || {};
     allAssignments: [],  // unfiltered from API
     filteredAssignments: [],
     selectedAssignmentId: null,
+    // Keyboard focus ring. Deliberately separate from selection: j/k move this
+    // without firing the three detail requests a selection costs.
+    focusedAssignmentId: null,
     selectedStops: [],
     selectedAssignmentDetail: null,
     selectedEta: null,
     followMode: false,
+    // Trust metadata from /api/execution/dashboard. The endpoint has always
+    // returned these four; nothing read them, so the header said "Live" over a
+    // map whose positions matched no plate at all — the exact scenario the
+    // backend comment says they were surfaced to prevent.
+    gpsStats: { source: '', error: null, matched: 0, available: 0 },
     filters: {
       plan: '',
       date: '',
       vehicle: '',
       driver: '',
       status: '',
+      // Dispatcher-intent filter, distinct from the five field filters below
+      // it: '' | 'attention' | 'executing' | 'nogps'.
+      quick: '',
     },
   };
 
@@ -44,6 +55,9 @@ window.DASH = window.DASH || {};
         if (!driver.includes(q)) return false;
       }
       if (f.status && a.plan_status !== f.status) return false;
+      if (f.quick === 'attention' && DASH.vehicleList.computeAttention(a).length === 0) return false;
+      if (f.quick === 'executing' && a.plan_status !== 'executing') return false;
+      if (f.quick === 'nogps' && a.gps && a.gps.last_update) return false;
       return true;
     });
 
@@ -88,6 +102,7 @@ window.DASH = window.DASH || {};
         state.filters.vehicle = document.getElementById('filterVehicle').value.trim().toLowerCase();
         state.filters.driver = document.getElementById('filterDriver').value.trim().toLowerCase();
         state.filters.status = document.getElementById('filterStatus').value;
+        updateFiltersBadge();
         applyFilters();
         renderAll();
       });
@@ -96,6 +111,59 @@ window.DASH = window.DASH || {};
         el.dispatchEvent(new Event('input'));
       });
     });
+  }
+
+  // ── Quick filters ──────────────────────────────────────────
+  // Dispatcher intents rather than fields. The five field filters still exist
+  // and still work; they just no longer have to be the first thing in reach
+  // for the cases that come up every few minutes.
+  function bindQuickFilters() {
+    const row = document.getElementById('quickFilters');
+    if (!row) return;
+    row.addEventListener('click', (e) => {
+      const chip = e.target.closest('.quick-chip');
+      if (!chip) return;
+      const value = chip.dataset.quick || '';
+      // Clicking the active chip clears it, so the row is its own "off" switch
+      // and nobody has to hunt for an All chip they can already see.
+      state.filters.quick = state.filters.quick === value ? '' : value;
+      syncQuickFilterChips();
+      applyFilters();
+      renderAll();
+    });
+    syncQuickFilterChips();
+  }
+
+  function syncQuickFilterChips() {
+    document.querySelectorAll('#quickFilters .quick-chip').forEach((chip) => {
+      const value = chip.dataset.quick || '';
+      chip.classList.toggle('active', value === state.filters.quick
+        || (value === '' && !state.filters.quick));
+    });
+  }
+
+  // The five field filters collapse behind a disclosure. They keep their ids,
+  // their values and their event bindings — this only hides the row, so a
+  // filter left set stays set, and stays visible in the button's label.
+  function bindFiltersDisclosure() {
+    const btn = document.getElementById('filtersToggleBtn');
+    const panel = document.getElementById('dashboardFilters');
+    if (!btn || !panel) return;
+    btn.addEventListener('click', () => {
+      panel.classList.toggle('open');
+      btn.classList.toggle('active', panel.classList.contains('open'));
+    });
+  }
+
+  // Shown on the disclosure button so a filter that is hiding inside a closed
+  // panel can't quietly explain away an empty vehicle list.
+  function updateFiltersBadge() {
+    const badge = document.getElementById('filtersActiveCount');
+    if (!badge) return;
+    const f = state.filters;
+    const n = [f.plan, f.date, f.vehicle, f.driver, f.status].filter(Boolean).length;
+    badge.textContent = n > 0 ? String(n) : '';
+    badge.style.display = n > 0 ? '' : 'none';
   }
 
   // ── Select assignment ──────────────────────────────────────
@@ -128,6 +196,20 @@ window.DASH = window.DASH || {};
 
     // Zoom map
     DASH.map.zoomToVehicle(assignmentId);
+  }
+
+  // Escape's counterpart to selectAssignment(). Not expressible as
+  // selectAssignment(null): that path unconditionally issues the three detail
+  // requests and a map zoom for whatever id it was handed. renderAll() already
+  // knows how to paint the no-selection state, so this only has to reach it.
+  function deselectAssignment() {
+    if (!state.selectedAssignmentId) return;
+    detailGeneration++; // drop any detail load still in flight
+    state.selectedAssignmentId = null;
+    state.selectedStops = [];
+    state.selectedAssignmentDetail = null;
+    state.selectedEta = null;
+    renderAll();
   }
 
   function showVehicleMapControls() {
@@ -219,6 +301,11 @@ window.DASH = window.DASH || {};
     try {
       const eta = await etaRequest;
       if (isStale()) return;
+      // Stamped on arrival: eta_seconds is measured from when the server
+      // answered, so every later repaint needs that instant as its baseline
+      // rather than its own Date.now(). Without it the arrival time creeps
+      // forward on each render.
+      if (eta) eta._receivedAt = Date.now();
       state.selectedEta = eta || null;
       paintAssignmentDetail(assignmentId);
     } catch (e) {
@@ -277,8 +364,10 @@ window.DASH = window.DASH || {};
     // dispatcher the truck is arriving now (audit L-10). timeline.js already
     // guarded this with a typeof check; the info bar did not.
     const firstEta = eta && eta.etas && eta.etas.length > 0 ? eta.etas[0].eta_seconds : null;
-    document.getElementById('vibarEta').textContent =
-      typeof firstEta === 'number' ? `ETA: ${Math.round(firstEta / 60)} min` : 'ETA: --';
+    const etaEl = document.getElementById('vibarEta');
+    const etaClock = UI.etaClock(firstEta, eta && eta._receivedAt);
+    etaEl.textContent = etaClock ? `ETA: ${etaClock}` : 'ETA: --';
+    etaEl.title = etaClock ? `in ${UI.etaRelative(firstEta)}` : '';
 
     const distanceEl = document.getElementById('vibarDistance');
     if (eta && (eta.remaining_distance_km || eta.travelled_distance_km)) {
@@ -293,7 +382,17 @@ window.DASH = window.DASH || {};
     const speedEl = document.getElementById('vibarSpeed');
     speedEl.textContent = gps && gps.speed_kmh != null ? `${Math.round(gps.speed_kmh)} km/h` : '';
 
-    const gpsTime = gps && gps.last_update ? new Date(gps.last_update).toLocaleTimeString() : '';
+    // Reads the server's parse, not TTAS's raw text: new Date() takes a
+    // non-ISO string month-first, which turned a day-first "01/08/2026" into
+    // 8 January. When the parse failed, show TTAS's own text rather than a
+    // confidently wrong clock time.
+    let gpsTime = '';
+    if (gps && gps.last_update_iso) {
+      const d = new Date(gps.last_update_iso);
+      gpsTime = isNaN(d.getTime()) ? (gps.last_update || '') : d.toLocaleTimeString();
+    } else if (gps && gps.last_update) {
+      gpsTime = gps.last_update;
+    }
     document.getElementById('vibarGpsTime').textContent = gpsTime ? 'GPS: ' + gpsTime : '';
   }
 
@@ -301,6 +400,9 @@ window.DASH = window.DASH || {};
   function renderAll() {
     DASH.vehicleList.render(state.filteredAssignments, state.selectedAssignmentId);
     DASH.map.updateVehicles(state.filteredAssignments);
+    // Re-applied after every render: vehicleList reorders and recycles card
+    // nodes, so the ring has to be re-attached rather than assumed to persist.
+    applyFocusRing();
 
     if (state.selectedAssignmentId) {
       // Only once stops have arrived — otherwise this would paint over the
@@ -322,13 +424,88 @@ window.DASH = window.DASH || {};
     }
   }
 
+  // ── GPS trust ──────────────────────────────────────────────
+  // "The request succeeded" and "the map is live" are separate claims, and the
+  // poll pill used to make the second on the strength of the first. These
+  // resolve the second one from the four fields /api/execution/dashboard has
+  // always returned and nothing ever read.
+
+  // Only assignments carrying a plate can be matched against a GPS position at
+  // all, so they are the denominator — not the whole assignment list.
+  function assignmentsExpectingGps() {
+    return state.allAssignments.filter((a) => a.plate_number).length;
+  }
+
+  function isFleetGpsOutage() {
+    const g = state.gpsStats;
+    if (g.error) return true;
+    if (assignmentsExpectingGps() === 0) return false;
+    if (g.available === 0) return true;
+    return g.matched === 0;
+  }
+
+  // Returned to polling.js, which owns the pill. Worst case first.
+  function gpsPollStatus() {
+    const g = state.gpsStats;
+    const expecting = assignmentsExpectingGps();
+    const src = g.source || 'unknown';
+
+    if (g.error) {
+      return { status: 'gpsdown', label: 'GPS down', title: `GPS source (${src}) failed: ${g.error}` };
+    }
+
+    // Nothing on the board is expecting a position, so there is nothing to be
+    // wrong about. An empty board must not read as a fault.
+    if (expecting === 0) return { status: 'ok' };
+
+    if (g.available === 0) {
+      return { status: 'gpsdown', label: 'No GPS', title: `GPS source (${src}) returned no positions.` };
+    }
+
+    // Positions arrived and not one matched a plate. This is audit C-01's
+    // exact signature — almost always a plate-format break — and it is the
+    // case that most needs to be loud, because every marker on the map is
+    // then a position nobody asked for.
+    if (g.matched === 0) {
+      return {
+        status: 'gpsdown',
+        label: `GPS 0/${g.available}`,
+        title: `${g.available} position(s) from ${src} matched none of the ${expecting} plate(s) on the board. Check plate formats.`,
+      };
+    }
+
+    if (g.matched < expecting) {
+      return {
+        status: 'degraded',
+        label: `GPS ${g.matched}/${expecting}`,
+        title: `${expecting - g.matched} vehicle(s) on the board have no live position.`,
+      };
+    }
+
+    return { status: 'ok' };
+  }
+
   // ── Main tick (called by polling) ──────────────────────────
   async function onPollTick() {
     const data = await DASH.api.dashboard();
     const raw = data.assignments || [];
 
-    // Merge GPS into state
+    state.gpsStats = {
+      source: data.gps_source || '',
+      error: data.gps_error || null,
+      matched: data.gps_matched || 0,
+      available: data.gps_available || 0,
+    };
+
+    // Set before isFleetGpsOutage() runs — it counts the assignments that are
+    // expecting a position, so it has to see this poll's list, not the last.
     state.allAssignments = raw;
+
+    // A fleet-wide GPS failure is one fact, not forty. Told once by the header
+    // badge; the per-vehicle "no GPS" flag stands down so the attention strip
+    // isn't buried under identical chips.
+    DASH.vehicleList.setGpsFleetOutage(isFleetGpsOutage());
+
     applyFilters();
     renderAll();
 
@@ -346,6 +523,166 @@ window.DASH = window.DASH || {};
         await loadAssignmentDetail(state.selectedAssignmentId);
       }
     }
+  }
+
+  // ── Keyboard ───────────────────────────────────────────────
+  // A shift is eight hours of this board. j/k move a focus ring only — they
+  // do not select — because selecting fires three requests and a map zoom, and
+  // holding j down the list would issue one set per vehicle. Enter commits.
+
+  function focusableAssignments() {
+    return state.filteredAssignments;
+  }
+
+  function applyFocusRing() {
+    const cards = document.querySelectorAll('#vehicleList .vehicle-card');
+    cards.forEach((card) => {
+      const id = parseInt(card.dataset.assignmentId, 10);
+      const on = id === state.focusedAssignmentId;
+      card.classList.toggle('focused', on);
+      // 'nearest' so a focus move never scrolls a card that is already fully
+      // visible — the list must not jump under a dispatcher who is reading it.
+      // Guarded because scrolling is a nicety and the focus ring is not: if
+      // scrollIntoView is missing or throws, the ring must still move.
+      if (on && typeof card.scrollIntoView === 'function') {
+        card.scrollIntoView({ block: 'nearest' });
+      }
+    });
+  }
+
+  function moveFocus(delta) {
+    const list = focusableAssignments();
+    if (list.length === 0) return;
+    let idx = list.findIndex((a) => a.assignment_id === state.focusedAssignmentId);
+    // Nothing focused yet: j starts at the top, k at the bottom.
+    if (idx === -1) idx = delta > 0 ? -1 : 0;
+    const next = Math.min(list.length - 1, Math.max(0, idx + delta));
+    state.focusedAssignmentId = list[next].assignment_id;
+    applyFocusRing();
+  }
+
+  // Typing must always win. Without this, searching for a plate containing
+  // 'a' or 'f' would advance a stop and toggle Follow while the dispatcher
+  // typed. The reason-row check is the same one that suppresses background
+  // patching for a row being edited.
+  function keyboardIsSuppressed(e) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return true;
+    const el = document.activeElement;
+    if (el) {
+      const tag = (el.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'select' || tag === 'textarea' || el.isContentEditable) return true;
+    }
+    if (DASH.timeline && typeof DASH.timeline.hasOpenReasonRow === 'function'
+        && DASH.timeline.hasOpenReasonRow()) return true;
+    return false;
+  }
+
+  function bindKeyboard() {
+    document.addEventListener('keydown', (e) => {
+      // Escape is the one key that must work *from* a field, since getting out
+      // of a filter box is the whole point of pressing it.
+      if (e.key === 'Escape') {
+        const panel = document.getElementById('dashboardFilters');
+        if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+        if (panel && panel.classList.contains('open')) {
+          panel.classList.remove('open');
+          document.getElementById('filtersToggleBtn').classList.remove('active');
+          return;
+        }
+        if (state.selectedAssignmentId) {
+          // Keep the ring where the selection was, so Escape then Enter is a
+          // round trip rather than losing the dispatcher's place in the list.
+          state.focusedAssignmentId = state.selectedAssignmentId;
+          deselectAssignment();
+        }
+        return;
+      }
+
+      if (keyboardIsSuppressed(e)) return;
+
+      switch (e.key) {
+        case 'j':
+          e.preventDefault();
+          moveFocus(1);
+          break;
+        case 'k':
+          e.preventDefault();
+          moveFocus(-1);
+          break;
+        case 'Enter':
+          if (state.focusedAssignmentId) {
+            e.preventDefault();
+            selectAssignment(state.focusedAssignmentId);
+          }
+          break;
+        case '/': {
+          e.preventDefault();
+          // The field lives inside the disclosure now, so open it first —
+          // focusing a hidden input silently does nothing.
+          const panel = document.getElementById('dashboardFilters');
+          const btn = document.getElementById('filtersToggleBtn');
+          if (panel && !panel.classList.contains('open')) {
+            panel.classList.add('open');
+            if (btn) btn.classList.add('active');
+          }
+          const field = document.getElementById('filterVehicle');
+          if (field) { field.focus(); field.select(); }
+          break;
+        }
+        case 'a': {
+          // Synthesises a click on the real Advance button rather than calling
+          // the API directly, so the in-flight guard, the expected_status
+          // staleness check and the disabled state all apply unchanged.
+          const btn = document.querySelector('#currentStopCard [data-action="advance"]')
+                   || document.querySelector('#timeline [data-action="advance"]');
+          if (btn && !btn.disabled) {
+            e.preventDefault();
+            btn.click();
+          }
+          break;
+        }
+        case 'f':
+          if (state.selectedAssignmentId) {
+            e.preventDefault();
+            document.getElementById('followVehicleBtn').click();
+          }
+          break;
+        case 'r':
+          e.preventDefault();
+          state.refreshNow().catch((err) => console.error('Refresh error:', err));
+          break;
+        default:
+          break;
+      }
+    });
+  }
+
+  // ── Age ticker ─────────────────────────────────────────────
+  // Ages ("GPS stale 23m") were only recomputed when a poll returned, so a
+  // slow or failing poll froze them while the real age kept climbing — the
+  // number on screen was the age as of the last successful round trip, not
+  // now. This repaints them on a clock instead.
+  //
+  // It is not a poll: no network, no map calls, no reordering. The map view
+  // must only move in response to a click, and the surest way to honour that
+  // is for this path never to reach DASH.map at all.
+  const AGE_REFRESH_MS = 15000;
+  let ageTimer = null;
+
+  function startAgeTicker() {
+    if (ageTimer) return;
+    ageTimer = setInterval(() => {
+      // A background tab does not need repainting, and polling.js already
+      // stops its own timer on hidden. Checked per tick rather than by
+      // binding visibilitychange, so there is one less listener to leak.
+      if (document.hidden) return;
+      try {
+        DASH.vehicleList.refreshAges();
+      } catch (e) {
+        // Must never take the dashboard down with it: this is cosmetic.
+        console.error('Age refresh failed:', e);
+      }
+    }, AGE_REFRESH_MS);
   }
 
   // ── Load plans for filter ──────────────────────────────────
@@ -442,15 +779,24 @@ window.DASH = window.DASH || {};
   function init() {
     DASH.map.init();
     bindFilterEvents();
+    bindQuickFilters();
+    bindFiltersDisclosure();
     bindMapControls();
     bindManagePlansEvents();
+    bindKeyboard();
     setFollowButtonState();
+    updateFiltersBadge();
 
     // Load initial data
     Promise.all([loadPlans()]).catch(() => {});
 
+    // Registered before start() so the very first tick's pill is already
+    // GPS-aware rather than an unconditional "Live".
+    DASH.polling.okStatusProvider = gpsPollStatus;
+
     // Start polling
     DASH.polling.start(onPollTick);
+    startAgeTicker();
 
     // Invalidate map size after layout settles
     setTimeout(() => DASH.map.invalidateSize(), 500);

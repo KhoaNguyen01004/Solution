@@ -13,12 +13,14 @@ from pathlib import Path
 # scope means a regression of this kind aborts create_app() instead of
 # degrading one request at a time.
 from app.services.ttas_client import fetch_vehicle_data
+from app.services.vehicle_specs import build_ors_options
 from services.plate_utils import normalize_plate
 
 from . import plan_service
 from . import execution_service
 from . import eta_service
 from . import image_service
+from . import export_service
 from . import tracking_service
 
 logger = logging.getLogger(__name__)
@@ -234,6 +236,7 @@ def create_assignment():
     assignment_id = plan_service.create_assignment(
         _db(), plan_id, vehicle_id,
         driver_id=data.get("driver_id"),
+        driver_name=data.get("driver_name"),
         sequence=data.get("sequence", 0),
         notes=data.get("notes", ""),
     )
@@ -273,7 +276,12 @@ def list_stops():
     assignment_id = request.args.get("assignment_id", type=int)
     if not assignment_id:
         return jsonify({"error": "assignment_id is required"}), 400
-    return jsonify(plan_service.list_stops(_db(), assignment_id))
+    # can_revert is stamped on here rather than computed in the browser so the
+    # Revert button and the endpoint that honours it read the same clock.
+    stops = execution_service.annotate_revertible(
+        plan_service.list_stops(_db(), assignment_id)
+    )
+    return jsonify(stops)
 
 
 @bp.route("/stops", methods=["POST"])
@@ -343,6 +351,16 @@ def cancel_stop(stop_id):
     return jsonify({"ok": True})
 
 
+@bp.route("/stops/<int:stop_id>/history", methods=["GET"])
+def stop_status_history(stop_id):
+    """The stop's recorded phase changes, oldest first.
+
+    Empty for anything last touched before the log existed — nothing was
+    backfilled, since inventing a history defeats the point of keeping one.
+    """
+    return jsonify(execution_service.list_status_events(_db(), stop_id))
+
+
 @bp.route("/stops/reorder", methods=["POST"])
 def reorder_stops():
     data = request.get_json(force=True)
@@ -404,11 +422,56 @@ def advance_stop():
     # dispatcher) be rejected instead of silently double-stepping the stop.
     expected_status = data.get("expected_status")
 
-    ok, msg = execution_service.advance_stop(_db(), stop_id, expected_status=expected_status)
+    # Present only when the dispatcher has been told proof is missing and has
+    # typed why it cannot be supplied.
+    override_reason = data.get("override_reason", "")
+
+    ok, msg = execution_service.advance_stop(
+        _db(), stop_id, expected_status=expected_status, override_reason=override_reason
+    )
     if not ok:
+        if msg == execution_service.PROOF_REQUIRED:
+            # 422 rather than 409: the request was well formed and the stop is
+            # exactly where the client thought — it just isn't allowed yet.
+            # A distinct code and flag mean the dashboard can offer the
+            # override without pattern-matching on English.
+            missing = execution_service.missing_proof(_db(), stop_id)
+            labels = {"unload": "unloaded goods", "door": "locked door"}
+            return jsonify({
+                "error": "This stop needs a photo of the "
+                         + " and the ".join(labels.get(m, m) for m in missing)
+                         + " before it can be completed.",
+                "proof_required": True,
+                "missing": missing,
+            }), 422
         # 409 when the stop simply moved on — the client should refresh, not
         # treat it as a malformed request.
         status_code = 409 if "already" in msg or "just advanced" in msg else 400
+        return jsonify({"error": msg, "conflict": status_code == 409}), status_code
+    return jsonify({"ok": True, "status": msg})
+
+
+@bp.route("/execution/revert", methods=["POST"])
+def revert_stop():
+    """Undo the last Advance/Skip/Cancel on a stop.
+
+    Advance is a single unconfirmed tap next to Skip and Cancel, pressed on a
+    phone in a moving vehicle — a mis-tap needs a way back that isn't a
+    hand-edited database row.
+    """
+    data = request.get_json(force=True)
+    stop_id = data.get("stop_id")
+    if not stop_id:
+        return jsonify({"error": "stop_id is required"}), 400
+
+    # Same optimistic-concurrency token as /execution/advance: the status the
+    # dispatcher's screen was showing. A Revert button left on a stale panel
+    # is refused rather than stepping back from somewhere unexpected.
+    expected_status = data.get("expected_status")
+
+    ok, msg = execution_service.revert_stop(_db(), stop_id, expected_status=expected_status)
+    if not ok:
+        status_code = 409 if "already" in msg or "just changed" in msg else 400
         return jsonify({"error": msg, "conflict": status_code == 409}), status_code
     return jsonify({"ok": True, "status": msg})
 
@@ -477,12 +540,19 @@ def get_eta():
     if not current_gps or current_gps.get("lat") is None or current_gps.get("lng") is None:
         return jsonify({"error": "Vehicle GPS not available", "etas": []})
 
+    # Routing restrictions for this specific truck. `source` says whether they
+    # came from the vehicle's own record or from a type estimate — the
+    # dashboard shows the difference, because a route computed from a guess
+    # must not read like one computed from the registration certificate.
+    ors_options, restrictions_source = build_ors_options(assignment or {})
+
     ors_key, ors_base = _ors_config()
     etas = eta_service.calculate_etas_for_stops(
         ors_key, ors_base,
         current_gps["lat"], current_gps["lng"],
         remaining,
         assignment_id=assignment_id,
+        options=ors_options,
     )
 
     remaining_distance_km = etas[-1]["cumulative_km"] if etas and etas[-1].get("cumulative_km") is not None else 0.0
@@ -498,6 +568,13 @@ def get_eta():
         "remaining_duration_sec": remaining_duration_sec,
         "travelled_distance_km": travelled_distance_km,
         "total_distance_km": round(travelled_distance_km + remaining_distance_km, 2),
+        # What the route was computed under, so a warning can name the actual
+        # limits rather than saying "some restriction" — ORS never reports
+        # which one blocked a route, and finding out costs one extra request
+        # per restriction per leg.
+        "restrictions": (ors_options or {}).get("profile_params", {}).get("restrictions") or {},
+        "ors_vehicle_type": (ors_options or {}).get("vehicle_type"),
+        "restrictions_source": restrictions_source,
     })
 
 
@@ -537,6 +614,78 @@ def upload_stop_image(stop_id):
 # ===========================
 # Images (generic)
 # ===========================
+# ===========================
+# End-of-day export
+# ===========================
+@bp.route("/export/summary", methods=["GET"])
+def export_summary():
+    """What a given delivery day contains, including which stops are short of
+    proof — asked before the download, while a driver is still reachable."""
+    day = request.args.get("date", "")
+    if not day:
+        return jsonify({"error": "date is required (YYYY-MM-DD)"}), 400
+    return jsonify(export_service.day_summary(_db(), day))
+
+
+@bp.route("/export/day-images", methods=["GET"])
+def list_day_images():
+    day = request.args.get("date", "")
+    if not day:
+        return jsonify({"error": "date is required (YYYY-MM-DD)"}), 400
+    return jsonify(export_service.list_day_images(_db(), day, request.args.get("category")))
+
+
+@bp.route("/export/day-images", methods=["POST"])
+def upload_day_image():
+    """One loading or empty-container photo, one request.
+
+    Deliberately not a batch endpoint: MAX_CONTENT_LENGTH is 25 MB for the
+    whole request, so a day's loading photos would not fit in one POST — and
+    uploading them individually means a failed ZIP download doesn't discard
+    everything that was just handed over.
+    """
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    day = request.form.get("date", "")
+    category = request.form.get("category", "")
+    try:
+        image_id = export_service.add_day_image(
+            _db(), day, category, request.files["file"],
+            label=request.form.get("label", ""),
+        )
+    except image_service.UploadRejected as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"id": image_id}), 201
+
+
+@bp.route("/export/day-images/<int:image_id>", methods=["DELETE"])
+def delete_day_image(image_id):
+    if not export_service.delete_day_image(_db(), image_id):
+        return jsonify({"error": "Image not found"}), 404
+    return jsonify({"ok": True})
+
+
+@bp.route("/export/day.zip", methods=["GET"])
+def download_day_zip():
+    """Assemble and stream the day's handover ZIP.
+
+    A plain GET, so the browser downloads it directly. Note this blocks the
+    single production worker while it builds — acceptable at end of day, when
+    dispatch is quiet, and stated here so the next person does not have to
+    discover it.
+    """
+    day = request.args.get("date", "")
+    if not day:
+        return jsonify({"error": "date is required (YYYY-MM-DD)"}), 400
+    folder_name = request.args.get("name", "")
+    buffer = export_service.build_day_zip(
+        _db(), day, folder_name, loading_date=request.args.get("loading_date") or None
+    )
+    filename = f"{image_service._safe_path_segment(folder_name, 'export')}.zip"
+    return send_file(buffer, mimetype="application/zip",
+                     as_attachment=True, download_name=filename)
+
+
 @bp.route("/images/<int:image_id>/file", methods=["GET"])
 def serve_image(image_id):
     img = image_service.get_image(_db(), image_id)
@@ -546,7 +695,7 @@ def serve_image(image_id):
     # relative_path is read back out of the database. Rows written before the
     # S-04 path-traversal fix could point outside the upload root, so confirm
     # containment here rather than trusting stored data.
-    full_path = (image_service.BASE_DIR / img["relative_path"]).resolve()
+    full_path = (image_service.DATA_ROOT / img["relative_path"]).resolve()
     if not full_path.is_relative_to(image_service.UPLOAD_ROOT.resolve()):
         logger.warning("Refusing to serve image %s outside upload root: %s", image_id, full_path)
         return jsonify({"error": "Image not found"}), 404

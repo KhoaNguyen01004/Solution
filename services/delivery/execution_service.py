@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from app.db import DatabaseManager
@@ -7,6 +7,23 @@ from app.db import DatabaseManager
 logger = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = ("completed", "skipped", "cancelled")
+
+#: Photo categories a stop must carry before it can be marked completed:
+#: the goods off the truck, and the truck shut afterwards. Together they are
+#: what actually answers a dispute — delivered, and secured.
+#:
+#: Deliberately *not* enforced as a category whitelist on upload. The route
+#: sanitizes any category into a safe path segment instead (audit S-04, and
+#: tests/test_delivery_routes.py::test_traversal_in_category_cannot_escape
+#: depends on an unknown category still being accepted). The consequence is
+#: the safe one: a mistyped category can never satisfy the gate.
+PROOF_CATEGORIES = ("unload", "door")
+
+#: Returned by :func:`advance_stop` in place of a prose message when a
+#: completion is blocked for want of photos. The route turns it into a 422
+#: the dashboard can recognise and answer with an override, rather than the
+#: client having to pattern-match on English.
+PROOF_REQUIRED = "proof_required"
 
 
 def _get_plan_id_for_stop(conn, stop_id: int) -> Optional[int]:
@@ -18,6 +35,18 @@ def _get_plan_id_for_stop(conn, stop_id: int) -> Optional[int]:
     """, (stop_id,))
     row = c.fetchone()
     return row["plan_id"] if row else None
+
+
+def _get_plan_date_for_stop(conn, stop_id: int) -> Optional[str]:
+    c = conn.cursor()
+    c.execute("""
+        SELECT dp.plan_date FROM delivery_plan_stops s
+        JOIN vehicle_assignments va ON va.id = s.vehicle_assignment_id
+        JOIN delivery_plans dp ON dp.id = va.plan_id
+        WHERE s.id = ?
+    """, (stop_id,))
+    row = c.fetchone()
+    return row["plan_date"] if row else None
 
 
 def _maybe_complete_plan(conn, plan_id: Optional[int]):
@@ -42,6 +71,92 @@ def _maybe_complete_plan(conn, plan_id: Optional[int]):
             "UPDATE delivery_plans SET status = 'completed', updated_at = ? WHERE id = ? AND status != 'completed'",
             (datetime.now().isoformat(), plan_id),
         )
+
+
+def _reopen_plan(conn, plan_id: Optional[int]):
+    """Undo of :func:`_maybe_complete_plan` — a stop leaving a terminal status
+    means the plan has work outstanding again, so it must come back into the
+    dashboard's active view. Same UPDATE ``insert_temp_stop`` uses when a new
+    stop lands on an already-completed plan.
+    """
+    if plan_id is None:
+        return
+    conn.cursor().execute(
+        "UPDATE delivery_plans SET status = 'executing', updated_at = ? WHERE id = ? AND status = 'completed'",
+        (datetime.now().isoformat(), plan_id),
+    )
+
+
+def _record_status_event(conn, stop_id: int, from_status: str, to_status: str,
+                         action: str, reason: str = "", occurred_at: Optional[str] = None):
+    """Append one phase change to the stop's log.
+
+    Always called on the *same* connection as the UPDATE it describes, and
+    only after that UPDATE reported a rowcount — so a refused or lost
+    transition never leaves an event claiming it happened.
+    """
+    conn.cursor().execute("""
+        INSERT INTO stop_status_events
+            (stop_id, from_status, to_status, action, reason, occurred_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (stop_id, from_status or "", to_status, action, reason or "",
+          occurred_at or datetime.now().isoformat()))
+
+
+def list_status_events(db_path: str, stop_id: int) -> list:
+    """The stop's phase log, oldest first — the order it happened in.
+
+    Empty for any stop last touched before the log existed; nothing was
+    backfilled, because inventing a history is exactly the thing a history
+    is supposed to protect against.
+    """
+    with DatabaseManager(db_path).connect() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT id, stop_id, from_status, to_status, action, reason, occurred_at
+            FROM stop_status_events WHERE stop_id = ? ORDER BY id
+        """, (stop_id,))
+        return [dict(r) for r in c.fetchall()]
+
+
+def _last_forward_event(conn, stop_id: int, status: str):
+    """The most recent event that *moved the stop into* ``status`` by going
+    forward — an advance, skip or cancel.
+
+    Reverts are excluded deliberately, and this is the subtle part. After
+    planned → arrived → completed → revert, the newest event landing on
+    'arrived' is the revert itself, whose ``from_status`` is 'completed'.
+    Reading that would send the next revert *forward* to completed, turning
+    a second undo into a redo. The question being asked is "how did this stop
+    legitimately get here", and an undo is not how.
+    """
+    c = conn.cursor()
+    c.execute("""
+        SELECT * FROM stop_status_events
+        WHERE stop_id = ? AND to_status = ? AND action != 'revert'
+        ORDER BY id DESC LIMIT 1
+    """, (stop_id, status))
+    return c.fetchone()
+
+
+def _missing_proof(conn, stop_id: int) -> list:
+    """Which of PROOF_CATEGORIES this stop has no photo for, in order."""
+    c = conn.cursor()
+    c.execute("""
+        SELECT DISTINCT category FROM delivery_stop_images WHERE stop_id = ?
+    """, (stop_id,))
+    have = {r["category"] for r in c.fetchall()}
+    return [cat for cat in PROOF_CATEGORIES if cat not in have]
+
+
+def missing_proof(db_path: str, stop_id: int) -> list:
+    """Public read of the same question, for building an error message.
+
+    Only called on the failure path, so the extra query costs nothing in the
+    normal case.
+    """
+    with DatabaseManager(db_path).connect() as conn:
+        return _missing_proof(conn, stop_id)
 
 
 def get_current_stop(db_path: str, assignment_id: int) -> Optional[dict]:
@@ -69,7 +184,15 @@ def get_stop_execution(db_path: str, stop_id: int) -> Optional[dict]:
         return dict(row) if row else None
 
 
-def _update_execution(db_path: str, stop_id: int, **kwargs):
+def _update_execution(db_path: str, stop_id: int, _event_action: str = "",
+                      _event_reason: str = "", **kwargs):
+    """Patch a stop's execution row.
+
+    ``_event_action`` names the operation for the phase log. When given, the
+    prior status is read on the same connection immediately before the
+    UPDATE, so the recorded ``from_status`` is the one actually replaced
+    rather than whatever a caller believed it to be.
+    """
     allowed = {"status", "execution_sequence", "skip_reason", "cancel_reason",
                "actual_arrival_at", "actual_departure_at", "completed_at"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
@@ -80,8 +203,19 @@ def _update_execution(db_path: str, stop_id: int, **kwargs):
     vals = list(updates.values()) + [stop_id]
     with DatabaseManager(db_path).connect() as conn:
         c = conn.cursor()
+
+        previous_status = ""
+        if _event_action and updates.get("status"):
+            c.execute("SELECT status FROM stop_executions WHERE stop_id = ?", (stop_id,))
+            row = c.fetchone()
+            previous_status = row["status"] if row else ""
+
         c.execute(f"UPDATE stop_executions SET {set_clause} WHERE stop_id = ?", vals)
         ok = c.rowcount > 0
+        if ok and _event_action and updates.get("status"):
+            _record_status_event(conn, stop_id, previous_status, updates["status"],
+                                 _event_action, _event_reason,
+                                 occurred_at=updates["updated_at"])
         if ok and updates.get("status") in TERMINAL_STATUSES:
             _maybe_complete_plan(conn, _get_plan_id_for_stop(conn, stop_id))
         return ok
@@ -91,8 +225,18 @@ def _update_execution(db_path: str, stop_id: int, **kwargs):
 _ADVANCE_TRANSITIONS = {"planned": "arrived", "arrived": "completed"}
 
 
-def advance_stop(db_path: str, stop_id: int, expected_status: Optional[str] = None):
+def advance_stop(db_path: str, stop_id: int, expected_status: Optional[str] = None,
+                 override_reason: str = ""):
     """Move a stop one step along planned → arrived → completed.
+
+    Completing a stop requires proof: one photo of the goods unloaded and one
+    of the door (or gate) shut afterwards. ``override_reason`` completes it
+    without them — a driver with a dead phone must not be stranded — and the
+    reason is written into the stop's phase history, so an exception is a
+    permanent part of the record rather than a message in a chat somewhere.
+
+    Only the final step is gated. Arriving somewhere is not a claim about
+    what happened there, so there is nothing yet to prove.
 
     ``expected_status`` is the status the caller believes the stop is in —
     the one the dispatcher could actually see when they pressed the button.
@@ -128,6 +272,10 @@ def advance_stop(db_path: str, stop_id: int, expected_status: Optional[str] = No
         if target is None:
             return False, f"Cannot advance stop in status '{status}'"
 
+        override = (override_reason or "").strip()
+        if target == "completed" and not override and _missing_proof(conn, stop_id):
+            return False, PROOF_REQUIRED
+
         now = datetime.now().isoformat()
 
         if target == "arrived":
@@ -145,6 +293,12 @@ def advance_stop(db_path: str, stop_id: int, expected_status: Optional[str] = No
             # Another request won the transition between our SELECT and UPDATE.
             return False, "This stop was just advanced by another request. Refresh to see the current state."
 
+        # The override reason rides on the event, which is the only place it
+        # is kept — nothing on stop_executions records "completed without
+        # proof", and inventing a column for it would duplicate the log.
+        _record_status_event(conn, stop_id, status, target, "advance",
+                             reason=override, occurred_at=now)
+
         if target == "completed":
             _maybe_complete_plan(conn, _get_plan_id_for_stop(conn, stop_id))
             return True, "completed"
@@ -152,9 +306,192 @@ def advance_stop(db_path: str, stop_id: int, expected_status: Optional[str] = No
         return True, "advanced"
 
 
+#: The statuses an accidental button press can be walked back out of, and
+#: where each lands. ``skipped``/``cancelled`` are resolved at runtime by
+#: :func:`_revert_target` — see there.
+_REVERT_TRANSITIONS = {
+    "arrived": "planned",
+    "completed": "arrived",
+    "skipped": "planned",
+    "cancelled": "planned",
+}
+
+def _parse_ts(value) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_plan_date(value) -> Optional[date]:
+    """``delivery_plans.plan_date`` as a date. Stored as ``YYYY-MM-DD`` text."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def can_revert(status: Optional[str], plan_date=None, today: Optional[date] = None) -> bool:
+    """Whether a stop in ``status`` may still be corrected.
+
+    Single source of truth for the rule: the dashboard renders its Revert
+    button from this (via the ``can_revert`` flag on ``GET /api/stops``) and
+    :func:`revert_stop` re-checks it on the way in, so a button left open on
+    a stale screen can't act after the day it was rendered in.
+
+    **The rule is the plan's own day, not a stopwatch.** This replaced a
+    15-minute window on 2026-08-01: a correction is bookkeeping, and
+    bookkeeping is finished at the end of a shift, not within a quarter of an
+    hour of the mistake. A plan dated today or later is live work and stays
+    correctable; once its date has passed, the record is closed.
+
+    Two consequences worth being explicit about:
+
+    - ``today`` comes from the server clock, which is UTC unless the
+      deployment says otherwise, while ``plan_date`` is a business date typed
+      by a dispatcher on Vietnam time (+7). Corrections therefore stay open
+      roughly seven hours into the next local day. That is the lenient
+      direction — a night shift can finish its paperwork — and never the
+      direction that freezes work still in progress.
+    - A plan with no readable date is *not* correctable. Unknown reads as
+      closed, the same conservative choice made everywhere else here.
+    """
+    if status not in _REVERT_TRANSITIONS:
+        return False
+    day = _parse_plan_date(plan_date)
+    if day is None:
+        return False
+    return day >= (today or datetime.now().date())
+
+
+def _revert_target(conn, status: str, execution, stop_id: int) -> Optional[str]:
+    """Where a revert from ``status`` lands.
+
+    Prefers the **recorded** previous phase: the newest event whose
+    ``to_status`` is where the stop actually is names the ``from_status`` it
+    came from, so a revert returns the stop to where it genuinely was rather
+    than to where a table says it probably was.
+
+    Falls back to the static map for stops with no log — everything last
+    touched before 2026-08-01, since nothing was backfilled. In that path
+    ``skipped``/``cancelled`` are still *inferred*: an ``actual_arrival_at``
+    can only have been written by an advance, so a stop skipped after the
+    driver had already arrived returns to ``arrived``. Inference is the
+    reason the log exists; it is not wrong here, just unverifiable.
+    """
+    if status not in _REVERT_TRANSITIONS:
+        return None
+
+    event = _last_forward_event(conn, stop_id, status)
+    if event is not None and event["from_status"]:
+        return event["from_status"]
+
+    if status in ("skipped", "cancelled") and execution["actual_arrival_at"]:
+        return "arrived"
+    return _REVERT_TRANSITIONS.get(status)
+
+
+def revert_stop(db_path: str, stop_id: int, expected_status: Optional[str] = None):
+    """Walk a stop one step *back*: the undo for Advance, Skip and Cancel.
+
+    Exists because Advance is a single tap with no confirmation, sitting next
+    to Skip and Cancel on a panel used on a phone in a moving vehicle — a
+    mis-tap marked a stop arrived (or delivered) and the only remedy was
+    editing the database by hand.
+
+    Guards mirror :func:`advance_stop` exactly, and for the same reasons: the
+    ``expected_status`` token refuses a revert aimed at a status the stop has
+    since left, and ``AND status = ?`` on the UPDATE means two racing requests
+    can't step the stop back twice.
+
+    Each transition clears the timestamps its forward step wrote, so a
+    reverted stop is indistinguishable from one that was never advanced —
+    a stop left holding an arrival time it had "un-arrived" from would
+    corrupt dwell time exactly the way the double-tap bug (C-07) did.
+    """
+    with DatabaseManager(db_path).connect() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM stop_executions WHERE stop_id = ?", (stop_id,))
+        execution = c.fetchone()
+        if not execution:
+            return False, "Stop execution not found"
+
+        status = execution["status"]
+
+        if expected_status is not None and status != expected_status:
+            return False, (
+                f"This stop is already '{status}', not '{expected_status}' — "
+                f"someone else may have changed it. Refresh to see the current state."
+            )
+
+        target = _revert_target(conn, status, execution, stop_id)
+        if target is None:
+            return False, f"Cannot revert a stop in status '{status}'"
+
+        if not can_revert(status, plan_date=_get_plan_date_for_stop(conn, stop_id)):
+            return False, (
+                "This stop belongs to a plan whose date has passed, so its record "
+                "is closed and can no longer be corrected here."
+            )
+
+        now = datetime.now().isoformat()
+
+        if status == "arrived":
+            c.execute("""
+                UPDATE stop_executions SET status = 'planned', actual_arrival_at = NULL,
+                    updated_at = ? WHERE stop_id = ? AND status = 'arrived'
+            """, (now, stop_id))
+        elif status == "completed":
+            c.execute("""
+                UPDATE stop_executions SET status = 'arrived', actual_departure_at = NULL,
+                    completed_at = NULL, updated_at = ? WHERE stop_id = ? AND status = 'completed'
+            """, (now, stop_id))
+        else:
+            # skipped / cancelled — the reason belonged to the action being
+            # undone, so it goes with it.
+            c.execute("""
+                UPDATE stop_executions SET status = ?, skip_reason = '', cancel_reason = '',
+                    completed_at = NULL, updated_at = ? WHERE stop_id = ? AND status = ?
+            """, (target, now, stop_id, status))
+
+        if c.rowcount == 0:
+            # Another request won the transition between our SELECT and UPDATE.
+            return False, "This stop was just changed by another request. Refresh to see the current state."
+
+        _record_status_event(conn, stop_id, status, target, "revert", occurred_at=now)
+
+        if status in TERMINAL_STATUSES:
+            _reopen_plan(conn, _get_plan_id_for_stop(conn, stop_id))
+
+        return True, target
+
+
+def annotate_revertible(stops: list, today: Optional[date] = None) -> list:
+    """Stamp ``can_revert`` onto rows shaped like ``plan_service.list_stops``
+    output, whose status column is aliased ``execution_status``.
+
+    Computed server-side so the dashboard renders the Revert button from the
+    same calendar that enforces it — a browser on a different date would
+    otherwise show a button the API refuses, or hide one it would accept.
+    """
+    reference = today or datetime.now().date()
+    for stop in stops:
+        stop["can_revert"] = can_revert(
+            stop.get("execution_status"),
+            plan_date=stop.get("plan_date"),
+            today=reference,
+        )
+    return stops
+
+
 def skip_stop(db_path: str, stop_id: int, reason: str = ""):
     now = datetime.now().isoformat()
     return _update_execution(db_path, stop_id,
+                             _event_action="skip", _event_reason=reason,
                              status="skipped", skip_reason=reason,
                              completed_at=now)
 
@@ -162,6 +499,7 @@ def skip_stop(db_path: str, stop_id: int, reason: str = ""):
 def cancel_stop(db_path: str, stop_id: int, reason: str = ""):
     now = datetime.now().isoformat()
     return _update_execution(db_path, stop_id,
+                             _event_action="cancel", _event_reason=reason,
                              status="cancelled", cancel_reason=reason,
                              completed_at=now)
 
@@ -325,7 +663,7 @@ def get_dashboard_data(db_path: str):
                 va.vehicle_id,
                 va.driver_id,
                 v.plate_number,
-                COALESCE(NULLIF(d.name, ''), v.current_driver) as current_driver,
+                COALESCE(NULLIF(va.driver_name_override, ''), NULLIF(d.name, ''), v.current_driver) as current_driver,
                 dp.plan_name,
                 dp.plan_date,
                 dp.status as plan_status

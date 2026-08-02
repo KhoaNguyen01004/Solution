@@ -32,14 +32,94 @@
     flex-shrink: 0;
 }
 
-.dashboard-filters {
+/* Quick filters sit where the five field filters used to, and the fields move
+   into a disclosure anchored to .filters-wrap. This is also what stops the
+   header's widest flexing element from being five inputs that reflow. */
+.header-filters {
     display: flex;
-    align-items: flex-end;
-    gap: 6px;
+    align-items: center;
+    gap: 8px;
     flex: 1 1 auto;
     min-width: 0;
+}
+
+.quick-filters {
+    display: flex;
+    gap: 4px;
     flex-wrap: wrap;
 }
+
+.quick-chip {
+    height: 26px;
+    padding: 0 10px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid var(--border);
+    border-radius: 13px;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background var(--transition), border-color var(--transition), color var(--transition);
+}
+
+.quick-chip:hover {
+    background: rgba(255,255,255,0.1);
+    color: var(--text-primary);
+}
+
+.quick-chip.active {
+    background: rgba(56,139,253,0.16);
+    border-color: var(--accent);
+    color: var(--text-primary);
+}
+
+.filters-wrap {
+    position: relative;
+    flex-shrink: 0;
+}
+
+.filters-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 15px;
+    height: 15px;
+    margin-left: 5px;
+    padding: 0 4px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 9.5px;
+    font-weight: 700;
+}
+
+.dashboard-filters {
+    /* Closed by default. Fixed width with wrapping fields rather than one long
+       row, so the panel's footprint is predictable at any header width and
+       can't hang off the viewport the way an auto-width row would. */
+    display: none;
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 200;
+    width: 320px;
+    max-width: calc(100vw - 24px);
+    padding: 10px;
+    background: #161b22;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 8px;
+}
+
+.dashboard-filters.open {
+    display: flex;
+}
+
 
 .filter-group {
     display: flex;
@@ -107,6 +187,27 @@
     .dashboard-header .header-nav::-webkit-scrollbar {
         display: none;
     }
+    /* The wrap can sit anywhere along a wrapped header at this width, and a
+       320px panel anchored left would hang off the right edge. Same corner
+       problem the Manage Plans panel clamps for. */
+    .dashboard-filters {
+        left: auto;
+        right: 0;
+    }
+    /* Scroll the chips rather than wrapping them into a second header row. */
+    .quick-filters {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        scrollbar-width: none;
+    }
+    .quick-filters::-webkit-scrollbar {
+        display: none;
+    }
+    /* A title-attribute tooltip is unreachable on touch, and there is no
+       keyboard to hint at. */
+    .kbd-hint {
+        display: none;
+    }
 }
 
 .poll-status {
@@ -130,6 +231,23 @@
 .poll-status.poll-paused {
     background: rgba(251,191,36,0.1);
     color: #fbbf24;
+}
+
+/* The poll succeeded but the data it carried is not fully trustworthy: some
+   plates have no live position. Distinct from poll-error, which means the
+   request itself failed. */
+.poll-status.poll-degraded {
+    background: rgba(251,146,60,0.14);
+    color: #fb923c;
+}
+
+/* No usable positions at all, or none that matched a plate. Deliberately as
+   loud as an outright request failure — a map full of unmatched positions is
+   worse than an empty one, because it looks correct. */
+.poll-status.poll-gpsdown {
+    background: rgba(239,68,68,0.16);
+    color: #f87171;
+    font-weight: 700;
 }
 
 /* ── Left Panel ───────────────────────────────────────────── */
@@ -169,19 +287,30 @@
 }
 
 /* ── Attention (stuck / stale-GPS proxies) ────────────────── */
+/* Two toggles, a count and a shortcut hint now share a 280px header, so the
+   spacing comes from the container's gap rather than per-item margins. */
+.dashboard-left .panel-header {
+    gap: 5px;
+    padding: 10px 12px;
+}
+
+.dashboard-left .panel-header h2 {
+    flex-shrink: 0;
+}
+
 .attention-sort-toggle {
     display: flex;
     align-items: center;
-    gap: 4px;
-    font-size: 10.5px;
+    gap: 3px;
+    font-size: 10px;
     color: var(--text-secondary);
     cursor: pointer;
     white-space: nowrap;
-    margin-left: 8px;
 }
 
 .attention-sort-toggle input {
     cursor: pointer;
+    margin: 0;
 }
 
 .attention-strip {
@@ -222,6 +351,52 @@
     color: #f87171;
 }
 
+/* ── Severity tiers ───────────────────────────────────────────
+   Warn is amber, critical is red *and* heavier — hue alone would leave the
+   two tiers indistinguishable to a red-weak dispatcher, and this panel is
+   read at a glance for eight hours at a stretch. Same reasoning as the map
+   markers carrying both a dark ring and a light one. */
+.attention-chip.sev-warn {
+    background: rgba(251,146,60,0.1);
+    border-color: rgba(251,146,60,0.3);
+}
+
+.attention-chip.sev-warn:hover {
+    background: rgba(251,146,60,0.18);
+}
+
+.attention-chip.sev-warn .attention-chip-reason {
+    color: #fb923c;
+}
+
+.attention-chip.sev-critical {
+    background: rgba(239,68,68,0.14);
+    border-color: rgba(239,68,68,0.55);
+}
+
+.attention-chip.sev-critical .attention-chip-plate {
+    text-decoration: underline;
+    text-decoration-color: rgba(248,113,113,0.6);
+    text-underline-offset: 2px;
+}
+
+/* Overflow indicator — the strip caps at 8 chips and this turns on the
+   Attention-first sort rather than growing the strip further. */
+.attention-chip-more {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255,255,255,0.06);
+    border-color: var(--border);
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.attention-chip-more:hover {
+    background: rgba(255,255,255,0.12);
+}
+
 .vc-vehicle-row {
     display: flex;
     align-items: center;
@@ -235,6 +410,58 @@
     background: #f87171;
     box-shadow: 0 0 0 2px rgba(239,68,68,0.2);
     flex-shrink: 0;
+}
+
+.vc-attention-dot.sev-warn {
+    background: #fb923c;
+    box-shadow: 0 0 0 2px rgba(251,146,60,0.2);
+}
+
+/* Critical is larger as well as redder — relative size is the third channel,
+   after hue and weight, that CAD displays use to make priority readable
+   without being read. */
+.vc-attention-dot.sev-critical {
+    width: 9px;
+    height: 9px;
+    background: #f87171;
+    box-shadow: 0 0 0 2px rgba(239,68,68,0.35);
+}
+
+/* A left border rather than a background tint: the card already uses
+   background for hover and selection, and stacking a third meaning on it
+   made a selected card with a problem unreadable. */
+.vehicle-card.attention-warn {
+    border-left: 3px solid #fb923c;
+    padding-left: 10px;
+}
+
+.vehicle-card.attention-critical {
+    border-left: 3px solid #f87171;
+    padding-left: 10px;
+}
+
+/* Keyboard focus ring (j/k). Distinct from .selected, which is a filled
+   accent — this is an outline, so a card can legibly be both at once. */
+.vehicle-card.focused {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+}
+
+.vc-gps-time.vc-gps-missing {
+    color: #fb923c;
+    font-weight: 600;
+}
+
+.kbd-hint {
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: help;
+    opacity: 0.7;
+    user-select: none;
+}
+
+.kbd-hint:hover {
+    opacity: 1;
 }
 
 .vehicle-list {
@@ -321,6 +548,90 @@
     background: rgba(255,255,255,0.08);
     border-radius: 2px;
     overflow: hidden;
+}
+
+/* ── Compact density ──────────────────────────────────────────
+   36 box trucks plus 4 containers do not fit a 280px column at five lines
+   each — about eight are visible at once, which defeats the point of a fleet
+   board. Compact collapses each card to a single row using display:contents,
+   so the card markup and the diffing patch in vehicle-list.js are untouched
+   by it: this is a stylesheet change and nothing else. */
+.vehicle-list.compact {
+    gap: 2px;
+    padding: 4px 6px;
+}
+
+.vehicle-list.compact .vehicle-card {
+    flex-direction: row;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    line-height: 1.3;
+}
+
+.vehicle-list.compact .vehicle-card.attention-warn,
+.vehicle-list.compact .vehicle-card.attention-critical {
+    padding-left: 6px;
+}
+
+/* Dissolve the two wrappers so their children become items of the card row. */
+.vehicle-list.compact .vc-header,
+.vehicle-list.compact .vc-header > div,
+.vehicle-list.compact .vc-body,
+.vehicle-list.compact .vc-progress,
+.vehicle-list.compact .vc-meta {
+    display: contents;
+}
+
+.vehicle-list.compact .vc-vehicle-row { order: 1; flex: 0 0 auto; }
+.vehicle-list.compact .vc-vehicle { font-size: 12px; }
+
+.vehicle-list.compact .vc-driver {
+    order: 2;
+    flex: 0 1 auto;
+    margin-top: 0;
+    max-width: 76px;
+    font-size: 10.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.vehicle-list.compact .status-badge { order: 3; flex: 0 0 auto; }
+
+.vehicle-list.compact .vc-current-stop {
+    order: 4;
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 10.5px;
+}
+
+.vehicle-list.compact .vc-progress-bar { display: none; }
+.vehicle-list.compact .vc-progress-text { order: 5; flex: 0 0 auto; font-size: 10.5px; }
+/* Redundant per row — the plan filter is usually what got you here. */
+.vehicle-list.compact .vc-plan-name { display: none; }
+.vehicle-list.compact .vc-gps-time { order: 6; flex: 0 0 auto; font-size: 10px; }
+
+/* On a phone the binding constraint is the tap target, not the row count, so
+   compact is a no-op there and full cards are restored explicitly. */
+@media (max-width: 768px) {
+    .vehicle-list.compact { gap: 6px; padding: 8px; }
+    .vehicle-list.compact .vehicle-card {
+        flex-direction: column;
+        align-items: stretch;
+        padding: 10px 12px;
+        border-radius: var(--radius);
+    }
+    .vehicle-list.compact .vc-header { display: flex; }
+    .vehicle-list.compact .vc-header > div { display: block; }
+    .vehicle-list.compact .vc-body { display: flex; }
+    .vehicle-list.compact .vc-progress { display: flex; }
+    .vehicle-list.compact .vc-meta { display: flex; }
+    .vehicle-list.compact .vc-progress-bar { display: block; }
+    .vehicle-list.compact .vc-plan-name { display: inline; }
+    .vehicle-list.compact .vc-driver { max-width: none; font-size: 11.5px; margin-top: 1px; }
+    .vehicle-list.compact .vc-current-stop { font-size: 11.5px; }
 }
 
 .vc-progress-fill {
@@ -523,6 +834,55 @@
 }
 
 /* ── Pinned current-stop card ─────────────────────────────── */
+/* ── Routing restriction banner ───────────────────────────────
+   Three tiers, and they must not look alike: "we checked and it failed" is a
+   different claim from "we checked against a guess", which is different again
+   from "we did not check". */
+.restriction-banner {
+    flex-shrink: 0;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+.restriction-banner strong {
+    display: block;
+    margin-bottom: 2px;
+    font-size: 11.5px;
+}
+
+.restriction-banner span {
+    color: var(--text-secondary);
+}
+
+.restriction-banner.violated {
+    background: rgba(248,81,73,0.12);
+    border-left: 3px solid #f85149;
+}
+
+.restriction-banner.violated strong {
+    color: #f85149;
+}
+
+.restriction-banner.estimated {
+    background: rgba(251,146,60,0.09);
+    border-left: 3px solid #fb923c;
+}
+
+.restriction-banner.estimated strong {
+    color: #fb923c;
+}
+
+.restriction-banner.unchecked {
+    background: rgba(255,255,255,0.04);
+    border-left: 3px solid var(--text-secondary);
+}
+
+.restriction-banner.unchecked strong {
+    color: var(--text-secondary);
+}
+
 .current-stop-card {
     /* Clicking the card locates the stop on the map (see timeline.js). */
     cursor: pointer;
@@ -757,6 +1117,21 @@
     font-size: 10.5px;
 }
 
+/* Undo, not a fourth way forward. Pushed to the right of the row and given a
+   muted outline so it reads as a correction rather than a step in the
+   workflow — it sits next to Advance, which is the button it exists to
+   recover from. */
+.timeline-actions .btn-revert {
+    margin-left: auto;
+    color: var(--text-secondary);
+    border-style: dashed;
+}
+
+.timeline-actions .btn-revert:hover {
+    color: var(--text-primary);
+    border-style: solid;
+}
+
 .tel-link {
     color: var(--accent);
     text-decoration: none;
@@ -800,6 +1175,40 @@
     flex-shrink: 0;
 }
 
+/* ── Proof-of-delivery upload ─────────────────────────────── */
+.timeline-upload-wrap {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+}
+
+.timeline-upload-category {
+    height: 26px;
+    font-size: 10.5px;
+    background: rgba(255, 255, 255, 0.07);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+/* A label wrapping a hidden file input — the whole thing is the target, so
+   it stays a comfortable size for a thumb rather than a 12px hit area. */
+.timeline-upload-btn {
+    height: 26px;
+    padding: 0 10px;
+    font-size: 10.5px;
+    cursor: pointer;
+}
+
+.timeline-upload-status {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
 /* ── Lazy read-only photo gallery ─────────────────────────── */
 .timeline-photos-wrap {
     margin-top: 6px;
@@ -823,6 +1232,49 @@
 .timeline-photos-status {
     font-size: 11px;
     color: var(--text-secondary);
+}
+
+/* ── Phase history log ────────────────────────────────────── */
+.timeline-history-wrap {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+}
+
+.timeline-history-toggle {
+    height: 26px;
+    padding: 0 10px;
+    font-size: 10.5px;
+}
+
+.timeline-history {
+    margin-top: 6px;
+}
+
+.timeline-history-status {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+/* Read down the times first, then across to what changed — the dispatcher's
+   question is almost always "when did this stop become X". */
+.timeline-history-row {
+    display: flex;
+    gap: 8px;
+    font-size: 11px;
+    line-height: 1.6;
+}
+
+.timeline-history-row .th-time {
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    min-width: 42px;
+}
+
+.timeline-history-row .th-move em {
+    color: var(--text-secondary);
+    font-style: normal;
 }
 
 .timeline-photo-thumb {

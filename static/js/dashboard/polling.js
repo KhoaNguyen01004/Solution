@@ -90,12 +90,40 @@ window.DASH = window.DASH || {};
       await runTick();
     },
 
+    // A poll can succeed while the data it carried is not trustworthy — TTAS
+    // returning nothing, or returning positions that match no plate at all.
+    // "The request worked" and "the map is live" are different claims, and
+    // this pill previously made the second one on the strength of the first.
+    // main.js registers a provider that downgrades the 'ok' state in those
+    // cases. With no provider registered, 'ok' means Live exactly as before.
+    okStatusProvider: null,
+
     setStatus(status) {
       const el = document.getElementById('pollStatus');
       if (!el) return;
-      el.className = 'poll-status poll-' + status;
-      const labels = { ok: 'Live', error: 'Error', paused: 'Paused' };
-      el.textContent = labels[status] || status;
+
+      const labels = { ok: 'Live', error: 'Error', paused: 'Paused', degraded: 'Degraded' };
+      let resolvedStatus = status;
+      let resolvedTitle = '';
+
+      if (status === 'ok' && typeof DASH.polling.okStatusProvider === 'function') {
+        try {
+          const override = DASH.polling.okStatusProvider();
+          if (override && override.status) {
+            resolvedStatus = override.status;
+            resolvedTitle = override.title || '';
+            if (override.label) labels[resolvedStatus] = override.label;
+          }
+        } catch (e) {
+          // A broken provider must never take polling's status reporting with
+          // it — that is the failure mode audit F-06 was about.
+          console.error('okStatusProvider failed:', e);
+        }
+      }
+
+      el.className = 'poll-status poll-' + resolvedStatus;
+      el.textContent = labels[resolvedStatus] || resolvedStatus;
+      el.title = resolvedTitle;
     },
   };
 })();

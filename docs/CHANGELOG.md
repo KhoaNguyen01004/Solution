@@ -1,5 +1,1269 @@
 # Changelog
 
+## 2026-08-02 — The driver named in a plan is the driver dispatch shows
+
+Operator report: the plan builder prefills a driver when you pick a vehicle,
+you can type over it, and the dispatch page then ignores what you typed and
+shows the vehicle's usual driver anyway. Drivers swap trucks, so the page was
+naming the wrong man.
+
+### Fixed — the typed name never left the browser
+
+Three things had to line up, and none of them did:
+
+- `vehicle_assignments` could only store a **`driver_id`** into `drivers`.
+- Almost nobody has a `drivers` row. `plan_service.list_drivers` synthesises
+  the rest from `DISTINCT vehicles.current_driver` with **`id: None`**, so the
+  autocomplete happily offers names that cannot be stored as an id — and the
+  prefill path takes exactly those. `driver_id` was therefore usually NULL.
+- `delivery-plan-builder.js` captured the name in `_driverName`, rendered it,
+  and then omitted it from the `POST /api/assignments` body 600 lines later.
+
+So the name was correct on screen at every step and simply never persisted.
+Every reader then fell through to `v.current_driver`.
+
+`vehicle_assignments.driver_name_override` (free text) now holds it, and the
+builder sends it. Precedence everywhere the plan is read is
+**typed name → linked `drivers` row → vehicle default**, expressed once as
+`plan_service.DRIVER_NAME_SQL` for the plan-facing queries and inline in
+`execution_service.get_dashboard_data` and `export_service.day_summary`, whose
+fallback chains differ. The typed name outranks a linked record deliberately:
+both being set means the dispatcher edited a prefilled value, and the edit is
+the newer intent.
+
+**A typed name does not create a `drivers` row** — explicitly asked for, and
+tested. These are stand-ins for one day; promoting them would grow a roster
+nobody maintains, out of what is really a note about that day's work. The
+flip side is that the plan keeps a snapshot: reassigning a truck next week
+does not rewrite who drove it today, which is the property the look-back case
+needs.
+
+The export folder names (`HuynhQuocTrong_79791`) follow the same precedence.
+They had to — a handover folder disagreeing with the dashboard about who drove
+is worse than either answer alone.
+
+### Note — a new column needs the ALTER, not just the schema
+
+`CREATE TABLE IF NOT EXISTS` is a no-op against an existing database, so
+adding a column to `SCHEMA_SQL` alone reaches new databases only and fails at
+query time on the deployed one. `database.py` grew `_ADDED_COLUMNS` and an
+idempotent `_add_missing_columns()`, run from `init_delivery_tables`. Both
+delivery test suites build their schema through that function, so the
+migration is exercised on every run rather than only in production.
+
+### Verification
+
+`pytest tests/` **460** (442 before): `test_delivery.py` +13,
+`test_delivery_routes.py` +5. The route-layer five are not redundant — the
+field was being dropped in the request handler, which the service suite is
+structurally blind to.
+
+New **`tests/js/plan-builder.test.js`**, 10 cases, jsdom, the builder's first
+frontend coverage. It boots the real IIFE over the real template and drives
+the modal through the DOM, because the bug was invisible in any single
+function: capture, render and save were each correct in isolation. Mutation
+check — removing the one added line from the POST body fails 7 of the 10.
+
+`tests/js/dashboard.test.js` is unchanged at 108, but note two of its ETA
+cases are **time-of-day dependent**: run after ~23:13 local, a 47-minute ETA
+crosses midnight and picks up the `+1d` marker the assertions do not expect.
+Pre-existing, unrelated to this change, and worth fixing with an injected
+clock rather than by rerunning in the morning.
+
+## 2026-08-02 — End-of-day export, and a persistent disk
+
+Phase 2 of the proof-of-delivery work, plus the storage fix it depends on.
+
+### Fixed — runtime data was on ephemeral storage
+
+`render.yaml` had no `disk:` block, so everything written at runtime lived on
+the container filesystem and was destroyed on every deploy and restart. Two
+casualties:
+
+- **`routing_system.db`.** `*.db` is gitignored, so it was never shipped in
+  the repo either — `init_db()` simply recreated it empty on each boot.
+- **`DeliveryPlans/`**, the proof photos. A rule that completing a stop needs
+  a photo is worse than useless if the photo is gone next deploy: it looks
+  like it is protecting you.
+
+A 20 GB disk now mounts at `/var/data`, with `DB_PATH` and a new `DATA_DIR`
+pointing at it. `DB_PATH` needed no code change — `config.py` joins it onto
+`BASE_DIR`, and pathlib makes an absolute value replace the base rather than
+append to it.
+
+`image_service.BASE_DIR` became **`DATA_ROOT`**, read from `DATA_DIR` and
+defaulting to the repo for local dev. It is deliberately the *parent* of
+`DeliveryPlans/`, so `relative_path` values already stored
+("DeliveryPlans/2026/…") resolve unchanged. The old name meant "repo root"
+everywhere else in the codebase and "root that uploads hang off" here, which
+was going to mislead someone.
+
+Sizing is deliberate but not permanent: two photos per stop at 2-4 MB puts a
+40-vehicle day near 0.5-1 GB. That is weeks, not years — the export is how
+photos are meant to leave, and exported days should be pruned. Also note a
+service with a disk cannot run more than one instance and loses zero-downtime
+deploys; neither costs anything here, since production is already a single
+synchronous worker.
+
+### Added — `delivery_day_images` for photos that belong to a day
+
+The loading shots (taken the evening before) and each driver's
+empty-container shot never pass through a stop, so they have no `stop_id` to
+hang off. They are handed over during the export itself and live in their own
+table.
+
+Uploads are **one file per request**. `MAX_CONTENT_LENGTH` is 25 MB for a
+whole request, so a day's loading photos could never have been sent as one
+multipart POST — and per-file uploads also mean a failed ZIP download does not
+discard everything just handed over.
+
+### Added — `export_service`, rebuilding the operator's folder shape
+
+Files stay where they are written. The ZIP is assembled into the shape that
+has always been built by hand:
+
+```
+2_8_BacLieuGiaRai_CanThoOMon/
+  HinhThungTrong/                empty containers, driver name in the filename
+  HinhNhanHang_01_08/            loading photos, flat and unsorted
+  HuynhQuocTrong_79791/
+    HinhGiaoHang_02_08/
+      CTOM19/                    unload + door photos
+  manifest.csv
+```
+
+Points worth recording:
+
+- **`strip_accents()` maps `đ`/`Đ` by hand.** Every other Vietnamese
+  diacritic decomposes under NFD and can be dropped, but `đ` is a distinct
+  letter, not d-plus-mark. Missing it is the classic way this produces
+  `NguynVn`. Mutation-checked.
+- The 5-digit plate serial comes from `normalize_plate`, the same reduction
+  the GPS plate matching uses (audit C-03), so the number in the folder is
+  the one the rest of the system agrees on.
+- The top-level folder name is **typed by the operator** — it carries route
+  names that exist nowhere in the data — and is sanitized through the same
+  `_safe_path_segment` as every other user-supplied path component. A test
+  drives `../../etc` through it.
+- Only `unload` and `door` are exported. An `extra` or mistyped category is
+  left out rather than silently filed as proof of something.
+- `HinhNhanHang` sits at the top level, flat. The operator's original tree
+  nested it per driver and per station; sorting at handover was not worth the
+  taps, so this follows the instruction rather than the sample.
+- A missing file on disk is skipped with a warning instead of aborting. A ZIP
+  of everything that survived is more use at 6pm than an error, and the
+  manifest still records what was expected.
+
+The manifest lists every stop, its photo counts, what is missing, and any
+override reason — the only place a waived completion is recorded.
+
+### Added — the End of Day page
+
+`/delivery/export`: pick the date, review which stops are short of proof
+(asked *before* the download, while drivers are still reachable), hand over
+the loading and empty-container photos, name the folder, download. A preview
+of the resulting tree is rendered as the name is typed.
+
+Uploads run sequentially rather than in parallel: production is a single
+synchronous worker, so twenty concurrent uploads would queue anyway while
+starving every other request. The download says it is working, because
+building the ZIP blocks that worker.
+
+**It does not use `ApiClient`.** That helper prefixes `/api` itself and treats
+any response without `success: true` as an error — an envelope the delivery
+API has never used. `static/js/dashboard/api.js` already keeps its own
+wrapper for this reason; this follows the module's real pattern rather than
+bending either contract. Worth knowing before someone "fixes" it.
+
+### Verification
+
+`pytest tests/` **442** (417 before). jsdom **108/108**, unchanged — this
+phase adds a page the dashboard suite does not cover.
+
+Mutation-checked, all three caught: dropping the `đ` special case, trusting
+the typed folder name instead of sanitizing it, and exporting every photo
+category rather than just the two that are proof.
+
+## 2026-08-02 — Completing a stop requires photographic proof
+
+Operator request, phase 1 of two. The end-of-day export is phase 2.
+
+### Added — a stop cannot be completed without proof
+
+`advance_stop()` refuses `arrived → completed` unless the stop carries a
+photo in **both** `PROOF_CATEGORIES` — `unload` (goods off the truck) and
+`door` (the truck shut afterwards). That pair is what a dispute actually
+turns on; either alone leaves half the question open.
+
+Only the final step is gated. Arriving somewhere is not yet a claim about
+what happened there, so there is nothing to prove.
+
+Skip and cancel are **not** gated: they already carry a typed reason, and
+photographing a delivery that never happened is usually impossible.
+
+**Categories are not whitelisted on upload, deliberately.** The route
+sanitizes any category into a safe path segment (audit S-04), and
+`test_traversal_in_category_cannot_escape` depends on an unknown category
+still being *accepted*. Tightening that would trade a tested security
+property for a validation nicety. The consequence falls the safe way: a
+mistyped category can never satisfy the gate.
+
+### Added — an override, because a hard block strands drivers
+
+`override_reason` completes a stop without photos, and the reason is written
+into the phase history added yesterday. A driver with a dead phone must not
+be stuck at a customer's gate, and the realistic alternative to an override
+is somebody photographing their own boot to get on with the day.
+
+A blank or whitespace-only reason is not an override. It would record that
+proof was waived while saying nothing about why — the one thing that makes
+the exception defensible a week later. The event log is the only place this
+lives; nothing on `stop_executions` says "completed without proof", and
+adding a column for it would duplicate the log.
+
+### Added — the upload control that did not exist
+
+`POST /api/stops/<id>/images` has existed and been tested since the module
+was written, but **nothing in the app ever called it** — the dashboard
+gallery is read-only. Each stop now has a category selector and an
+`accept="image/*" capture="environment"` button, which opens the camera
+directly on a phone and degrades to a file picker on a desktop.
+
+It sits in the stop row, not the pinned current-stop card: that card is
+re-rendered by replacing its `innerHTML` whenever its content changes, so a
+poll landing mid-selection would discard the file input and whatever the
+dispatcher had chosen. The row's nodes are stable across polls.
+
+Two details that are invisible until they bite:
+
+- the file input's value is cleared after every attempt, because selecting
+  an identical file twice fires no `change` event — a retry after a failure
+  would otherwise appear to do nothing;
+- uploading invalidates the photo gallery's cache, or the photo just taken
+  would be missing from the panel directly below the button that took it.
+
+### Changed — 422, not 400, for a blocked completion
+
+The request was well formed and the stop was exactly where the client
+thought; it simply is not allowed yet. The response carries
+`proof_required: true` and the list of missing categories, so the dashboard
+recognises the case structurally rather than by matching English — and the
+blocked Advance opens the reason row inline instead of firing a toast the
+dispatcher can only read and dismiss.
+
+`fetchJSON` now attaches `status` and `body` to the Error it throws. Additive:
+every existing `catch (err) { err.message }` is untouched.
+
+### Verification
+
+`pytest tests/` **417** (399 before) — `test_delivery.py` 164,
+`test_delivery_routes.py` 120. jsdom **108/108**.
+
+Sixteen existing tests advanced a stop to completed and now had to supply
+proof. They get a `_give_proof()` helper that inserts image rows directly:
+the gate reads `delivery_stop_images`, not the filesystem, and a test that
+had to write real .jpg files just to reach 'completed' would be re-testing
+the upload path and leaving litter behind. One route test does go through
+the real upload endpoint end to end.
+
+Mutation-checked: accepting a whitespace override, and requiring only one of
+the two categories, each fail their own tests and nothing else.
+
+## 2026-08-01 — Stop phases are recorded, and corrections last the day
+
+Operator request: phases should be stored and reviewable, not merely
+correctable for a moment.
+
+### Added — `stop_status_events`, one row per phase change
+
+`stop_id`, `from_status`, `to_status`, `action` (advance / revert / skip /
+cancel), `reason`, `occurred_at`. It lives in `SCHEMA_SQL`, which runs
+`CREATE TABLE IF NOT EXISTS` on every boot, so no migration script was
+needed.
+
+There is deliberately **no `changed_by`**. The module has no authentication
+(see the 2026-07-31 entry), so that column could only ever be blank, and a
+blank accountability column implies a guarantee this system cannot make.
+Related and worth stating plainly: this is an operational log, not a
+tamper-proof audit trail — anyone with database access can edit both a
+status and its history.
+
+Every write goes through `_record_status_event()` on the **same connection**
+as the UPDATE it describes, and only after that UPDATE reported a rowcount.
+A refused or lost transition therefore leaves no event claiming it happened;
+there is a test asserting exactly that for a rejected stale advance.
+
+`_update_execution()` gained `_event_action`/`_event_reason` and reads the
+prior status on that same connection immediately before the UPDATE, so the
+recorded `from_status` is the one actually replaced rather than whatever the
+caller believed it to be.
+
+**Nothing was backfilled**, per the operator's call. Stops last touched
+before today show an empty log, which is honest; seeding invented history is
+the exact failure a history is meant to prevent.
+
+### Changed — revert returns to the *recorded* phase
+
+`_revert_target()` now prefers the logged `from_status` over the static
+reverse map. The map is kept as a fallback for stops with no history, where
+`skipped`/`cancelled` are still *inferred* from the presence of an
+`actual_arrival_at` — not wrong, just unverifiable, which is why the log
+exists.
+
+**The subtle part is that reverts are excluded from that lookup.** After
+planned → arrived → completed → revert, the newest event landing on
+`arrived` is the revert itself, whose `from_status` is `completed`. Reading
+it would send the next revert *forward*, turning a second undo into a redo.
+`_last_forward_event()` asks "how did this stop legitimately get here", and
+an undo is not how. Mutation-checked: dropping the `action != 'revert'`
+filter fails only that test.
+
+### Changed — the 15-minute window is now the plan's day
+
+A correction is bookkeeping, and bookkeeping is finished at the end of a
+shift, not within a quarter of an hour of the mistake. `can_revert()` now
+takes `plan_date` instead of timestamps: a plan dated today or later is live
+work and stays correctable; once its date has passed the record is closed.
+`REVERT_WINDOW_MINUTES` is gone, and `list_stops` carries `plan_date` so the
+answer stays computable from one row.
+
+Two consequences stated in the docstring and worth repeating:
+
+- `today` comes from the **server** clock, almost certainly UTC, while
+  `plan_date` is a business date typed on Vietnam time (+7). Corrections
+  therefore stay open roughly seven hours into the next local day. That is
+  the lenient direction — a night shift can finish its paperwork — and never
+  the direction that freezes work still in progress. Setting
+  `TZ=Asia/Ho_Chi_Minh` would tighten it, but shifts every *new* timestamp
+  seven hours against those already stored, so it belongs in its own change.
+- A plan with no readable date is **not** correctable. Unknown reads as
+  closed, matching the conservative choice made everywhere else here.
+
+### Added — `GET /api/stops/<id>/history` and an in-stop panel
+
+A **History** toggle on each stop, mirroring the Photos gallery's lazy
+pattern and living outside the diffed content so it survives every poll:
+
+```
+09:14  planned → arrived
+09:31  arrived → completed
+09:32  completed → arrived  (reverted)
+```
+
+One deliberate difference from Photos, which caches forever: this log
+changes every time a button on the stop is pressed, so `handleStopAction()`
+refreshes it while open. A history panel omitting the change you just made
+is worse than no panel. An empty log says so explicitly rather than
+rendering blank, and a failed fetch says *that* — the two must not look
+alike when someone is hunting a missing record.
+
+Note the reason for a skip or cancel now outlives the revert that cleared
+it: the execution row's `cancel_reason` is emptied, but the event keeps it.
+
+### Verification
+
+`pytest tests/` **399** (382 before) — `test_delivery.py` 151,
+`test_delivery_routes.py` 111. jsdom **96/96**.
+
+Both suites' plan fixtures now date plans to *today*. They were hard-coded to
+past dates, which was harmless while nothing depended on the date and would
+silently have put every revert test on the refusal path.
+
+Mutation-checked: making `can_revert()` return True unconditionally fails 4
+tests across both layers; removing the revert filter from the history lookup
+fails the redo test alone.
+
+The pre-existing afternoon-only ETA test noted in the previous entry still
+fails after 12:00 local and passes before it (96/96 under a morning
+timezone). Untouched — still outside scope.
+
+## 2026-08-01 — GPS timestamps are parsed server-side; "GPS stale 4920h"
+
+Reported by the operator: every vehicle on the dashboard warning "GPS stale
+4920h".
+
+### Fixed — TTAS dates were being read month-first in the browser
+
+4920 hours is 205 days, which is exactly 8 January → 1 August. TTAS writes
+`trktime` day-first (`01/08/2026` is 1 August, the Vietnamese convention the
+report scraper in the same file already parses with `%d/%m/%Y`). That string
+was passed to the browser as raw text and handed to `new Date()`, whose
+fallback for non-ISO input is **month-first** — so `01/08` read as 8 January.
+The clock time parsed correctly; only the date flipped, which is why the age
+came out as a round hour count.
+
+The severity depends on the day of the month, and the noisy case was the
+least of it:
+
+| Day | `new Date()` reads | Effect |
+|---|---|---|
+| 1st–11th | wrong date in the past | phantom staleness — the 4920h reported |
+| 12th | 8 December, a *future* date | negative age, so **no flag at all** |
+| 13th–31st | Invalid Date | `isNaN` guard skipped the check — **silence** |
+
+So for roughly two thirds of every month the GPS staleness flag was not
+merely wrong, it was **switched off** — a tracker that genuinely stopped
+reporting raised nothing. The false alarms were visible; that was not.
+
+`ttas_client.parse_ttas_timestamp()` now parses at the boundary and returns
+ISO 8601, or `None` when the value is in no recognised format. One
+implementation, one calendar convention, and a log line naming any shape it
+does not recognise — throttled to one line per distinct value, since 40
+vehicles on a 12-second poll would otherwise write ~200 lines a minute and
+bury it.
+
+`normalize_vehicle()` gains **`last_update_iso`** and leaves `last_update`
+exactly as TTAS wrote it: `static/js/map.js` prints that field verbatim in
+the fleet map popup, and replacing the operator's familiar format with ISO on
+an unrelated page is not this fix's business. Anything computing an *age*
+reads the ISO twin; anything *displaying* the value keeps the raw text.
+
+### Added — "GPS age unknown", a third state
+
+`computeAttention()` previously had two states, and folded "cannot tell" into
+"fine". It now distinguishes:
+
+- position + readable time → fresh, or `gps_stale` as before
+- position + unreadable time → **`gps_time_unknown`**, "GPS age unknown"
+- no position at all → `no_gps`, unchanged
+
+`gps_time_unknown` is capped at WARN and never graded: an unknown age is not
+evidence of a long one, and inferring CRITICAL from ignorance is how an alert
+display loses its credibility. It also suppresses `reported_stopped` for that
+vehicle — that flag asserts "moving at ~0 *right now*", and without a
+trustworthy timestamp there is no "right now" to assert. Like `no_gps`, it is
+silenced during a fleet-wide GPS outage.
+
+The vehicle card shows TTAS's own text when the parse failed, rather than a
+relative time it cannot justify. `_formatTime()` takes `(isoStr, rawStr)` and
+deliberately never falls back to `new Date(rawStr)` — that fallback is the
+bug itself, and there is a test that fails if it is reintroduced.
+
+### The test fixtures were the reason this survived
+
+`TTAS_PAYLOAD` used ISO dates, a format production may never send. Both the
+service and route suites asserted a contract that did not exist — the same
+failure mode as audit T-01/T-02, in the same module. The fixture is now
+day-first, and `makeGps()` in the jsdom suite always emits both fields in the
+shapes the server really produces.
+
+### Verification
+
+`pytest tests/` **382** (363 before). jsdom **89/89** (88 before).
+
+Mutation-checked in both directions: flipping `_TTAS_TIME_FORMATS` to
+month-first fails 6 parser tests; making `computeAttention()` fall back to
+the raw text when the parse is null fails the test written specifically for
+it. That second mutation initially passed, which exposed a real gap — the
+existing cases used values (`13/08/2026`, `sometime`) that are unreadable to
+*both* parsers. The added case uses `01/08/2026`, which the browser will
+happily misread, and is the only one that pins the behaviour down.
+
+### Unrelated pre-existing failure noticed
+
+`tests/js/dashboard.test.js`'s "a route running past midnight" asserts
+`etaClock(36h)` ends in `+1d`. 36 hours from any time at or after 12:00 local
+lands two calendar days out, so the correct answer is `+2d` and the test
+fails every afternoon. Confirmed by running the suite under `TZ=UTC` (05:19,
+88/88) and local `+07` (12:19, 87/88). The code is right, the fixture's 36h
+is not. Left alone — outside this change's scope.
+
+## 2026-08-01 — Advance, Skip and Cancel can be undone
+
+Operator request: dispatchers were mis-tapping Advance on the dashboard.
+
+### Added — a bounded, one-step revert
+
+Advance is a single unconfirmed tap sitting beside Skip and Cancel, on a panel
+used on a phone in a moving vehicle. The double-tap guard added on 2026-07-31
+(audit C-07) stops a mis-tap landing *twice*, but nothing walked back the one
+that did land — the only remedy was editing `stop_executions` by hand.
+
+`execution_service.revert_stop()` steps a stop back one position:
+
+| from | to | cleared |
+|---|---|---|
+| `arrived` | `planned` | `actual_arrival_at` |
+| `completed` | `arrived` | `actual_departure_at`, `completed_at` |
+| `skipped` / `cancelled` | `arrived` if an arrival was recorded, else `planned` | the reason, `completed_at` |
+
+Each transition clears exactly what its forward step wrote, so a reverted stop
+is indistinguishable from one that was never actioned. Leaving a timestamp
+behind would corrupt dwell time the same way C-07 did.
+
+`skipped`/`cancelled` are the interesting pair: nothing records what the stop
+was before it was skipped, but an `actual_arrival_at` can only have been
+written by an advance — so a stop skipped after the driver had already arrived
+returns to `arrived`. Sending it to `planned` would either strand a real
+arrival time on a stop the dashboard calls unvisited, or destroy it.
+
+Guards mirror `advance_stop()` exactly: the optional `expected_status` token
+refuses a revert aimed at a status the stop has since left (409), and
+`AND status = ?` on the UPDATE means two racing requests cannot step back
+twice. Leaving a terminal status calls the new `_reopen_plan()`, the mirror of
+`_maybe_complete_plan()` — without it a corrected plan stays `completed` and
+drops out of the dashboard's active view, hiding the vehicle just fixed.
+
+**The window is 15 minutes, measured from the timestamp of the action being
+undone** — `completed_at`, or `actual_arrival_at` for an arrived stop — and
+deliberately *not* from `updated_at`. A reorder rewrites `updated_at` on every
+stop it renumbers, which would silently re-open the undo on a stop finished
+hours earlier. There is a test for exactly that.
+
+A stop whose reference timestamp is missing is treated as too old rather than
+too fresh. That state can't be produced by `advance_stop()`; unknown age just
+reads conservatively.
+
+### Added — `POST /api/execution/revert`, and `can_revert` on `GET /api/stops`
+
+Same request/response shape as `/execution/advance`, including `conflict: true`
+with 409. Still open, like every other endpoint (see the 2026-07-31 entry).
+
+`GET /api/stops` now stamps a `can_revert` boolean on each stop via
+`execution_service.annotate_revertible()`. The dashboard draws its button from
+that flag rather than recomputing the window in the browser, so the button and
+the endpoint that honours it read one clock; a browser several minutes off
+would otherwise show a button the API refuses. The endpoint re-checks on the
+way in regardless — a stale page can still post.
+
+### Added — Revert button and an Undo toast
+
+`buildActionsHtml()` now takes the stop object rather than `(id, status)` and
+emits a Revert button whenever `can_revert` is set, **including on terminal
+stops**, where it previously returned nothing at all — a stop mis-advanced to
+`completed` is precisely the one that needs it. It routes through the existing
+`handleStopAction()`, inheriting the in-flight guard and the staleness token,
+and is styled as a correction (muted, dashed, pushed right) rather than a
+fourth way forward.
+
+A successful Advance/Skip/Cancel also raises a toast carrying an Undo action
+for 9 seconds, since the mis-tap is usually noticed a beat later, once the
+panel repaints and shows the wrong stop. The undo has to name the status the
+action produced before any refresh could tell it, so that walk is reproduced
+client-side from the status the button was rendered with; when it can't be
+determined the undo goes without a token and the server still refuses anything
+illegal.
+
+`UI.toast()` gained an optional fourth argument (`{actionLabel, onAction}`)
+rendering one inline button. Purely additive — every existing three-argument
+call is untouched. Dismissal now also sets `pointer-events: none`, because the
+node lingers ~350ms for its fade and an invisible-but-clickable Undo was a
+second request at a stop that had already moved.
+
+No keyboard shortcut for undo: `a` (advance) is adjacent, and that adjacency is
+how mis-taps happen in the first place.
+
+### Not done
+
+Reverts are not recorded anywhere — there is no auth (2026-07-31), so an audit
+row could say what changed but never who. Flagged for the operator rather than
+half-built.
+
+### Verification
+
+`pytest tests/` **363** (320 before): `tests/test_delivery.py` 128 (+29),
+`tests/test_delivery_routes.py` 102 (+14). jsdom **77/77** (58 before).
+
+Mutation-checked: dropping `actual_arrival_at = NULL` from the arrived→planned
+UPDATE fails only the timestamp test; making `annotate_revertible()` read
+`status` instead of the `execution_status` alias `list_stops` returns fails
+only the alias test and the route's `can_revert` assertions.
+
+## 2026-07-31 — Ages refresh on a 15s clock; ETA no longer drifts on repaint
+
+Operator request. Frontend only.
+
+### Fixed — displayed ages were only as fresh as the last successful poll
+
+"GPS stale 23m" is computed as `Date.now() - gps.last_update` inside
+`computeAttention()`, which only runs during a render — and renders only happen
+when the 12-second poll returns. A slow or failing poll therefore froze the
+number on screen while the real age kept climbing. The age shown was the age as
+of the last successful network round trip, not now.
+
+A 15-second ticker in `main.js` now calls `DASH.vehicleList.refreshAges()`,
+which repaints only what is derived from the clock: GPS ages, attention
+durations, and the severity tier when a flag crosses a threshold.
+
+**It is not a poll, and it deliberately cannot move the view.** No network, and
+no call into `DASH.map` at all — the surest way to honour "the map view moves
+only in response to a click" (CLAUDE.md, dashboard map conventions) is for this
+path never to reach the map module. There is a test asserting exactly that, and
+mutation-checking confirms it fails if `refreshAges()` is made to touch the map.
+
+It also does not reorder the list. A card moving out from under the pointer
+mid-click is its own kind of snap, so sorting stays on the real poll — at most
+12 seconds away, and a tier change is visible immediately regardless. Card nodes
+are reused, never rebuilt, so hover and scroll survive.
+
+The ticker skips while the tab is hidden, and its body is wrapped so a failure
+there can never take the dashboard down — it is cosmetic.
+
+### Fixed — arrival times crept later on every repaint
+
+Introduced with the clock-time ETA earlier today. `eta_seconds` is measured from
+the moment the server answered, but `UI.etaClock()` was adding it to
+`Date.now()` at render time — so each repaint pushed the arrival further into the
+future. Bounded by the poll interval before, but the 15-second ticker would have
+made it visible: four small forward jumps a minute on a number that should not
+move at all.
+
+`UI.etaClock(seconds, fromMs)` now takes the instant the ETA landed.
+`main.js` stamps `_receivedAt` on the payload as it arrives; `timeline.js` holds
+it at module scope for the current render rather than threading a parameter
+through four functions that do nothing else with it. A missing or malformed
+baseline falls back to `Date.now()` — right on first paint, drifting after, which
+is the old behaviour and never worse than it.
+
+### Verification
+
+jsdom **58/58** (49 before). `pytest tests/` unchanged at 331 — no Python
+touched.
+
+Mutation-checked: making `refreshAges()` call into `DASH.map` fails only the
+map-safety test; ignoring the ETA baseline fails only the drift test.
+
+**One test was deleted rather than kept.** An assertion that the attention strip
+keeps its horizontal scroll position across a tick passed with the preserving
+code removed — jsdom has no layout engine, so `scrollLeft` never resets on an
+`innerHTML` swap. A test that cannot fail is worse than no test; the code stays,
+with a comment recording that confirming it needs a real browser.
+
+## 2026-07-31 — ETA shows time of arrival instead of a countdown
+
+Operator request. Frontend only.
+
+Every ETA on the dispatch dashboard now reads as a clock time — `ETA 14:35`
+rather than `ETA 47 min`. Dispatchers work against the clock: an arrival time is
+directly comparable to a delivery window, a site's closing time or a driver's
+shift end, where a countdown has to be added to the current time first and is
+wrong again by the time you look back at it.
+
+`UI.etaClock()` and `UI.etaRelative()` in `static/js/utils.js`, applied at all
+three render sites — the per-stop timeline detail, the pinned current-stop card,
+and the map info bar. The remaining duration is kept on hover, since "how long
+from now" is still the faster read when the question is whether a driver can fit
+one more drop.
+
+Details worth stating:
+
+- **24-hour format**, explicitly. `14:35` misread as `02:35` is a four-hour
+  dispatch error, and the locale default would have decided this.
+- **A route crossing midnight is marked `+1d`.** Without it, an arrival after
+  midnight renders as a time earlier than now, which reads as "already late"
+  rather than "tomorrow".
+- **A null ETA returns null, not a time.** This is audit L-10's shape: `null / 60`
+  rounded to a confident `0 min` — "arriving now" — for a stop with no
+  coordinates. In clock form the same bug would produce a plausible-looking
+  `14:02`, which is worse, because nothing about it looks wrong. Guarded and
+  mutation-tested: removing the guard fails exactly that test.
+
+jsdom suite **49/49** (42 before). `pytest tests/` unchanged at 331 — no Python
+touched.
+
+## 2026-07-31 — Gross vehicle weights loaded from the fleet spreadsheet (data, not code)
+
+`routing_system.db` updated in place, with permission. Envelope migration
+committed and `gross_weight_kg` populated for 32 of 36 vehicles from
+`DS XE VA TAI XE.xlsx`. No application code changed.
+
+### What the source file actually contained
+
+Two of its columns look like the vehicle envelope and are not, so this was
+checked before anything was written:
+
+- **`KÍCH THƯỚC`** matches `container_configs` exactly for all 32 rows — it is
+  the **cargo box**, already in the database, and unusable for routing.
+- **`THỰC TẾ ĐO` / `Cửa phụ`** are the rear and side door openings, also already
+  stored as `container_features`.
+- **`TT THỰC`** matches `payload_kg` 32/32.
+- **`KLTB`** (khối lượng toàn bộ) exceeds payload on every row by 1.94–7.78 t of
+  kerb weight — which is what makes it gross rather than payload or kerb. This is
+  the only column that was usable, and it is the one that was missing.
+
+Overall length, width, height and axle load are **not in the file** for any
+vehicle. Those still come from type estimates, so `envelope_source` is now
+`"mixed"` for all 32 box trucks and the dashboard banner still reports estimated
+dimensions — correctly, since weight is now real and the three dimensions are not.
+
+### Three vehicles were being routed under the wrong profile
+
+All in the 1.5 t class, where the type estimate (3490 kg) sat just under the
+3500 kg `goods`/`hgv` line and the real weights sit just over it:
+
+| Plate | Estimated | Actual | Was | Now |
+|---|---|---|---|---|
+| 50H-93997 | 3490 kg | 3605 kg | `goods` | `hgv` |
+| 50E-18820 | 3490 kg | 3605 kg | `goods` | `hgv` |
+| 50H-94382 | 3490 kg | 4045 kg | `goods` | `hgv` |
+
+They were being routed as light commercial vehicles and would have been sent past
+`hgv=no` restrictions. Only 50H-93571 (2820 kg) is genuinely `goods`; the whole
+rest of the fleet is `hgv`.
+
+Two label/reality mismatches worth an operator's eye, left as they are because
+the numbers are what routing uses: **50E-19424** is filed "5 Tons" but weighs
+4995 kg gross — lighter than most of the 2.5 t class. **50H-80292** is filed
+"2.5 Tons" at 5675 kg, the heaviest in its class.
+
+### The 4 container tractors were not touched
+
+50H-06136, 51D-48353, 51C-92980 and 51C-72095 carry no dimensions or weights in
+the spreadsheet at all. They remain on `Container` type defaults
+(`envelope_source: "type_default"`).
+
+### How it was applied
+
+- `routing_system.db-journal`, the hot journal left by the earlier aborted write,
+  was removed first. `PRAGMA integrity_check` returned `ok` both before and after.
+- Backup taken before writing.
+- Every value was run through `validate_envelope()` — the same validator the
+  Add/Edit Vehicle form uses — against the cargo figures already in the database,
+  with the script set to refuse a partial write if any row failed. 32 validated,
+  0 refused, no warnings.
+- Each `UPDATE` asserted `rowcount == 1`, so a plate that failed to match would
+  have aborted the transaction rather than silently doing nothing.
+
+After: 32 rows with GVW, 4 without, integrity `ok`, all other table counts
+unchanged (35 container configs, 40 features, 1 plan, 5 assignments, 20 stops,
+20 executions, 323 fuel rows, 13 TLP packages). `pytest tests/` still 331.
+
+`scripts/fill_vehicle_gvw_2026-07-31.sql` holds the equivalent statements for
+reference and for replaying against another environment.
+
+## 2026-07-31 — Vehicle-constrained routing, phase C: restrictions applied, degraded-route path
+
+Dispatch ETAs now route against each vehicle's physical limits. Shipping on
+`type_default` estimates by operator decision — the 36 registration certificates
+are not available, and the release was not held for them. Every route computed
+from an estimate says so on screen.
+
+### Added — restrictions on every delivery routing request
+
+`build_ors_options()` turns a vehicle row into an ORS options dict; `/api/eta`
+resolves it per assignment and threads it through `calculate_etas_for_stops()`.
+`plan_service.get_assignment()` was widened to carry the envelope columns.
+
+**`options.vehicle_type` is decided by gross weight, never by the type label.**
+The labels are payload classes used to categorise the fleet and the real gross
+weights are nothing like them — a "2.5 Tons" truck is about 4990 kg laden. GVW
+≤ 3500 kg → `goods`, above → `hgv`. This was raised because the original mapping
+("1.5–2.5 t → goods, because goods means LCVs under 3.5 tonnes") contained a
+contradiction — the 2.5 t class is over that line — and left "5 Tons" uncovered
+by either rule. Deriving from the number resolves both and self-corrects when
+real certificate data lands.
+
+Unknown gross weight resolves to `hgv`. Wrong towards `goods` puts a truck down a
+road tagged `hgv=no`; wrong towards `hgv` costs a detour. Only one of those is
+recoverable.
+
+Where the seven fleet types currently land, all on estimates:
+
+| Type | GVW estimate | ORS type | Restrictions sent |
+|---|---|---|---|
+| 1.5 Tons | 3490 kg | `goods` | 2.65 m × 1.9 m × 5.3 m, 3.49 t |
+| 2.5 Tons | 4990 kg | `hgv` | 2.9 × 2.0 × 6.2, 4.99 t |
+| 5 Tons | 8500 kg | `hgv` | 3.2 × 2.2 × 7.5, 8.5 t |
+| 8 Tons | 15000 kg | `hgv` | 3.5 × 2.35 × 9.0, 15 t |
+| 9 Tons | 16000 kg | `hgv` | 3.5 × 2.35 × 9.5, 16 t |
+| 10 Tons | 17500 kg | `hgv` | 3.6 × 2.4 × 10.0, 17.5 t |
+| Container | 24000 kg | `hgv` | 3.8 × 2.45 × 11.5, 24 t |
+
+### Added — the degraded-route ladder
+
+Per leg: request with the vehicle's restrictions; on ORS **2009** only, retry
+once with the dimensions dropped; if that also fails, report no route.
+
+- **`avoid_borders` survives both attempts.** `routing.py` reapplies it after
+  every caller, so the border rule is structurally outside what degrades. Asserted
+  on both requests in the test.
+- **`vehicle_type` survives the relaxation too.** Legal access bans are not
+  dimensions — a truck barred by `hgv=no` is still barred when its height is the
+  problem elsewhere. Only the physical limits are relaxed.
+- **A transport failure is never retried as a restriction problem.**
+  `OrsUnavailableError` returns immediately; only `OrsNoRouteError` climbs the
+  ladder. An unrestricted leg does not retry at all — there is nothing to relax
+  and the second call would be wasted against a rate limit `/api/eta` is already
+  close to.
+
+Legs carry `restriction_status`: `compliant`, `violated`, `unrestricted`,
+`unknown`. `unrestricted` and `violated` are kept apart deliberately — "we did not
+check" and "we checked and it failed" are different claims.
+
+### Fixed — the ETA cache would have served routes under superseded specs
+
+`_stops_cache_key()` now includes a stable hash of the active options. An
+assignment's vehicle is fixed, so without it, editing a truck's dimensions would
+keep serving routes computed under the old ones until the process restarted. The
+hash uses sorted keys, so it depends on the values rather than on dict ordering.
+
+### Added — the route says when it cannot be trusted
+
+- **Violated legs render red on the map**, with a white casing beneath so they
+  stay legible on both the satellite and near-white street basemaps — the same
+  two-tone rule the vehicle markers follow. This required splitting the route
+  from one joined polyline into one per leg; `lastRouteKey` now includes the
+  status string, since identical geometry can flip between compliant and violated
+  when a vehicle's specs are edited.
+- **A banner above the timeline** states which of three things is true: legs were
+  routed in violation (red), the route was computed from type estimates rather
+  than the certificate (amber), or nothing was checked at all (grey). It names the
+  vehicle's actual limits.
+- **It does not claim which limit failed.** ORS reports only that no route was
+  found; identifying the culprit means one extra request per restriction per leg.
+  The warning names the limits and says a route respecting them could not be
+  found.
+
+One warning for the whole route, not one per stop: the dispatcher's question is
+"is this route safe for this truck", answered once — the map already shows which
+legs. It also keeps new state out of `_patchStop`'s diffing renderer.
+
+**Not built: a fleet-wide restriction signal in the vehicle list.**
+`/api/execution/dashboard` does no routing, so flagging violations across all 40
+trucks would mean an ORS call per truck per 12-second poll. Restrictions are
+visible for the selected vehicle only.
+
+### Verification
+
+`pytest tests/` — **331 passed** (309 before). Frontend: `node --check` clean,
+jsdom suite **42/42** (34 before).
+
+Mutation-checked:
+
+- `GOODS_GVW_LIMIT_KG = 99999` (everything becomes `goods`) → fails exactly the
+  three vehicle-type tests.
+- `restrictions_fingerprint()` returning a constant → fails exactly the hash test
+  and the cache-invalidation test.
+
+A fixture problem surfaced and was fixed properly: `tests/test_delivery.py` and
+`tests/test_delivery_routes.py` each hand-write a `vehicles` table, and both
+missed the phase B columns, so the widened `get_assignment()` query failed in
+suites unrelated to this change. Both now call `add_vehicle_envelope_columns()`
+rather than restating the column list — a duplicated list drifts silently.
+
+**Still not verified against the live ORS API.** No request has been made from
+here; shapes come from the v9.7.1 spec. First deploy should confirm a known-good
+route still returns a route, and that a restricted request is accepted.
+
+## 2026-07-31 — Vehicle-constrained routing, phase B: envelope schema, form, validation, type fallbacks
+
+Builds the place to put the vehicle data phase C needs. Phase C stays blocked
+until the 36 registration certificates are transcribed — this is the plumbing
+for that, plus a way to see how much of it is still missing.
+
+### Fixed — `pytest tests/` was running migrations against the production database
+
+Found while adding this phase's migration, and much the more serious finding.
+
+`app/config.py` reads `DB_PATH` at **import time**, and `create_app()` then runs
+`init_db()` — schema creation plus every migration in `run_all()` — against
+whatever it resolved. So the first test module to import anything under `app/`
+decided which database the entire session wrote to, and with `DB_PATH` unset,
+`config.py` falls back to `BASE_DIR / "routing_system.db"`: the real database, in
+the repository.
+
+Modules guarding this in their own headers is not enough — it only protects a run
+in which that module is imported first. `tests/test_routing.py`, added in phase A,
+imported `app.services.routing` with no such guard, which was enough for
+`pytest tests/` to point `init_db()` at the live file.
+
+It had been silent because every migration in `run_all()` was a no-op against an
+already-migrated database. Adding one that actually writes to `vehicles` turned it
+into 88 `disk I/O error` failures in `test_delivery_routes.py` — a suite that has
+nothing to do with either change.
+
+`tests/conftest.py` now points `DB_PATH` at a throwaway file before any test
+module is imported. A conftest is imported ahead of the modules beside it, so it
+is the only place the guarantee can be made once, for every test file present and
+future. Unconditional rather than `setdefault`, because an inherited `DB_PATH`
+from a developer's shell is precisely the case being guarded against.
+
+**Data was not lost.** `PRAGMA integrity_check` returns `ok` and every table
+matches its pre-run count (36 vehicles, 35 container configs, 40 features, 1 plan,
+5 assignments, 20 stops, 20 executions, 2 drivers, 323 fuel rows, 13 TLP
+packages). The `ALTER TABLE` never committed — `vehicles` still has its original
+seven columns. A stale `routing_system.db-journal` was left behind; see the note
+at the end.
+
+### Added — vehicle envelope columns
+
+Five nullable columns on `vehicles` via `add_vehicle_envelope_columns()`
+(`app/database/migrations.py`, additive and idempotent, matching the existing
+`PRAGMA table_info` + `ALTER` style):
+
+```
+gross_weight_kg  overall_height_mm  overall_width_mm  overall_length_mm  axle_load_kg
+```
+
+**NULL is a meaningful state and must survive end to end.** It means "unknown",
+which falls back to a type estimate; a `0` would be sent to ORS as a genuine
+restriction and match no road at all. So the form posts `null` rather than `0`
+for a blank field, `coerce_envelope_value()` maps blank/0/negative/garbage to
+`None`, and `to_ors_restrictions()` omits unknown fields from the request instead
+of defaulting them. Tested at each of the three layers, including that clearing a
+previously-set field writes NULL rather than leaving the old value in place.
+
+### Added — validation that catches the mistake this feature exists to prevent
+
+Positive-numeric bounds would not have caught anything that matters. Cargo-box
+figures pasted into envelope fields are all valid positive integers — `1810` is a
+perfectly good height, it is just the wrong 1810 — and they understate the vehicle
+in the direction that routes it under a bridge it hits.
+
+So the blocking rule is **cross-field consistency** against the cargo compartment
+the same form already collects: overall height and length must strictly exceed
+their cargo counterparts, gross weight must exceed payload, overall width must be
+at least cargo width. Entering 50H-36908's cargo numbers as its envelope trips
+three of the four at once.
+
+Width is non-strict by design: a body exactly as wide as its cargo is physically
+possible, so an equal value cannot be called an error. Three flags on one save is
+an unmissable signal regardless. (The route-layer test asserts exactly three, and
+says why — a test written expecting four was wrong, not the validator.)
+
+**Plausibility ranges warn rather than block**, anchored on QCVN 09:2024/BGTVT
+(trucks ≤ 4.0 m tall, ≤ 2.5 m wide, ≤ 12.2 m long). Deliberately not fatal: a hard
+rejection on a legitimate outlier gets the field left empty, and empty falls back
+to a silent estimate. A flagged odd number beats an unflagged guess. The bounds
+are fleet-wide rather than per-type, so a 39 t "2.5 Tons" truck passes — tightening
+that means per-type ranges, which is more machinery than the check is worth.
+
+### Added — per-type fallbacks, and provenance that travels with them
+
+`TYPE_DEFAULTS` in `app/services/vehicle_specs.py` covers all seven types in use
+(1.5/2.5/5/8/9/10 Tons, Container), applied **only** where a vehicle's own column
+is NULL. `resolve_envelope()` returns the envelope and a source:
+`"vehicle"` | `"mixed"` | `"type_default"` | `"none"`.
+
+Every default is asserted to sit inside its own plausible range — a value that
+would warn if typed by hand has no business being the silent fallback — and every
+type in the database is asserted to have one, since a missing type resolves to
+`"none"` and sends no restrictions at all.
+
+### Added — form and table
+
+The Add/Edit Vehicle modal gains a **Vehicle Envelope** group, above and visibly
+separate from **Container Dimensions**, each labelled with what it is ("the whole
+truck" / "the cargo box only") and the envelope group naming the registration
+certificate as its source. Units are mm and kg throughout, matching the existing
+cargo fields; conversion to the metres and tonnes ORS wants happens once, in
+`to_ors_restrictions()`, rather than scattered where a 1000× slip would hide.
+
+The vehicles table gains an **Envelope** column reading the measured dimensions,
+or `Partly estimated` / `Estimated` / `Missing`. Phase B's real cost is
+transcribing 36 certificates, and a gap nobody can see is a gap nobody closes.
+
+Warnings are surfaced as toasts after the success toast, on a longer timeout,
+since the point is a second look rather than a blocked save.
+
+### Verification
+
+`pytest tests/` — **309 passed** (273 before; +25 `tests/test_vehicle_specs.py`,
++11 `tests/test_fleet_routes.py`). Frontend `node --check` clean and the dashboard
+jsdom suite still 34/34.
+
+`test_fleet_routes.py` drives real HTTP because the service suite is structurally
+blind to a validator that is never called or a column that is never written —
+which is where a "validated" form that silently drops its values would live.
+
+The migration was also run twice against a copy of the real database to confirm
+idempotency and that existing rows get NULL rather than 0.
+
+**Left for you: `routing_system.db-journal`.** The aborted write left a hot
+journal beside the database; the sandbox has no permission to delete it, so reads
+from here now fail. On Windows, SQLite should roll it back and remove it
+automatically on the next open — start the app and it will most likely resolve
+itself. If it does not, deleting `routing_system.db-journal` by hand is safe: the
+main file passes `integrity_check` standalone and holds every row.
+
+## 2026-07-31 — Vehicle-constrained routing, phase A: POST migration, border avoidance, failure-mode split
+
+Backend only. Planned in `docs/VEHICLE_ROUTING_PLAN.md`, which records the phases
+deliberately not done here and the one thing blocking them. Phase A needs no
+vehicle data at all, which is why it went first.
+
+### Fixed — advanced routing options were structurally unreachable
+
+Both ORS call sites used the **GET** directions endpoint:
+
+- `app/services/routing.py` — `f"{ORS_BASE_URL}/{profile}"` with
+  `params={"api_key", "start", "end"}`
+- `services/delivery/eta_service.py` — the same shape
+
+`options` is a request **body** parameter, and the ORS docs state plainly that
+the GET form *"does not allow advanced request options"*. So border avoidance and
+the per-vehicle dimension restrictions were not misconfigured — they were
+unreachable over the transport in use. Both now `POST {base}/{profile}/geojson`
+with a JSON body and the key in an `Authorization` header.
+
+The `/geojson` result type returns a FeatureCollection whose feature `properties`
+carry the same `segments` the GET form did, so both parsers read the shape they
+always read. That was verified against the ORS specification before either parser
+was touched, since everything else in this phase sits on top of it.
+
+### Added — `avoid_borders: "all"` on every routing request
+
+This fleet does not leave Vietnam, and a route crossing into Cambodia or Laos is
+wrong however much shorter it is. Applied at **both** call sites (the fleet map
+and dispatch ETAs) — it needs no vehicle data, so there was no reason to phase it.
+
+Unlike the dimension restrictions planned on top of it, this is a graph-level
+constraint in ORS and does not depend on how well roads happen to be tagged in
+OSM.
+
+**The border rule is not droppable by a caller.** In `request_directions()`,
+caller options are merged *first* and `BASE_OPTIONS` applied *last*. Phase C's
+degraded-route retry relaxes the dimension restrictions when no compliant route
+exists; it must not relax this one along with them, and enforcing that in the
+merge order is better than trusting every future call site to remember it.
+
+### Fixed — "no route exists" was indistinguishable from "ORS is broken"
+
+`calculate_eta()` caught every exception into a haversine straight line tagged
+`haversine_fallback`. Once restrictions are on, ORS error **2009** ("route could
+not be found between locations") stops meaning *ORS had a problem* and starts
+meaning *no legal route exists for this vehicle* — the finding the whole feature
+exists to produce. The old code would have buried it as a network hiccup.
+
+It is already reachable today: with `avoid_borders` in force, a destination
+only approachable by leaving the country now answers with 2009.
+
+- ORS reports this as **HTTP 404 with 2009 in the body**, so the response body is
+  parsed *before* the status is judged. `raise_for_status()` first would flatten
+  the finding into an indistinguishable HTTP error.
+- Two exception types: `OrsNoRouteError` (with the ORS code attached) and
+  `OrsUnavailableError`. 2009 and 2010 ("point was not found") raise the first;
+  everything else — transport failure, 5xx, unparseable body — raises the second.
+- `request_directions()` never substitutes a fallback of its own. What to show
+  when there is no route belongs to the caller.
+- ETA legs gained `route_status`: `"ok"` | `"no_route"` | `"unavailable"` |
+  `"not_configured"` | `"no_coordinates"`, carried through `/api/eta`. `source`
+  keeps its existing values, so nothing downstream had to change. **Nothing
+  renders `route_status` yet** — that is phase C4, and it is exposed now so the
+  UI work has something to read.
+- `get_route_coords()` gained a matching `"status"`. Its three original keys are
+  untouched: `app/routes/trips.py` indexes them directly from a background
+  thread with no guard.
+
+### Changed — one ORS transport instead of two
+
+`request_directions()` lives in `app/services/routing.py` and is imported by
+`services/delivery/eta_service.py`. The request shape, the always-on options and
+the error classification now exist once. The import direction follows precedent —
+`execution_service` already imports `app.db`, `tracking_service` already imports
+`app.services.ttas_client`.
+
+`get_routing_profile()` is left as-is despite all three branches returning
+`driving-hgv`: it is the seam where the `vehicle_type` → ORS
+`options.vehicle_type` mapping goes in phase C, and restrictions do nothing at
+all unless that field is set. Commented to say so rather than deleted.
+
+`print()` in the routing error paths became `logger.warning()`, matching
+`eta_service` — these paths now carry information worth having in the Render logs
+rather than only on stdout.
+
+### Not done
+
+Dimension restrictions (height/width/length/weight/axleload). **The data does not
+exist.** All 23 tables were scanned for dimension-like columns; the only matches
+are `container_configs` (the cargo compartment, for the bin-packing planner) and
+`tlp_packages` (the parcels). There is no gross vehicle weight, overall height,
+width, length or axle load anywhere in the schema, and no spreadsheet in the repo
+holding them.
+
+Cargo-box numbers are not substitutes and fail in the dangerous direction — a
+2.35 m cargo box sits on a truck well over 3 m tall, and `payload_kg` excludes
+the whole kerb weight. Feeding them to ORS would produce routes that look
+height-checked and are not. See `docs/VEHICLE_ROUTING_PLAN.md` §3.
+
+### Verification
+
+`pytest tests/` — **273 passed** (254 before; +15 in the new `tests/test_routing.py`,
++4 in `tests/test_delivery.py`).
+
+`tests/test_routing.py` covers the transport directly: the POST target and
+headers, `avoid_borders` present on every request, a caller being unable to drop
+it, the 2009/2010 → no-route split, 5xx and transport failures → unavailable, a
+200 with no features, an unparseable body, and `get_route_coords` still returning
+the three keys `trips.py` indexes on every failure path.
+
+The two `eta_service` tests that patched `requests.get` now patch
+`app.services.routing.requests.post`, and four were added for the new statuses.
+
+Mutation-checked, both ways:
+
+- `BASE_OPTIONS = {}` → fails exactly the three `avoid_borders` tests.
+- `NO_ROUTE_CODES = ()` → fails exactly the five no-route tests.
+
+Nothing else moves in either case, so these tests measure what they claim to.
+
+**Not verified against the live ORS API.** No request was made — the API key is
+in `.env`, which is not read. The request and response shapes come from the ORS
+v9.7.1 specification. First real deployment should confirm a known-good route
+still returns a route.
+
+## 2026-07-31 — Dispatch board UX, phase 0: GPS trust, graded severity, density, quick filters, keyboard
+
+Frontend-only. No schema change, no API change, no Python touched. Planned in
+`docs/DISPATCH_UX_PLAN.md`, which also records the phases deliberately *not* done
+here and why. Reference practice was taken from emergency dispatch (CAD),
+electronic flight strips in air traffic control, and Endsley's situation-awareness
+model; the recurring lesson from all three is that severity has to be perceivable
+without being read, and that alerts which cannot be ranked stop being useful.
+
+### Fixed — the "Live" pill made a claim it had not checked
+
+`/api/execution/dashboard` has always returned `gps_source`, `gps_error`,
+`gps_matched` and `gps_available`. The comment beside them in
+`services/delivery/routes.py` says exactly why: *"so the dashboard can show a
+degraded-GPS badge instead of a green Live pill over an empty map, which is what
+let C-01 go unnoticed for the module's entire life."* Nothing in `static/` read
+any of the four — `main.js` took `data.assignments` and dropped the rest. The
+backend half of that fix shipped; the frontend half never did, so the header went
+on reporting "Live" whenever the *request* succeeded, regardless of whether a
+single position had matched a plate.
+
+"The request succeeded" and "the map is live" are separate claims. `polling.js`
+now resolves the second through an optional `okStatusProvider` hook, which
+`main.js` registers before the first tick. Precedence, worst first:
+
+| Condition | Pill | Class |
+|---|---|---|
+| `gps_error` set | `GPS down` + the message on hover | `poll-gpsdown` |
+| no assignments carry a plate | `Live` | `poll-ok` |
+| `gps_available === 0` | `No GPS` | `poll-gpsdown` |
+| `gps_matched === 0`, positions present | `GPS 0/N` + "check plate formats" | `poll-gpsdown` |
+| `gps_matched <` plates on the board | `GPS n/N` | `poll-degraded` |
+| otherwise | `Live` | `poll-ok` |
+
+The zero-matched case is styled as loudly as an outright request failure on
+purpose: a map covered in positions that belong to nobody is worse than an empty
+one, because it looks correct. An empty board is explicitly *not* a fault — the
+denominator is assignments carrying a plate, not the assignment count, so a
+dashboard with nothing on it still reads Live.
+
+Per-vehicle, a card with no position at all rendered an empty GPS line,
+indistinguishable from a fresh fix. It now reads `No GPS` in amber, and raises a
+`no_gps` attention flag — suppressed when the outage is fleet-wide, since forty
+identical chips is not triage and the header already tells that story once.
+
+### Fixed — "Attention first" sorted by the wrong key
+
+`vehicle-list.js` sorted on `attention[].length`: the *count* of flags. A vehicle
+with three fresh mild flags therefore outranked one that had been stuck for three
+hours — the sort inverted precisely in the case it exists for. It now orders by
+worst severity, then by how long the worst flag has been standing, then by count.
+
+### Changed — attention severity is graded, not binary
+
+The three proxies (stuck at a stop, stale GPS, reporting ~0 km/h while not at a
+stop) all latched on at their threshold and rendered as the same dot for ever
+after. `computeAttention()` now returns `{reason, ageMs, severity}` with severity
+derived from `ageMs / threshold`: WARN at 1×, CRITICAL at 2×. Thresholds are
+unchanged (20 min stuck, 15 min GPS).
+
+- `reported_stopped` is capped at WARN and never graded. The existing comment is
+  right that one reading can be a red light, so it must not reach CRITICAL alone.
+- Tiers carry hue *and* weight *and* size (critical dots are larger, critical
+  plates underlined). Hue alone would be invisible to a red-weak dispatcher, and
+  this panel is read at a glance for a full shift.
+- Cards take a coloured left border rather than a background tint — background
+  already carries hover and selection, and a third meaning on it made a selected
+  card with a problem unreadable.
+- The strip caps at 8 chips with a `+N more` chip that switches on Attention-first
+  rather than growing without limit. It is sorted worst-first independently of the
+  list, since it is the triage surface even when the list below it is not.
+
+Still true, and still the ceiling on all of this: **no stop carries a planned
+time**, so none of these proxies can detect a truck that is simply behind while
+driving normally. They all detect symptoms of having stopped. That is phase 1.
+
+### Added — compact density for the vehicle list
+
+36 box trucks plus 4 containers, in a 280px column, at five lines per card: about
+eight visible at once, which defeats the point of a fleet board. A `compact`
+toggle in the left panel header collapses each card to a single row (~20+
+visible), persisted to `localStorage` alongside the basemap choice.
+
+Implemented as a stylesheet change and nothing else — `display: contents` on the
+two wrapper divs promotes their children into the card's own flex row, so the card
+markup and the diffing patch in `_patchCard` are untouched. That diffing render is
+load-bearing for scroll and hover preservation and had no business being near a
+density change. On phones the binding constraint is tap-target size rather than
+row count, so compact is explicitly a no-op below 768px.
+
+### Changed — quick filters in front, field filters behind a disclosure
+
+The header carried branding, seven nav items, five filter controls, poll status,
+three buttons and two dropdowns, wrapping at narrower widths. None of the five
+filters expressed a dispatcher intent.
+
+A chip row — All / Needs attention / Executing / No GPS — now sits where the
+fields were; clicking the active chip clears it, so the row is its own off switch.
+The five fields moved into a disclosure behind a **Filters** button, keeping their
+ids, values and event bindings unchanged. The button carries a count badge, so a
+filter left set inside a closed panel cannot quietly explain away an empty list.
+The panel is fixed-width with wrapping fields rather than one long row, so its
+footprint is predictable at any header width; it flips to right-anchored below
+768px for the same reason the Plans panel clamps.
+
+### Added — keyboard navigation
+
+A shift is eight hours of this board and every interaction was a mouse click.
+
+| Key | Action |
+|---|---|
+| `j` / `k` | move the focus ring down / up the filtered list |
+| `Enter` | open the focused vehicle |
+| `Esc` | close the disclosure, or clear the selection |
+| `/` | open Filters and focus the plate field |
+| `a` | advance the current stop |
+| `f` | toggle Follow |
+| `r` | refresh now |
+
+- **`j`/`k` move a focus ring only; they do not select.** Selection fires three
+  requests and a map zoom, so holding `j` down a 40-vehicle list would issue one
+  set per vehicle. `Enter` commits. The ring is an outline where selection is a
+  filled accent, so a card can legibly be both.
+- Shortcuts are suppressed while focus is in an input, select, textarea or
+  contenteditable, and while a skip/cancel reason row is open — `timeline.js`
+  exposes `hasOpenReasonRow()` over the set that already suppresses background
+  patching for those rows, rather than tracking open state twice. Without the
+  first guard, typing a plate containing `a` or `f` would advance a stop and
+  toggle Follow mid-search.
+- `Esc` is the one key that works *from* a field, since escaping a filter box is
+  the point of pressing it.
+- `a` synthesises a click on the real Advance button rather than calling the API,
+  so the in-flight guard, the `expected_status` staleness check and the disabled
+  state all apply unchanged and cannot drift from the button's behaviour.
+- Modifier combinations are left to the browser.
+- Escape's deselect needed a `deselectAssignment()`; it is not expressible as
+  `selectAssignment(null)`, which would unconditionally fire the three detail
+  requests and a map zoom for a null id.
+
+### Verification
+
+`tests/js/dashboard.test.js` — 34 jsdom drives of the real modules against the
+real template (loaded from disk with its `<script>` tags stripped, so an id
+renamed in the HTML but not the JS fails the suite). Covers the GPS badge
+precedence table, severity grading and the sort inversion, the quick filters, the
+keyboard guards, and regression guards on card-node reuse and compact mode not
+touching card markup.
+
+Mutation-checked: restoring the old count-based sort fails
+*"Attention-first puts a 3h stuck above three fresh mild flags"* and nothing else,
+so that test measures what it claims to.
+
+The drive also caught an unguarded `card.scrollIntoView()` in the focus-ring
+code — now behind a `typeof` check, since scrolling is a nicety and moving the
+ring is not.
+
+`node --check` clean on all six dashboard modules. `pytest tests/` — 254 passed,
+unchanged, as expected for a change that touches no Python.
+
+jsdom is a dev-only dependency and is deliberately not vendored; the header of the
+test file documents how to run it.
+
 ## 2026-07-31 — Removed dispatcher authentication; stop reordering on the dashboard; Plans panel positioning
 
 Three operator-requested changes to the delivery/dispatch module.

@@ -20,6 +20,7 @@
                 <a href="/" class="btn-nav">Map</a>
                 <a href="/delivery/dashboard" class="btn-nav active">Dispatch</a>
                 <a href="/delivery/new" class="btn-nav">Plan Builder</a>
+                <a href="/delivery/export" class="btn-nav">End of Day</a>
                 <a href="/locations" class="btn-nav">Locations</a>
                 <a href="/truck-load-planner" class="btn-nav">Load Planner</a>
                 <div class="nav-dropdown" style="position:relative;">
@@ -32,30 +33,44 @@
                     </div>
                 </div>
             </nav>
-            <div class="dashboard-filters">
-                <div class="filter-group">
-                    <label for="filterPlan">Plan</label>
-                    <select id="filterPlan"><option value="">All Plans</option></select>
+            <div class="header-filters">
+                <!-- Dispatcher intents, not fields. The five field filters below
+                     still exist and still work — they just no longer occupy the
+                     first reach for the cases that come up every few minutes. -->
+                <div class="quick-filters" id="quickFilters">
+                    <button type="button" class="quick-chip active" data-quick="">All</button>
+                    <button type="button" class="quick-chip" data-quick="attention">Needs attention</button>
+                    <button type="button" class="quick-chip" data-quick="executing">Executing</button>
+                    <button type="button" class="quick-chip" data-quick="nogps">No GPS</button>
                 </div>
-                <div class="filter-group">
-                    <label for="filterDate">Date</label>
-                    <input type="date" id="filterDate">
-                </div>
-                <div class="filter-group">
-                    <label for="filterVehicle">Vehicle</label>
-                    <input type="text" id="filterVehicle" placeholder="Search plate...">
-                </div>
-                <div class="filter-group">
-                    <label for="filterDriver">Driver</label>
-                    <input type="text" id="filterDriver" placeholder="Search driver...">
-                </div>
-                <div class="filter-group">
-                    <label for="filterStatus">Status</label>
-                    <select id="filterStatus">
-                        <option value="">All</option>
-                        <option value="confirmed">Confirmed</option>
-                        <option value="executing">Executing</option>
-                    </select>
+                <div class="filters-wrap">
+                    <button type="button" class="btn-nav" id="filtersToggleBtn" title="Plan, date, vehicle, driver, status filters">Filters<span class="filters-badge" id="filtersActiveCount" style="display:none;"></span></button>
+                    <div class="dashboard-filters" id="dashboardFilters">
+                        <div class="filter-group">
+                            <label for="filterPlan">Plan</label>
+                            <select id="filterPlan"><option value="">All Plans</option></select>
+                        </div>
+                        <div class="filter-group">
+                            <label for="filterDate">Date</label>
+                            <input type="date" id="filterDate">
+                        </div>
+                        <div class="filter-group">
+                            <label for="filterVehicle">Vehicle</label>
+                            <input type="text" id="filterVehicle" placeholder="Search plate...">
+                        </div>
+                        <div class="filter-group">
+                            <label for="filterDriver">Driver</label>
+                            <input type="text" id="filterDriver" placeholder="Search driver...">
+                        </div>
+                        <div class="filter-group">
+                            <label for="filterStatus">Status</label>
+                            <select id="filterStatus">
+                                <option value="">All</option>
+                                <option value="confirmed">Confirmed</option>
+                                <option value="executing">Executing</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div class="header-right">
@@ -86,10 +101,14 @@
         <aside class="dashboard-left" id="leftPanel">
             <div class="panel-header">
                 <h2>Vehicles</h2>
-                <label class="attention-sort-toggle" for="attentionFirstToggle">
-                    <input type="checkbox" id="attentionFirstToggle"> Attention first
+                <label class="attention-sort-toggle" for="attentionFirstToggle" title="Sort by worst problem first">
+                    <input type="checkbox" id="attentionFirstToggle"> Attention
+                </label>
+                <label class="attention-sort-toggle" for="compactModeToggle" title="One line per vehicle — fits the whole fleet on screen">
+                    <input type="checkbox" id="compactModeToggle"> Compact
                 </label>
                 <span id="vehicleCount" class="panel-count"></span>
+                <span class="kbd-hint" title="j / k — move down / up the list&#10;Enter — open the focused vehicle&#10;Esc — close, or clear the selection&#10;/ — search by plate&#10;a — advance the current stop&#10;f — toggle Follow&#10;r — refresh now">⌨</span>
             </div>
             <div class="attention-strip" id="attentionStrip" style="display:none;"></div>
             <div class="vehicle-list" id="vehicleList">
@@ -133,6 +152,7 @@
                 <span id="stopCount" class="panel-count"></span>
                 <button class="btn-nav timeline-close" id="timelineCloseBtn" title="Close timeline" style="display:none;">&#x2715;</button>
             </div>
+            <div class="restriction-banner" id="restrictionBanner" style="display:none;"></div>
             <div class="current-stop-card" id="currentStopCard" style="display:none;"></div>
             <div class="timeline" id="timeline">
                 <div class="empty-state">Select a vehicle to view stops</div>

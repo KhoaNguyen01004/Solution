@@ -12,9 +12,11 @@ the same way the original `global fleet_session` was visible to every
 function within the single app.py module.
 """
 import json
+import logging
 import os
 import re
 import time
+from datetime import datetime as _dt
 
 import requests
 from bs4 import BeautifulSoup
@@ -22,9 +24,79 @@ from bs4 import BeautifulSoup
 from app import config, state
 from app.utils.geo import safe_float, clean_text
 
+logger = logging.getLogger(__name__)
+
 
 class LiveVehicleFetchError(Exception):
     pass
+
+
+#: Accepted shapes for a TTAS position timestamp, tried in order.
+#:
+#: TTAS is day-first (``01/08/2026`` is 1 August), the same convention the
+#: report scraper below already parses with ``%d/%m/%Y``. The ISO forms are
+#: kept as a defensive fallback — they cost nothing and the test fixtures
+#: have always used them.
+_TTAS_TIME_FORMATS = (
+    "%d/%m/%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M",
+    "%d/%m/%Y",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
+)
+
+#: Distinct unparseable values already logged. Bounded, because the fleet is
+#: 40 vehicles polled every 12 seconds — logging each failure as it happens
+#: would write ~200 lines a minute and bury everything else. One line per
+#: shape is enough to identify a format change.
+_unparsed_timestamps_seen = set()
+_UNPARSED_LOG_LIMIT = 20
+
+
+def parse_ttas_timestamp(value):
+    """Parse a TTAS position timestamp into an ISO 8601 string.
+
+    Returns ``None`` when the value is empty or in no recognised format —
+    "I cannot tell how old this is", which callers must render as its own
+    state rather than folding into either "fresh" or "no position".
+
+    This exists because ``trktime`` used to be handed to the browser as raw
+    text and parsed there by ``new Date()``, whose non-ISO fallback is
+    **month-first**. On a day-first value that silently swapped the date:
+
+      - on the 1st of August, ``01/08/2026`` read as 8 January, so every
+        vehicle reported its GPS ~205 days stale (4920h);
+      - on the 12th, ``12/08/2026`` read as 8 December — a date in the
+        *future*, giving a negative age and therefore no warning at all;
+      - from the 13th, ``13/08/2026`` has no month 13 and parsed as Invalid
+        Date, which the dashboard's ``isNaN`` guard skipped in silence — so
+        for two thirds of every month **staleness detection was simply off**,
+        and a dead tracker raised nothing.
+
+    Parsing server-side means one implementation, one calendar convention,
+    and a log line when TTAS sends something new — instead of every consumer
+    re-deriving it from a locale-dependent browser default.
+    """
+    text = clean_text(value or "")
+    if not text:
+        return None
+
+    for fmt in _TTAS_TIME_FORMATS:
+        try:
+            return _dt.strptime(text, fmt).isoformat()
+        except ValueError:
+            continue
+
+    if len(_unparsed_timestamps_seen) < _UNPARSED_LOG_LIMIT and text not in _unparsed_timestamps_seen:
+        _unparsed_timestamps_seen.add(text)
+        logger.warning(
+            "Unrecognised TTAS timestamp format: %r — GPS age cannot be computed "
+            "for vehicles reporting it. Add the format to _TTAS_TIME_FORMATS.",
+            text,
+        )
+    return None
 
 
 def create_fleet_session():
@@ -156,7 +228,13 @@ def normalize_vehicle(raw):
         "latitude": safe_float(raw.get("latitude")),
         "longitude": safe_float(raw.get("longitude")),
         "speed_status": speed,
+        # last_update stays exactly as TTAS wrote it — static/js/map.js prints
+        # it verbatim in the fleet map popup, and swapping the operator's
+        # familiar format for ISO there is not this fix's business. Anything
+        # doing *arithmetic* on the time reads last_update_iso instead, which
+        # is None when the value could not be understood.
         "last_update": clean_text(raw.get("trktime", raw.get("time", ""))),
+        "last_update_iso": parse_ttas_timestamp(raw.get("trktime", raw.get("time", ""))),
         "car_type": clean_text(raw.get("car_type", raw.get("tenloaihinh", ""))),
         "position": clean_text(raw.get("position", "")),
         "status": status,

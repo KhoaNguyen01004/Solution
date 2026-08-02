@@ -99,6 +99,7 @@ function renderTable() {
             <td>${v.vehicle_type ? `<span class="type-badge">${UI.escapeHtml(v.vehicle_type)}</span>` : '<span style="color:#94a3b8;">—</span>'}</td>
             <td>${v.current_driver ? UI.escapeHtml(v.current_driver) : '<span style="color:#94a3b8;">—</span>'}</td>
             <td>${v.cargo_length_mm ? `<span class="container-badge">${v.cargo_length_mm}×${v.cargo_width_mm}×${v.cargo_height_mm} mm</span>` : '<span style="color:#94a3b8;">—</span>'}</td>
+            <td>${envelopeBadge(v)}</td>
             <td><div style="display:flex;gap:6px;">
                 <button class="btn-action btn-edit" onclick="openModal('${UI.escapeHtml(v.plate_number)}')">&#9998; Edit</button>
                 <button class="btn-action btn-delete" onclick="deleteVehicle(${v.id}, '${UI.escapeHtml(v.plate_number)}')">&#128465;</button>
@@ -106,6 +107,27 @@ function renderTable() {
         </tr>`;
     }).join('');
     updateBulkDeleteButton();
+}
+
+// Which trucks still have no routing envelope of their own. Phase B's real
+// cost is transcribing 36 registration certificates, and a gap nobody can see
+// is a gap nobody closes — so the estimate is labelled as an estimate here
+// rather than quietly standing in for a measurement.
+function envelopeBadge(v) {
+    const source = v.envelope_source || 'none';
+    if (source === 'vehicle') {
+        const dims = [v.overall_length_mm, v.overall_width_mm, v.overall_height_mm];
+        const size = dims.every(Boolean) ? `${dims.join('×')} mm` : 'partial';
+        const gvw = v.gross_weight_kg ? ` · ${v.gross_weight_kg} kg` : '';
+        return `<span class="container-badge">${UI.escapeHtml(size + gvw)}</span>`;
+    }
+    if (source === 'mixed') {
+        return '<span class="type-badge" title="Some values come from the vehicle type estimate">Partly estimated</span>';
+    }
+    if (source === 'type_default') {
+        return '<span class="type-badge" title="No envelope recorded for this vehicle — routing uses an estimate for its type">Estimated</span>';
+    }
+    return '<span style="color:#f87171;" title="No envelope, and no estimate for this vehicle type">Missing</span>';
 }
 
 function filterTable(q) {
@@ -154,6 +176,42 @@ function buildFeaturesFromForm() {
         });
     }
     return features;
+}
+
+// The vehicle envelope. Blank must round-trip as blank: an empty field means
+// "unknown", which falls back to a type estimate, whereas a 0 would be sent to
+// the router as a real limit. `|| ''` rather than `|| 0` for exactly that.
+const ENVELOPE_FIELD_IDS = {
+    overall_length_mm: 'field-env-length',
+    overall_width_mm: 'field-env-width',
+    overall_height_mm: 'field-env-height',
+    gross_weight_kg: 'field-env-gvw',
+    axle_load_kg: 'field-env-axle',
+};
+
+function populateEnvelopeFields(data) {
+    Object.entries(ENVELOPE_FIELD_IDS).forEach(([key, id]) => {
+        const el = document.getElementById(id);
+        if (el) el.value = data[key] || '';
+    });
+}
+
+function resetEnvelopeFields() {
+    Object.values(ENVELOPE_FIELD_IDS).forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+    });
+}
+
+function envelopeFromForm() {
+    const out = {};
+    Object.entries(ENVELOPE_FIELD_IDS).forEach(([key, id]) => {
+        const raw = (document.getElementById(id)?.value || '').trim();
+        // null, not 0 — the server keeps the distinction all the way to the
+        // ORS request, where an unknown restriction is omitted rather than sent.
+        out[key] = raw === '' ? null : parseInt(raw, 10);
+    });
+    return out;
 }
 
 function populateContainerFields(data) {
@@ -226,6 +284,10 @@ function openModal(plate) {
             plateField.value = v.plate_number;
             typeField.value = v.vehicle_type || '';
             driverField.value = v.current_driver || '';
+            // From the vehicle row, not the container-config fetch below —
+            // the envelope lives on `vehicles`, and that fetch returns only
+            // cargo-compartment data.
+            populateEnvelopeFields(v);
             if (v.container_config_id) {
                 populateContainerFields(v);
                 fetch(`/api/tlp/container-configs/${v.container_config_id}`)
@@ -241,6 +303,7 @@ function openModal(plate) {
     } else {
         plateField.value = ''; typeField.value = ''; driverField.value = '';
         resetContainerFields();
+        resetEnvelopeFields();
     }
     attachPreviewListeners();
     document.getElementById('modal-overlay').classList.add('open');
@@ -263,21 +326,29 @@ async function saveVehicle() {
         cargo_width_mm: parseFloat(document.getElementById('field-cc-width').value) || 0,
         cargo_height_mm: parseFloat(document.getElementById('field-cc-height').value) || 0,
         payload_kg: parseFloat(document.getElementById('field-cc-payload').value) || 0,
+        ...envelopeFromForm(),
         features: buildFeaturesFromForm(),
     };
     try {
+        let result;
         if (editingId) {
-            await ApiClient.fetch(`/fleet/vehicles/${editingId}`, {
+            result = await ApiClient.fetch(`/fleet/vehicles/${editingId}`, {
                 method: 'PUT',
                 body: JSON.stringify(body),
             });
         } else {
-            await ApiClient.fetch('/fleet/vehicles', {
+            result = await ApiClient.fetch('/fleet/vehicles', {
                 method: 'POST',
                 body: JSON.stringify(body),
             });
         }
         UI.toast(`Vehicle ${editingId ? 'updated' : 'created'}`, 'success');
+        // Implausible-but-saved envelope values. Shown after the success toast
+        // and left on screen longer, because the point is a second look rather
+        // than a blocked save — see app/services/vehicle_specs.py.
+        (result?.warnings || []).forEach((w, i) => {
+            setTimeout(() => UI.toast(w, 'error', 8000), 400 * (i + 1));
+        });
         closeModal();
         await loadVehicles();
     } catch (err) { UI.toast(err.message, 'error'); }

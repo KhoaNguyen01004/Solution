@@ -9,8 +9,41 @@ import sqlite3
 from flask import Blueprint, jsonify, render_template, request
 
 from app import config
+from app.services.vehicle_specs import (
+    ENVELOPE_FIELDS,
+    coerce_envelope_value,
+    resolve_envelope,
+    validate_envelope,
+)
 
 bp = Blueprint("fleet", __name__)
+
+
+def _envelope_from_request(data):
+    """Envelope values off the request body, blanks preserved as None."""
+    return {field: coerce_envelope_value(data.get(field)) for field in ENVELOPE_FIELDS}
+
+
+def _cargo_from_request(data):
+    """Cargo figures from the same payload, for the consistency checks.
+
+    Only what the request itself carries — the form posts the cargo group and
+    the envelope group together, so a mismatch is caught at the moment it is
+    introduced rather than on some later read.
+    """
+    return {
+        "cargo_length_mm": coerce_envelope_value(data.get("cargo_length_mm")),
+        "cargo_width_mm": coerce_envelope_value(data.get("cargo_width_mm")),
+        "cargo_height_mm": coerce_envelope_value(data.get("cargo_height_mm")),
+        "payload_kg": coerce_envelope_value(data.get("payload_kg")),
+    }
+
+
+def _envelope_assignments(envelope):
+    """(sql_fragment, params) for the envelope columns of an UPDATE/INSERT."""
+    columns = list(ENVELOPE_FIELDS)
+    fragment = ", ".join(f"{col}=?" for col in columns)
+    return fragment, [envelope[col] for col in columns]
 
 
 @bp.route("/vehicle-management")
@@ -45,6 +78,12 @@ def api_vehicles_list():
             )
         rows = [dict(r) for r in c.fetchall()]
         conn.close()
+        # `envelope_source` lets the vehicles table show which trucks still
+        # have no routing envelope of their own. Phase B's real cost is data
+        # entry across 36 vehicles, and a gap nobody can see is a gap nobody
+        # closes (docs/VEHICLE_ROUTING_PLAN.md B4).
+        for row in rows:
+            _, row["envelope_source"] = resolve_envelope(row)
         return jsonify({"success": True, "data": rows})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
@@ -59,11 +98,20 @@ def api_vehicles_create():
         driver = (data.get("current_driver") or "").strip()
         if not plate:
             return jsonify({"success": False, "message": "Plate number is required"}), 400
+
+        envelope = _envelope_from_request(data)
+        errors, warnings = validate_envelope(envelope, _cargo_from_request(data))
+        if errors:
+            return jsonify({"success": False, "message": errors[0], "errors": errors}), 400
+
         conn = sqlite3.connect(config.DB_PATH)
         c = conn.cursor()
+        envelope_cols = ", ".join(ENVELOPE_FIELDS)
+        envelope_marks = ", ".join("?" for _ in ENVELOPE_FIELDS)
         c.execute(
-            "INSERT INTO vehicles (plate_number, vehicle_type, current_driver) VALUES (?, ?, ?)",
-            (plate, vtype, driver)
+            f"INSERT INTO vehicles (plate_number, vehicle_type, current_driver, {envelope_cols}) "
+            f"VALUES (?, ?, ?, {envelope_marks})",
+            (plate, vtype, driver, *[envelope[f] for f in ENVELOPE_FIELDS])
         )
         vehicle_id = c.lastrowid
         # Create container config if dimensions provided
@@ -86,9 +134,17 @@ def api_vehicles_create():
             c.execute("UPDATE vehicles SET container_config_id = ? WHERE id = ?", (cc_id, vehicle_id))
         conn.commit()
         conn.close()
-        return jsonify({"success": True, "message": "Vehicle created", "vehicle": {
-            "id": vehicle_id, "plate_number": plate, "vehicle_type": vtype, "current_driver": driver
-        }})
+        return jsonify({
+            "success": True,
+            "message": "Vehicle created",
+            # Non-blocking: the value was saved. Surfaced so an odd number gets
+            # a second look instead of being silently accepted.
+            "warnings": warnings,
+            "vehicle": {
+                "id": vehicle_id, "plate_number": plate,
+                "vehicle_type": vtype, "current_driver": driver, **envelope,
+            },
+        })
     except sqlite3.IntegrityError:
         return jsonify({"success": False, "message": "Vehicle with that plate number already exists"}), 409
     except Exception as e:
@@ -128,11 +184,19 @@ def api_vehicles_update(vehicle_id):
         driver = (data.get("current_driver") or "").strip()
         if not plate:
             return jsonify({"success": False, "message": "Plate number is required"}), 400
+
+        envelope = _envelope_from_request(data)
+        errors, warnings = validate_envelope(envelope, _cargo_from_request(data))
+        if errors:
+            return jsonify({"success": False, "message": errors[0], "errors": errors}), 400
+
         conn = sqlite3.connect(config.DB_PATH)
         c = conn.cursor()
+        envelope_fragment, envelope_params = _envelope_assignments(envelope)
         c.execute(
-            "UPDATE vehicles SET plate_number=?, vehicle_type=?, current_driver=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-            (plate, vtype, driver, vehicle_id)
+            "UPDATE vehicles SET plate_number=?, vehicle_type=?, current_driver=?, "
+            f"{envelope_fragment}, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (plate, vtype, driver, *envelope_params, vehicle_id)
         )
         if c.rowcount == 0:
             conn.close()
@@ -174,7 +238,7 @@ def api_vehicles_update(vehicle_id):
                 c.execute("UPDATE vehicles SET container_config_id = ? WHERE id = ?", (cc_id, vehicle_id))
         conn.commit()
         conn.close()
-        return jsonify({"success": True, "message": "Vehicle updated"})
+        return jsonify({"success": True, "message": "Vehicle updated", "warnings": warnings})
     except sqlite3.IntegrityError:
         return jsonify({"success": False, "message": "Plate number already exists"}), 409
     except Exception as e:

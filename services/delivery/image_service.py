@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import uuid
 from datetime import datetime
@@ -9,8 +10,14 @@ from app.db import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
-UPLOAD_ROOT = BASE_DIR / "DeliveryPlans"
+#: Root that uploads live under and that ``relative_path`` is stored
+#: relative to. Defaults to the repository, which is right for local dev;
+#: in production DATA_DIR points at Render's mounted disk, because the
+#: container filesystem is wiped on every deploy and proof photos must not
+#: be. Deliberately the *parent* of DeliveryPlans/ so that rows written
+#: before the disk existed ("DeliveryPlans/2026/...") still resolve.
+DATA_ROOT = Path(os.getenv("DATA_DIR") or Path(__file__).resolve().parent.parent.parent)
+UPLOAD_ROOT = DATA_ROOT / "DeliveryPlans"
 
 # Only image types the dashboard actually renders. The stored file is served
 # back by GET /api/images/<id>/file via send_file(), which infers Content-Type
@@ -142,7 +149,7 @@ def upload_image(db_path: str, stop_id: int, file_storage,
 
         file_storage.save(str(file_path))
 
-        relative = str(file_path.relative_to(BASE_DIR))
+        relative = str(file_path.relative_to(DATA_ROOT))
 
         try:
             c.execute("""
@@ -185,7 +192,7 @@ def delete_image(db_path: str, image_id: int) -> bool:
         c.execute("SELECT relative_path FROM delivery_stop_images WHERE id = ?", (image_id,))
         row = c.fetchone()
         if row:
-            full_path = BASE_DIR / row["relative_path"]
+            full_path = DATA_ROOT / row["relative_path"]
             try:
                 if full_path.exists():
                     full_path.unlink()

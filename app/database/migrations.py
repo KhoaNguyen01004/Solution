@@ -135,6 +135,36 @@ def add_missing_fuel_columns(conn):
     conn.commit()
 
 
+def add_vehicle_envelope_columns(conn):
+    """Physical envelope of the vehicle itself, for ORS routing restrictions.
+
+    Distinct from container_configs, which describes the *cargo compartment*
+    for the bin-packing planner. The two are not interchangeable: a 2.35 m
+    cargo box sits on a truck well over 3 m tall, and payload_kg excludes the
+    entire kerb weight. Feeding cargo figures to a router would produce routes
+    that look height-checked and are not (docs/VEHICLE_ROUTING_PLAN.md §3).
+
+    All nullable with no default. NULL means "unknown", and an unknown
+    restriction is omitted from the ORS request entirely — a 0 would be sent
+    as a real limit and match nothing.
+    """
+    c = conn.cursor()
+    c.execute("PRAGMA table_info(vehicles)")
+    existing = {col[1] for col in c.fetchall()}
+
+    for col_name, col_type in [
+        ("gross_weight_kg", "INTEGER DEFAULT NULL"),
+        ("overall_height_mm", "INTEGER DEFAULT NULL"),
+        ("overall_width_mm", "INTEGER DEFAULT NULL"),
+        ("overall_length_mm", "INTEGER DEFAULT NULL"),
+        ("axle_load_kg", "INTEGER DEFAULT NULL"),
+    ]:
+        if col_name not in existing:
+            c.execute(f"ALTER TABLE vehicles ADD COLUMN {col_name} {col_type}")
+
+    conn.commit()
+
+
 def seed_vehicle_types(conn):
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM vehicle_types")
@@ -302,5 +332,6 @@ def run_all(conn):
     migrate_legacy_vehicle_trips_schema(conn)
     add_missing_vehicle_trips_columns(conn)
     add_missing_fuel_columns(conn)
+    add_vehicle_envelope_columns(conn)
     seed_vehicle_types(conn)
     backfill_vehicles_from_fuel_log(conn)

@@ -31,7 +31,16 @@ window.DASH = window.DASH || {};
 
     if (!resp.ok) {
       const body = await resp.json().catch(() => ({}));
-      throw new Error(body.error || body.message || `HTTP ${resp.status}`);
+      const err = new Error(body.error || body.message || `HTTP ${resp.status}`);
+      // The message alone is not enough for every failure. A blocked
+      // completion answers 422 with `proof_required`, and the caller has to
+      // tell that apart from an ordinary error to offer the override —
+      // pattern-matching on English would break the first time the wording
+      // changed. Attached rather than thrown differently so every existing
+      // `catch (err) { err.message }` keeps working.
+      err.status = resp.status;
+      err.body = body;
+      throw err;
     }
     return resp.json();
   }
@@ -64,8 +73,37 @@ window.DASH = window.DASH || {};
     // expectedStatus is the execution_status this stop's card was rendered
     // with. The server refuses the move if the stop has since changed, so a
     // double-tap can't walk it two steps (planned -> arrived -> completed).
-    advance(stopId, expectedStatus) {
+    // overrideReason completes a stop that has no proof photos. Omitted for
+    // an ordinary advance, in which case the server refuses with 422 and
+    // `proof_required` so the dashboard can ask for one.
+    advance(stopId, expectedStatus, overrideReason) {
       return fetchJSON('/api/execution/advance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stop_id: stopId,
+          expected_status: expectedStatus,
+          override_reason: overrideReason || '',
+        }),
+      });
+    },
+
+    // Multipart, so no Content-Type header — the browser has to set it
+    // itself to include the multipart boundary. Setting it by hand produces
+    // a body the server cannot parse.
+    uploadStopImage(stopId, file, category) {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('category', category || 'unload');
+      return fetchJSON(`/api/stops/${stopId}/images`, { method: 'POST', body: form });
+    },
+
+    // Steps a stop back: arrived -> planned, completed -> arrived, and
+    // skipped/cancelled -> whatever they were before. expectedStatus carries
+    // the same staleness guard as advance() — the server refuses a revert
+    // aimed at a status the stop has already left.
+    revert(stopId, expectedStatus) {
+      return fetchJSON('/api/execution/revert', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ stop_id: stopId, expected_status: expectedStatus }),
@@ -105,6 +143,10 @@ window.DASH = window.DASH || {};
 
     stopImages(stopId) {
       return fetchJSON(`/api/stops/${stopId}/images`);
+    },
+
+    stopHistory(stopId) {
+      return fetchJSON(`/api/stops/${stopId}/history`);
     },
 
     deletePlans(planIds) {

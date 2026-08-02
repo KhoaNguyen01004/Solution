@@ -492,16 +492,31 @@ window.DASH = window.DASH || {};
       let coords = [];
       let usedRoadGeometry = false;
 
+      // One entry per leg rather than a single joined polyline, because a leg
+      // routed in violation of the vehicle's limits has to be drawn
+      // differently from the rest of the same route.
+      const segments = [];
+
       if (legs.length > 0) {
         let prevLat = eta.gps ? eta.gps.lat : null;
         let prevLng = eta.gps ? eta.gps.lng : null;
 
         legs.forEach((leg) => {
+          let legCoords = null;
           if (leg.geometry && leg.geometry.length > 0) {
+            legCoords = leg.geometry;
             coords = coords.concat(leg.geometry);
             usedRoadGeometry = true;
           } else if (prevLat != null && prevLng != null && leg.lat != null && leg.lng != null) {
-            coords.push([prevLat, prevLng], [parseFloat(leg.lat), parseFloat(leg.lng)]);
+            legCoords = [[prevLat, prevLng], [parseFloat(leg.lat), parseFloat(leg.lng)]];
+            coords.push(legCoords[0], legCoords[1]);
+          }
+          if (legCoords) {
+            segments.push({
+              coords: legCoords,
+              violated: leg.restriction_status === 'violated',
+              road: !!(leg.geometry && leg.geometry.length > 0),
+            });
           }
           if (leg.lat != null && leg.lng != null) {
             prevLat = parseFloat(leg.lat);
@@ -520,19 +535,51 @@ window.DASH = window.DASH || {};
         });
       }
 
-      const key = coords.map((c) => c[0] + ',' + c[1]).join('|');
+      // Status is part of the key: the same geometry can flip between
+      // compliant and violated when a vehicle's specs are edited, and a
+      // geometry-only key would leave the old colour on screen.
+      const statusKey = segments.map((s) => (s.violated ? '1' : '0')).join('');
+      const key = coords.map((c) => c[0] + ',' + c[1]).join('|') + '#' + statusKey;
       if (key === lastRouteKey) return;
       lastRouteKey = key;
 
       routeLayer.clearLayers();
       if (coords.length < 2) return;
 
-      L.polyline(coords, {
-        color: '#388bfd',
-        weight: 3,
-        opacity: 0.7,
-        dashArray: usedRoadGeometry ? '' : '8, 8',
-      }).addTo(routeLayer);
+      if (segments.length === 0) {
+        L.polyline(coords, {
+          color: '#388bfd',
+          weight: 3,
+          opacity: 0.7,
+          dashArray: usedRoadGeometry ? '' : '8, 8',
+        }).addTo(routeLayer);
+        return;
+      }
+
+      segments.forEach((seg) => {
+        if (seg.coords.length < 2) return;
+        if (seg.violated) {
+          // A white casing under the red keeps it legible on both the
+          // satellite and the near-white street basemaps — the same reason
+          // the vehicle markers carry two rings.
+          L.polyline(seg.coords, {
+            color: '#ffffff', weight: 7, opacity: 0.85,
+          }).addTo(routeLayer);
+          L.polyline(seg.coords, {
+            color: '#f85149',
+            weight: 4,
+            opacity: 0.95,
+            dashArray: seg.road ? '' : '8, 8',
+          }).addTo(routeLayer);
+        } else {
+          L.polyline(seg.coords, {
+            color: '#388bfd',
+            weight: 3,
+            opacity: 0.7,
+            dashArray: seg.road ? '' : '8, 8',
+          }).addTo(routeLayer);
+        }
+      });
     },
 
     zoomToVehicle(assignmentId) {

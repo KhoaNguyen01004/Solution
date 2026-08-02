@@ -216,6 +216,7 @@
                         <th>Vehicle Type</th>
                         <th>Current Driver</th>
                         <th>Container</th>
+                        <th title="Overall dimensions and gross weight used for routing restrictions">Envelope</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
@@ -293,9 +294,51 @@
                 <input id="field-driver" class="field-input" type="text" placeholder="Driver name" autocomplete="off">
             </div>
 
+            <!-- Vehicle Envelope — the truck itself, for routing restrictions.
+                 Kept visually separate from Container Dimensions below, and
+                 stated in both labels, because confusing the two is the exact
+                 error that would route a truck under a bridge it hits. -->
+            <div style="margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;">
+                <div class="field-label" style="font-size:12px;margin-bottom:2px;">Vehicle Envelope <span style="font-weight:400;color:#94a3b8;">— the whole truck</span></div>
+                <div style="font-size:11px;color:#94a3b8;margin-bottom:8px;line-height:1.45;">
+                    Overall dimensions and gross weight from the registration certificate
+                    (giấy đăng kiểm), used to keep routes off roads this vehicle cannot use.
+                    <strong>Not</strong> the cargo box below. Leave blank if unknown — a blank
+                    falls back to an estimate for the vehicle type.
+                </div>
+                <div class="field-row-3">
+                    <div class="field-group">
+                        <label class="field-label">Overall length (mm)</label>
+                        <input id="field-env-length" class="field-input" type="number" min="1" placeholder="6200">
+                    </div>
+                    <div class="field-group">
+                        <label class="field-label">Overall width (mm)</label>
+                        <input id="field-env-width" class="field-input" type="number" min="1" placeholder="2000">
+                    </div>
+                    <div class="field-group">
+                        <label class="field-label">Overall height (mm)</label>
+                        <input id="field-env-height" class="field-input" type="number" min="1" placeholder="2900">
+                    </div>
+                </div>
+                <div class="field-row-3">
+                    <div class="field-group">
+                        <label class="field-label">Gross weight (kg)</label>
+                        <input id="field-env-gvw" class="field-input" type="number" min="1" placeholder="4990">
+                    </div>
+                    <div class="field-group">
+                        <label class="field-label">Axle load (kg)</label>
+                        <input id="field-env-axle" class="field-input" type="number" min="1" placeholder="optional">
+                    </div>
+                    <div class="field-group"></div>
+                </div>
+            </div>
+
             <!-- Container Dimensions (always visible) -->
             <div style="margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;">
-                <div class="field-label" style="font-size:12px;margin-bottom:8px;">Container Dimensions</div>
+                <div class="field-label" style="font-size:12px;margin-bottom:2px;">Container Dimensions <span style="font-weight:400;color:#94a3b8;">— the cargo box only</span></div>
+                <div style="font-size:11px;color:#94a3b8;margin-bottom:8px;">
+                    Used by the load planner for packing. Always smaller than the envelope above.
+                </div>
                 <div class="field-row-3">
                     <div class="field-group">
                         <label class="field-label">Length (mm)</label>

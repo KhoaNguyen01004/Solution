@@ -1,0 +1,1187 @@
+{
+  ".claude/settings.local.json": {
+    "mtime": 1785400046.5522888,
+    "ast_hash": "815c9ce48897aa69dda3c751a073180e",
+    "semantic_hash": "815c9ce48897aa69dda3c751a073180e"
+  },
+  "app.py": {
+    "mtime": 1785430305.8783114,
+    "ast_hash": "ef903b28cb0f29607dd0b669654c1d84",
+    "semantic_hash": ""
+  },
+  "app/__init__.py": {
+    "mtime": 1785491559.4824493,
+    "ast_hash": "fa3ff62269dbacca88aa576bc53c14c8",
+    "semantic_hash": ""
+  },
+  "app/config.py": {
+    "mtime": 1785491580.6985292,
+    "ast_hash": "5f7855a4d60bc295209dfcdef76f0091",
+    "semantic_hash": ""
+  },
+  "app/database/__init__.py": {
+    "mtime": 1785339861.8588986,
+    "ast_hash": "ea2989cc041d25389efdc34b56683bd5",
+    "semantic_hash": "ea2989cc041d25389efdc34b56683bd5"
+  },
+  "app/database/migrations.py": {
+    "mtime": 1785463308.1748118,
+    "ast_hash": "4f450094728ff229e6c2b20140214f96",
+    "semantic_hash": ""
+  },
+  "app/database/schema.py": {
+    "mtime": 1785339815.62259,
+    "ast_hash": "afe4734798a41967db3183edf6b3d1bc",
+    "semantic_hash": "afe4734798a41967db3183edf6b3d1bc"
+  },
+  "app/db.py": {
+    "mtime": 1785337213.1338391,
+    "ast_hash": "c19ef27aa8529b6d0741444c15d4bccf",
+    "semantic_hash": "c19ef27aa8529b6d0741444c15d4bccf"
+  },
+  "app/routes/__init__.py": {
+    "mtime": 1785340348.3765883,
+    "ast_hash": "2b33ba776a4f0ba0efb642140ceef74c",
+    "semantic_hash": "2b33ba776a4f0ba0efb642140ceef74c"
+  },
+  "app/routes/fleet.py": {
+    "mtime": 1785340431.4598517,
+    "ast_hash": "a9e0ad346011b4db7bedcfdcb36bda0c",
+    "semantic_hash": "a9e0ad346011b4db7bedcfdcb36bda0c"
+  },
+  "app/routes/fuel.py": {
+    "mtime": 1785463091.867545,
+    "ast_hash": "4b038ee1586e908d31a75e30ea9b7e9c",
+    "semantic_hash": ""
+  },
+  "app/routes/oil.py": {
+    "mtime": 1785340615.048842,
+    "ast_hash": "88c84a69b1509850b6e9082263a8e899",
+    "semantic_hash": "88c84a69b1509850b6e9082263a8e899"
+  },
+  "app/routes/trips.py": {
+    "mtime": 1785469027.1314359,
+    "ast_hash": "c02e2ed076b34d7f154d35880c19d697",
+    "semantic_hash": ""
+  },
+  "app/services/__init__.py": {
+    "mtime": 1785340224.7437944,
+    "ast_hash": "b3e8e640cbf763fa39af20f53622d50a",
+    "semantic_hash": "b3e8e640cbf763fa39af20f53622d50a"
+  },
+  "app/services/locations.py": {
+    "mtime": 1785340767.3885338,
+    "ast_hash": "10be1dcb876f0b88bdae2b722a18de93",
+    "semantic_hash": "10be1dcb876f0b88bdae2b722a18de93"
+  },
+  "app/services/routing.py": {
+    "mtime": 1785340307.9645183,
+    "ast_hash": "179b59c480ada36de365567dfa7934bd",
+    "semantic_hash": "179b59c480ada36de365567dfa7934bd"
+  },
+  "app/services/ttas_client.py": {
+    "mtime": 1785340268.5085168,
+    "ast_hash": "0c8205c71bdb21c4cd8b9439d5fe6cc5",
+    "semantic_hash": "0c8205c71bdb21c4cd8b9439d5fe6cc5"
+  },
+  "app/state.py": {
+    "mtime": 1785339746.4874423,
+    "ast_hash": "7f73b2d7b435641643971798e85840dc",
+    "semantic_hash": "7f73b2d7b435641643971798e85840dc"
+  },
+  "app/utils/__init__.py": {
+    "mtime": 1785339980.5569274,
+    "ast_hash": "083552465d86b496f295b03ad93b76d4",
+    "semantic_hash": "083552465d86b496f295b03ad93b76d4"
+  },
+  "app/utils/export.py": {
+    "mtime": 1785340015.7612581,
+    "ast_hash": "bdc8dc4dfed16b20abe79d8f2e8dbf15",
+    "semantic_hash": "bdc8dc4dfed16b20abe79d8f2e8dbf15"
+  },
+  "app/utils/geo.py": {
+    "mtime": 1785339999.3100007,
+    "ast_hash": "8ef6d6f6796c370935537574fde49ca6",
+    "semantic_hash": "8ef6d6f6796c370935537574fde49ca6"
+  },
+  "main.py": {
+    "mtime": 1785335428.4430647,
+    "ast_hash": "4fa7407e5ba3726a10d61de8f360100d",
+    "semantic_hash": "4fa7407e5ba3726a10d61de8f360100d"
+  },
+  "manual_test.py": {
+    "mtime": 1784708032.7421937,
+    "ast_hash": "eb1bf011d6736c2dec608625b4ee707a",
+    "semantic_hash": "eb1bf011d6736c2dec608625b4ee707a"
+  },
+  "scripts/migrate_to_delivery.py": {
+    "mtime": 1785463146.8084054,
+    "ast_hash": "ba0023c99742fe17dc9ff1081fc65198",
+    "semantic_hash": ""
+  },
+  "services/__init__.py": {
+    "mtime": 1784695527.4623847,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "services/delivery/__init__.py": {
+    "mtime": 1785078396.1384869,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "services/delivery/database.py": {
+    "mtime": 1785078571.3447,
+    "ast_hash": "ec92c2ee7419de777903960a3d6381c7",
+    "semantic_hash": "ec92c2ee7419de777903960a3d6381c7"
+  },
+  "services/delivery/eta_service.py": {
+    "mtime": 1785375597.0722232,
+    "ast_hash": "4ff46db8efbc45ae536034eee786f266",
+    "semantic_hash": "4ff46db8efbc45ae536034eee786f266"
+  },
+  "services/delivery/execution_service.py": {
+    "mtime": 1785463799.2270255,
+    "ast_hash": "d08ab19a17f5083e65f745bbc9c2cc1e",
+    "semantic_hash": ""
+  },
+  "services/delivery/image_service.py": {
+    "mtime": 1785460900.3527386,
+    "ast_hash": "8db32d7b82d6eb1957143eebd4e837f0",
+    "semantic_hash": ""
+  },
+  "services/delivery/plan_service.py": {
+    "mtime": 1785462158.9360466,
+    "ast_hash": "410c46ba9c043b2f5b0b6d6c7f14e17d",
+    "semantic_hash": ""
+  },
+  "services/delivery/routes.py": {
+    "mtime": 1785491547.1729648,
+    "ast_hash": "f26a96919fe8b4de2c7715da379f1ce4",
+    "semantic_hash": ""
+  },
+  "services/delivery/tracking_service.py": {
+    "mtime": 1785460720.7336047,
+    "ast_hash": "606b1e08ec798a0db633ddf4f3f89473",
+    "semantic_hash": ""
+  },
+  "services/google_sheet_service.py": {
+    "mtime": 1785335428.4442174,
+    "ast_hash": "aa0bb682b5fa218f3882eb54fe65b281",
+    "semantic_hash": "aa0bb682b5fa218f3882eb54fe65b281"
+  },
+  "services/plate_utils.py": {
+    "mtime": 1784700620.058613,
+    "ast_hash": "54e8c05586101657edf23b34a0aa54ce",
+    "semantic_hash": "54e8c05586101657edf23b34a0aa54ce"
+  },
+  "static/js/dashboard/api.js": {
+    "mtime": 1785491934.2087216,
+    "ast_hash": "5b0c6bed5fb7ea885c26ef1027ab776e",
+    "semantic_hash": ""
+  },
+  "static/js/dashboard/main.js": {
+    "mtime": 1785502265.5799696,
+    "ast_hash": "c9b34e14d8debd948568567e739b7aee",
+    "semantic_hash": ""
+  },
+  "static/js/dashboard/map.js": {
+    "mtime": 1785501839.004881,
+    "ast_hash": "3629391380c78286141d97cdb7dff177",
+    "semantic_hash": ""
+  },
+  "static/js/dashboard/polling.js": {
+    "mtime": 1785465443.4690793,
+    "ast_hash": "dc41fcae40115f605286daff1e738308",
+    "semantic_hash": ""
+  },
+  "static/js/dashboard/timeline.js": {
+    "mtime": 1785502277.748068,
+    "ast_hash": "158e547076ae99170d6bbcf0e612ce1b",
+    "semantic_hash": ""
+  },
+  "static/js/dashboard/vehicle-list.js": {
+    "mtime": 1785396989.644318,
+    "ast_hash": "4be32066d7b5fed828abc78ca642e070",
+    "semantic_hash": "4be32066d7b5fed828abc78ca642e070"
+  },
+  "static/js/delivery-plan-builder.js": {
+    "mtime": 1785491758.64475,
+    "ast_hash": "71622d47b90f87c5c0c9febf3d411320",
+    "semantic_hash": ""
+  },
+  "static/js/fuel-efficiency.js": {
+    "mtime": 1785463167.231282,
+    "ast_hash": "66f81988de68f68fa6ef575bc7e8aced",
+    "semantic_hash": ""
+  },
+  "static/js/fuel-sync.js": {
+    "mtime": 1785335428.446977,
+    "ast_hash": "94b7f0b459fe23a1f6ce9a8c1346e1ee",
+    "semantic_hash": "94b7f0b459fe23a1f6ce9a8c1346e1ee"
+  },
+  "static/js/locations.js": {
+    "mtime": 1782983355.4158354,
+    "ast_hash": "3f69af5c66325d76570fd92e74d8b00d",
+    "semantic_hash": "3f69af5c66325d76570fd92e74d8b00d"
+  },
+  "static/js/map.js": {
+    "mtime": 1785335428.4483457,
+    "ast_hash": "3708b45114b4c611960b753234a8db01",
+    "semantic_hash": "3708b45114b4c611960b753234a8db01"
+  },
+  "static/js/oil-change.js": {
+    "mtime": 1785335428.4493618,
+    "ast_hash": "01d8901f883e89009c6236a63febebe1",
+    "semantic_hash": "01d8901f883e89009c6236a63febebe1"
+  },
+  "static/js/truck-load-planner.js": {
+    "mtime": 1785428530.133089,
+    "ast_hash": "228c0b2e547cd55b5b3feb65a7bde5ab",
+    "semantic_hash": "228c0b2e547cd55b5b3feb65a7bde5ab"
+  },
+  "static/js/utils.js": {
+    "mtime": 1785491747.7856326,
+    "ast_hash": "eced11cbb3d659d39f244a6a6a1c1467",
+    "semantic_hash": ""
+  },
+  "static/js/vehicle-management.js": {
+    "mtime": 1785463183.981023,
+    "ast_hash": "54442bea72b6414016f1e661b48c4784",
+    "semantic_hash": ""
+  },
+  "tests/debug_arrange.py": {
+    "mtime": 1784709008.8091683,
+    "ast_hash": "e7cd9872a2fca3f32b90a3878455b421",
+    "semantic_hash": "e7cd9872a2fca3f32b90a3878455b421"
+  },
+  "tests/merge_duplicate_vehicles.py": {
+    "mtime": 1785461546.153683,
+    "ast_hash": "c409727bb72ff622e2b9448ee4fedc5d",
+    "semantic_hash": ""
+  },
+  "tests/test_all.py": {
+    "mtime": 1784708987.750453,
+    "ast_hash": "d38811c49ea71d728034f840367690cb",
+    "semantic_hash": "d38811c49ea71d728034f840367690cb"
+  },
+  "tests/test_delivery.py": {
+    "mtime": 1785465665.9346309,
+    "ast_hash": "a5824b7fadccd8d8a1bad6cc2beabf6b",
+    "semantic_hash": ""
+  },
+  "tests/test_scorer.py": {
+    "mtime": 1785423392.6731386,
+    "ast_hash": "b6a6c86a9f71a2d1c28f1c0171751388",
+    "semantic_hash": "b6a6c86a9f71a2d1c28f1c0171751388"
+  },
+  "truck_load_planner/__init__.py": {
+    "mtime": 1784263425.7912638,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "truck_load_planner/db.py": {
+    "mtime": 1784602404.3973365,
+    "ast_hash": "df2105f084b699c387e1d9b622893034",
+    "semantic_hash": "df2105f084b699c387e1d9b622893034"
+  },
+  "truck_load_planner/engine/__init__.py": {
+    "mtime": 1784338879.5011613,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "truck_load_planner/engine/access.py": {
+    "mtime": 1784608391.2301338,
+    "ast_hash": "0b9a893019b6ee5f229f2c497f6cb58b",
+    "semantic_hash": "0b9a893019b6ee5f229f2c497f6cb58b"
+  },
+  "truck_load_planner/engine/auto_arrange.py": {
+    "mtime": 1785426563.8986864,
+    "ast_hash": "2a6c943a8d916c1069d2381dcbd0ea12",
+    "semantic_hash": "2a6c943a8d916c1069d2381dcbd0ea12"
+  },
+  "truck_load_planner/engine/boundary.py": {
+    "mtime": 1784338891.9812293,
+    "ast_hash": "581fd91a630a4094efed4c09cc071551",
+    "semantic_hash": "581fd91a630a4094efed4c09cc071551"
+  },
+  "truck_load_planner/engine/candidate_points.py": {
+    "mtime": 1784713869.590546,
+    "ast_hash": "38b3b85a00297a503c895f05d9aafc87",
+    "semantic_hash": "38b3b85a00297a503c895f05d9aafc87"
+  },
+  "truck_load_planner/engine/collision.py": {
+    "mtime": 1784338890.6522388,
+    "ast_hash": "18c83a35eb5553e63e6f8913bf28eb3f",
+    "semantic_hash": "18c83a35eb5553e63e6f8913bf28eb3f"
+  },
+  "truck_load_planner/engine/container.py": {
+    "mtime": 1784338885.5243027,
+    "ast_hash": "8a204aef894ae7e2de04144694e79561",
+    "semantic_hash": "8a204aef894ae7e2de04144694e79561"
+  },
+  "truck_load_planner/engine/distribution.py": {
+    "mtime": 1785427150.4392953,
+    "ast_hash": "f6c07df64b03f76862e1f60777b406eb",
+    "semantic_hash": "f6c07df64b03f76862e1f60777b406eb"
+  },
+  "truck_load_planner/engine/geometry.py": {
+    "mtime": 1785339032.6493134,
+    "ast_hash": "dff692798464256cb2856fd12764e1c2",
+    "semantic_hash": "dff692798464256cb2856fd12764e1c2"
+  },
+  "truck_load_planner/engine/package.py": {
+    "mtime": 1785336080.8262975,
+    "ast_hash": "ec708aad3266c8b78ece26bb40a32920",
+    "semantic_hash": "ec708aad3266c8b78ece26bb40a32920"
+  },
+  "truck_load_planner/engine/placement.py": {
+    "mtime": 1784690348.0322769,
+    "ast_hash": "c279faee511ba5f731f0a96aad43c101",
+    "semantic_hash": "c279faee511ba5f731f0a96aad43c101"
+  },
+  "truck_load_planner/engine/planner.py": {
+    "mtime": 1784714531.504254,
+    "ast_hash": "e1ba5f360c3ee91f90197ff851ef0709",
+    "semantic_hash": "e1ba5f360c3ee91f90197ff851ef0709"
+  },
+  "truck_load_planner/engine/profile.py": {
+    "mtime": 1784707999.6655643,
+    "ast_hash": "c2b9f53547d6f3f2c2b84355b3cdff96",
+    "semantic_hash": "c2b9f53547d6f3f2c2b84355b3cdff96"
+  },
+  "truck_load_planner/engine/scorer.py": {
+    "mtime": 1785426371.0511405,
+    "ast_hash": "5cb6176006a43b532e6f3a20b2567397",
+    "semantic_hash": "5cb6176006a43b532e6f3a20b2567397"
+  },
+  "truck_load_planner/engine/spatial.py": {
+    "mtime": 1784386515.7250283,
+    "ast_hash": "5036481d1b971e4acbeeb66972d2583e",
+    "semantic_hash": "5036481d1b971e4acbeeb66972d2583e"
+  },
+  "truck_load_planner/engine/state.py": {
+    "mtime": 1784690393.6119468,
+    "ast_hash": "0c4893497756b390870b2a296191a80a",
+    "semantic_hash": "0c4893497756b390870b2a296191a80a"
+  },
+  "truck_load_planner/engine/statistics.py": {
+    "mtime": 1784338912.1840444,
+    "ast_hash": "107ca22d0f726daf7e4381f133eba0da",
+    "semantic_hash": "107ca22d0f726daf7e4381f133eba0da"
+  },
+  "truck_load_planner/engine/support.py": {
+    "mtime": 1785430296.0903506,
+    "ast_hash": "aeb66cbdca078b87bc87a34d27329d5b",
+    "semantic_hash": ""
+  },
+  "truck_load_planner/engine/trace_mutations.py": {
+    "mtime": 1784690577.809036,
+    "ast_hash": "c069e5db5cd40db0d0a736faf13e701c",
+    "semantic_hash": "c069e5db5cd40db0d0a736faf13e701c"
+  },
+  "truck_load_planner/engine/validation.py": {
+    "mtime": 1785426769.8136358,
+    "ast_hash": "3c67e0d4ea5dc062481b0bc171916463",
+    "semantic_hash": "3c67e0d4ea5dc062481b0bc171916463"
+  },
+  "truck_load_planner/engine/weight.py": {
+    "mtime": 1784338901.6663084,
+    "ast_hash": "4cc491cb80a3c697ea0ad3e47dfc2f69",
+    "semantic_hash": "4cc491cb80a3c697ea0ad3e47dfc2f69"
+  },
+  "truck_load_planner/engines/__init__.py": {
+    "mtime": 1784540568.7887354,
+    "ast_hash": "9dc4672361ee717a65fa045bdb6a151c",
+    "semantic_hash": "9dc4672361ee717a65fa045bdb6a151c"
+  },
+  "truck_load_planner/engines/base.py": {
+    "mtime": 1784540507.1925454,
+    "ast_hash": "1768aaa0e157e37573920a95cffb8c09",
+    "semantic_hash": "1768aaa0e157e37573920a95cffb8c09"
+  },
+  "truck_load_planner/engines/internal/__init__.py": {
+    "mtime": 1784540502.34395,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "truck_load_planner/engines/internal/engine.py": {
+    "mtime": 1784708027.054953,
+    "ast_hash": "fee03abe53118acfaa3be7a7a0011a4a",
+    "semantic_hash": "fee03abe53118acfaa3be7a7a0011a4a"
+  },
+  "truck_load_planner/engines/py3dbp/__init__.py": {
+    "mtime": 1784540502.6449442,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "truck_load_planner/engines/py3dbp/adapter.py": {
+    "mtime": 1784540830.901557,
+    "ast_hash": "658b5f6885f1fb58ac3755f05b328b7d",
+    "semantic_hash": "658b5f6885f1fb58ac3755f05b328b7d"
+  },
+  "truck_load_planner/geometry/__init__.py": {
+    "mtime": 1784263435.2681117,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "truck_load_planner/geometry/aabb.py": {
+    "mtime": 1785339022.899379,
+    "ast_hash": "5a7fcca7f1a0baaf5e4c3414a9e18d9b",
+    "semantic_hash": "5a7fcca7f1a0baaf5e4c3414a9e18d9b"
+  },
+  "truck_load_planner/geometry/grid.py": {
+    "mtime": 1784263442.322289,
+    "ast_hash": "f1f09e66d5c5d38b99649e1b888ff2a3",
+    "semantic_hash": "f1f09e66d5c5d38b99649e1b888ff2a3"
+  },
+  "truck_load_planner/geometry/transform.py": {
+    "mtime": 1784263441.4058297,
+    "ast_hash": "5c3e4cf237456c237960e7df4ab0f01d",
+    "semantic_hash": "5c3e4cf237456c237960e7df4ab0f01d"
+  },
+  "truck_load_planner/logistics/__init__.py": {
+    "mtime": 1784263446.1850088,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "truck_load_planner/logistics/adapters.py": {
+    "mtime": 1785339132.8137906,
+    "ast_hash": "0f95390f5b4e911a9a85f76db6d9935e",
+    "semantic_hash": "0f95390f5b4e911a9a85f76db6d9935e"
+  },
+  "truck_load_planner/logistics/boundary.py": {
+    "mtime": 1785339170.4709575,
+    "ast_hash": "f28c19a19c8238da2abbdf2cd6444d7b",
+    "semantic_hash": "f28c19a19c8238da2abbdf2cd6444d7b"
+  },
+  "truck_load_planner/logistics/constraints.py": {
+    "mtime": 1784272706.0785296,
+    "ast_hash": "0a4c9f69070d7ec229ea4d45c6ea34f0",
+    "semantic_hash": "0a4c9f69070d7ec229ea4d45c6ea34f0"
+  },
+  "truck_load_planner/logistics/placement.py": {
+    "mtime": 1784280129.7850535,
+    "ast_hash": "e0e10fc5bc7af284d15ddf6a2180315f",
+    "semantic_hash": "e0e10fc5bc7af284d15ddf6a2180315f"
+  },
+  "truck_load_planner/logistics/volume.py": {
+    "mtime": 1784267798.0074048,
+    "ast_hash": "9cb98f0c3e6ff5a50f46096a0e9fb76b",
+    "semantic_hash": "9cb98f0c3e6ff5a50f46096a0e9fb76b"
+  },
+  "truck_load_planner/logistics/weight.py": {
+    "mtime": 1785339177.9025443,
+    "ast_hash": "0a50abde85ae3a787349ff592758542e",
+    "semantic_hash": "0a50abde85ae3a787349ff592758542e"
+  },
+  "truck_load_planner/models/__init__.py": {
+    "mtime": 1784602404.407334,
+    "ast_hash": "9b30fd02aecbc249d5405381f74330d7",
+    "semantic_hash": "9b30fd02aecbc249d5405381f74330d7"
+  },
+  "truck_load_planner/optimization/__init__.py": {
+    "mtime": 1784554978.236458,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "truck_load_planner/optimization/vehicle_cost.py": {
+    "mtime": 1784556034.926188,
+    "ast_hash": "ae6b3e11e5a9f804efcb974b21171f6a",
+    "semantic_hash": "ae6b3e11e5a9f804efcb974b21171f6a"
+  },
+  "truck_load_planner/routes.py": {
+    "mtime": 1785338084.0149372,
+    "ast_hash": "09491803f5d2e02d132b5e73de282e9d",
+    "semantic_hash": "09491803f5d2e02d132b5e73de282e9d"
+  },
+  "truck_load_planner/session.py": {
+    "mtime": 1785336090.964887,
+    "ast_hash": "8f9a4913c6268238e3d75e444bda0d5d",
+    "semantic_hash": "8f9a4913c6268238e3d75e444bda0d5d"
+  },
+  "wsgi.py": {
+    "mtime": 1785340919.916688,
+    "ast_hash": "45f5fea14ace86330f571019013bf08d",
+    "semantic_hash": "45f5fea14ace86330f571019013bf08d"
+  },
+  ".claude/settings.json": {
+    "mtime": 1785404476.0754147,
+    "ast_hash": "ea3f8bfd11338434cc799301f2962a90",
+    "semantic_hash": "ea3f8bfd11338434cc799301f2962a90"
+  },
+  ".opencode/opencode.json": {
+    "mtime": 1785407796.1896746,
+    "ast_hash": "1efe24ecf938911d4f23e4b1c6ec91f7",
+    "semantic_hash": "1efe24ecf938911d4f23e4b1c6ec91f7"
+  },
+  ".opencode/plugins/graphify.js": {
+    "mtime": 1785407015.414202,
+    "ast_hash": "b33d000860642c6f4907a877e0387a21",
+    "semantic_hash": "b33d000860642c6f4907a877e0387a21"
+  },
+  "tests/test_auto_arrange_e2e.py": {
+    "mtime": 1785428200.4699948,
+    "ast_hash": "aacd70258716c6535b75d0c0a219bb41",
+    "semantic_hash": "aacd70258716c6535b75d0c0a219bb41"
+  },
+  "truck_load_planner/engine/vehicle_selection.py": {
+    "mtime": 1785427215.3861003,
+    "ast_hash": "7b3e1614dbb39d91668d41e6b1386b54",
+    "semantic_hash": "7b3e1614dbb39d91668d41e6b1386b54"
+  },
+  "AGENTS.md": {
+    "mtime": 1785407015.414202,
+    "ast_hash": "21ceb6533048be51308e69e7b74a35cf",
+    "semantic_hash": ""
+  },
+  "Bao_cao_Kien_tap_Thuc_te_Nguyen_Viet_Anh_Khoa.md": {
+    "mtime": 1783872226.6675236,
+    "ast_hash": "95a3d5af19f0539851816807bebb568f",
+    "semantic_hash": ""
+  },
+  "CLAUDE.md": {
+    "mtime": 1785502836.7084124,
+    "ast_hash": "62016f74ccb7f4e29ee0ccf3823fe162",
+    "semantic_hash": ""
+  },
+  "INSTRUCTIONS.md": {
+    "mtime": 1785431483.2263694,
+    "ast_hash": "dc7d85db8fd55c2dc320261bbd6cb7b6",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1785502778.278652,
+    "ast_hash": "7ff3a64c11a80e55e7b3f2592951bcb4",
+    "semantic_hash": ""
+  },
+  "docs/CHANGELOG.md": {
+    "mtime": 1785502414.1037948,
+    "ast_hash": "dd4003f47814cf6a99b08a3e18aac03e",
+    "semantic_hash": ""
+  },
+  "docs/CODEBASE_ANALYSIS_REPORT.md": {
+    "mtime": 1785503024.8834908,
+    "ast_hash": "745d0c134acdffc48a2dcf11c3cfb980",
+    "semantic_hash": ""
+  },
+  "docs/DELIVERY_MODULE.md": {
+    "mtime": 1785502979.5234902,
+    "ast_hash": "e6d674e528cc2ccee8765c93e5bf1f8b",
+    "semantic_hash": ""
+  },
+  "docs/TRUCK_LOAD_PLANNER.md": {
+    "mtime": 1785430231.867043,
+    "ast_hash": "19551e27208f69b9d876f239d9d70f7b",
+    "semantic_hash": ""
+  },
+  "project_tree.txt": {
+    "mtime": 1785403421.3637218,
+    "ast_hash": "588342076bc22d9aa885a404bfa61b6a",
+    "semantic_hash": ""
+  },
+  "render.yaml": {
+    "mtime": 1785340939.0433419,
+    "ast_hash": "8fea51cfe4e5e6b638580d09b8df5fab",
+    "semantic_hash": ""
+  },
+  "reports/benchmark_real_data_20260729_214534.txt": {
+    "mtime": 1785336334.861868,
+    "ast_hash": "1a1f1829e1c619982415ee750ff48da2",
+    "semantic_hash": ""
+  },
+  "reports/benchmark_real_data_20260729_223114.txt": {
+    "mtime": 1785339074.626193,
+    "ast_hash": "755033d5bb7e2fe2f711d467fa928247",
+    "semantic_hash": ""
+  },
+  "reports/benchmark_real_data_20260729_223406.txt": {
+    "mtime": 1785339246.1065872,
+    "ast_hash": "124fc6614ec07716e5808f0318174dce",
+    "semantic_hash": ""
+  },
+  "reports/debug_validation_20260729_214410.txt": {
+    "mtime": 1785336250.400004,
+    "ast_hash": "a322b2e8f7c4c1a0cc9287bfb444f847",
+    "semantic_hash": ""
+  },
+  "requirements.txt": {
+    "mtime": 1784825872.8276076,
+    "ast_hash": "5de95ebde924f301fba9574dd3ed1581",
+    "semantic_hash": ""
+  },
+  "suon_bao_cao.md": {
+    "mtime": 1783868796.9237514,
+    "ast_hash": "47fd9d117f461827b550b097fc7a90dc",
+    "semantic_hash": ""
+  },
+  "templates/delivery-dashboard.html": {
+    "mtime": 1785468981.9475257,
+    "ast_hash": "ab5811299e458f6a8a9112eda2a20f9c",
+    "semantic_hash": ""
+  },
+  "templates/delivery-plan-builder.html": {
+    "mtime": 1785468981.9632983,
+    "ast_hash": "9f48a631516cacbe434e9a23efca7f5d",
+    "semantic_hash": ""
+  },
+  "templates/fuel-efficiency.html": {
+    "mtime": 1785468981.9950087,
+    "ast_hash": "ee09364e53ea41af6776a1c80d4f6868",
+    "semantic_hash": ""
+  },
+  "templates/index.html": {
+    "mtime": 1785468982.0163794,
+    "ast_hash": "27d9d82009630c13a5c051e6f9fc787b",
+    "semantic_hash": ""
+  },
+  "templates/locations.html": {
+    "mtime": 1785468982.0403113,
+    "ast_hash": "a652d06ad2106c9a7e780761a6abb9ee",
+    "semantic_hash": ""
+  },
+  "templates/oil-change.html": {
+    "mtime": 1785468982.0725121,
+    "ast_hash": "7006cc2e5196af12449291adacbc0a19",
+    "semantic_hash": ""
+  },
+  "templates/truck-load-planner.html": {
+    "mtime": 1785335428.4573822,
+    "ast_hash": "16a5da3c39c8eae2fda68537873f41c5",
+    "semantic_hash": ""
+  },
+  "templates/vehicle-management.html": {
+    "mtime": 1785468982.119833,
+    "ast_hash": "2aa9c40a3d83f9cc1ac62a70bb4f5124",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785336703.jpg": {
+    "mtime": 1785336703.2137392,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785336752.jpg": {
+    "mtime": 1785336752.139812,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785338285.jpg": {
+    "mtime": 1785338285.95448,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785338286.jpg": {
+    "mtime": 1785338286.012247,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785338336.jpg": {
+    "mtime": 1785338336.7930954,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785339057.jpg": {
+    "mtime": 1785339057.324042,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785339226.jpg": {
+    "mtime": 1785339226.7538066,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785341172.jpg": {
+    "mtime": 1785341172.3275814,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785430812.jpg": {
+    "mtime": 1785430812.2168865,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785336703.jpg": {
+    "mtime": 1785336703.2087383,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785336752.jpg": {
+    "mtime": 1785336752.1353264,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785338286.jpg": {
+    "mtime": 1785338286.0081077,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785338336.jpg": {
+    "mtime": 1785338336.7890954,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785339057.jpg": {
+    "mtime": 1785339057.3200355,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785339226.jpg": {
+    "mtime": 1785339226.7488022,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785341172.jpg": {
+    "mtime": 1785341172.320388,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785430812.jpg": {
+    "mtime": 1785430812.212879,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "services/vehicle_identity.py": {
+    "mtime": 1785463047.1003797,
+    "ast_hash": "87e5455df5285e859a7596bccd050c0b",
+    "semantic_hash": ""
+  },
+  "tests/test_delivery_routes.py": {
+    "mtime": 1785491834.7529094,
+    "ast_hash": "0e553bb9155e9e007c90a73f213e8156",
+    "semantic_hash": ""
+  },
+  "tests/test_vehicle_core_data.py": {
+    "mtime": 1785463321.9283197,
+    "ast_hash": "31a91f6abda4b8b0d98042406c0d8780",
+    "semantic_hash": ""
+  },
+  "docs/DELIVERY_AUDIT_2026-07-31.md": {
+    "mtime": 1785463978.8134365,
+    "ast_hash": "8de2286e9b5541c421aa12cc316e3ca5",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785460546.jpg": {
+    "mtime": 1785460546.3422425,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785461045-350088a7.jpg": {
+    "mtime": 1785461045.9486089,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785461046-817fcc70.jpg": {
+    "mtime": 1785461046.247255,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785461253-8930d516.jpg": {
+    "mtime": 1785461253.268852,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785461253-bf2135fd.jpg": {
+    "mtime": 1785461253.4686394,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785461554-bcc5b660.jpg": {
+    "mtime": 1785461554.457272,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785461554-f8fabd75.jpg": {
+    "mtime": 1785461554.2087543,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785461609-38298a9c.jpg": {
+    "mtime": 1785461609.6390357,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785461609-8e33bdd4.jpg": {
+    "mtime": 1785461609.4088943,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785461637-66e7089f.jpg": {
+    "mtime": 1785461637.8284435,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785461637-afe7a9b3.jpg": {
+    "mtime": 1785461637.57888,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785461774-2b4beac0.jpg": {
+    "mtime": 1785461775.0183733,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785461775-d3bbb52e.jpg": {
+    "mtime": 1785461775.2486527,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785462138-50b0a8df.jpg": {
+    "mtime": 1785462138.5155704,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785462138-5aaadccf.jpg": {
+    "mtime": 1785462138.763783,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785462166-296c5b58.jpg": {
+    "mtime": 1785462166.8553965,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785462166-b7599d22.jpg": {
+    "mtime": 1785462166.638517,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785462260-43317b0c.jpg": {
+    "mtime": 1785462260.4411404,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785462260-ae10c24a.jpg": {
+    "mtime": 1785462260.1741667,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785462285-d84e0867.jpg": {
+    "mtime": 1785462286.0043104,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785462286-4b915417.jpg": {
+    "mtime": 1785462286.2370195,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785463194-1a68fdbb.jpg": {
+    "mtime": 1785463194.7470467,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785463195-78a61ea7.jpg": {
+    "mtime": 1785463195.0426407,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785463337-42d5aef2.jpg": {
+    "mtime": 1785463337.87402,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785463338-1b13a588.jpg": {
+    "mtime": 1785463338.1224039,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785463857-6a4510e7.jpg": {
+    "mtime": 1785463857.5285554,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785463857-e9f261fd.jpg": {
+    "mtime": 1785463857.3142087,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785463910-71a724a0.jpg": {
+    "mtime": 1785463910.502637,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785463910-da2279de.jpg": {
+    "mtime": 1785463910.734532,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785464020-489cd32e.jpg": {
+    "mtime": 1785464020.9151504,
+    "ast_hash": "d161c1eeba5ddf189b7849d7ec7a38fd",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/delivery/1785464021-e37a319b.jpg": {
+    "mtime": 1785464021.232059,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785460546.jpg": {
+    "mtime": 1785460546.5249343,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785461046-042fc983.jpg": {
+    "mtime": 1785461046.5134797,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785461046-55c98ead.jpg": {
+    "mtime": 1785461046.3303719,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785461253-63db2e17.jpg": {
+    "mtime": 1785461253.6818905,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785461253-8c911b1a.jpg": {
+    "mtime": 1785461253.5167708,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785461554-af3db380.jpg": {
+    "mtime": 1785461554.524148,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785461554-bf9978fa.jpg": {
+    "mtime": 1785461554.6910386,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785461609-9457b863.jpg": {
+    "mtime": 1785461609.6903877,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785461609-e40ff5f0.jpg": {
+    "mtime": 1785461609.8232746,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785461637-f69173c7.jpg": {
+    "mtime": 1785461637.8953362,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785461638-1fa1a9bc.jpg": {
+    "mtime": 1785461638.0607278,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785461775-160ac66d.jpg": {
+    "mtime": 1785461775.350597,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785461775-691938bd.jpg": {
+    "mtime": 1785461775.481651,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785462138-958131d6.jpg": {
+    "mtime": 1785462138.928144,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785462138-f5bf98c2.jpg": {
+    "mtime": 1785462138.8222766,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785462166-79356686.jpg": {
+    "mtime": 1785462166.9209476,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785462167-b942b76b.jpg": {
+    "mtime": 1785462167.0704696,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785462260-69c7141a.jpg": {
+    "mtime": 1785462260.5056183,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785462260-b322cf9a.jpg": {
+    "mtime": 1785462260.6888225,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785462286-e3e24794.jpg": {
+    "mtime": 1785462286.4530888,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785462286-f73fdabc.jpg": {
+    "mtime": 1785462286.305484,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785463195-3882ac1b.jpg": {
+    "mtime": 1785463195.3511612,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785463195-bd0c6c7b.jpg": {
+    "mtime": 1785463195.142865,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785463338-2332189c.jpg": {
+    "mtime": 1785463338.3576593,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785463338-8798ae9f.jpg": {
+    "mtime": 1785463338.1880274,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785463857-4b0b90c5.jpg": {
+    "mtime": 1785463857.58241,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785463857-a9dfd801.jpg": {
+    "mtime": 1785463857.6974123,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785463910-7e38f354.jpg": {
+    "mtime": 1785463910.9721653,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785463910-ac648da2.jpg": {
+    "mtime": 1785463910.7859368,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785464021-76f80aeb.jpg": {
+    "mtime": 1785464021.4812644,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/extra/1785464021-bb4654cc.jpg": {
+    "mtime": 1785464021.3152947,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785460546.jpg": {
+    "mtime": 1785460546.3240266,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785461046-d251a81c.jpg": {
+    "mtime": 1785461046.196915,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785461253-5009d5ad.jpg": {
+    "mtime": 1785461253.4029093,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785461554-012571d0.jpg": {
+    "mtime": 1785461554.4098206,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785461609-0f457107.jpg": {
+    "mtime": 1785461609.5905998,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785461637-f5c9ff93.jpg": {
+    "mtime": 1785461637.7435012,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785461775-d36b693b.jpg": {
+    "mtime": 1785461775.1680958,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785462138-a745318a.jpg": {
+    "mtime": 1785462138.7033165,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785462166-05b7b79a.jpg": {
+    "mtime": 1785462166.8059273,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785462260-a68e371d.jpg": {
+    "mtime": 1785462260.374475,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785462286-a1458bc4.jpg": {
+    "mtime": 1785462286.1539812,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785463194-8d918f55.jpg": {
+    "mtime": 1785463194.9802282,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785463338-d13ad321.jpg": {
+    "mtime": 1785463338.0404797,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785463857-0ccbd424.jpg": {
+    "mtime": 1785463857.4648645,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785463910-7001ab19.jpg": {
+    "mtime": 1785463910.6529853,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/26/TEST-01/S001/loading/1785464021-d830dbda.jpg": {
+    "mtime": 1785464021.099164,
+    "ast_hash": "8d777f385d3dfec8815d20f7496026dc",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/31/50E-18463/S1/delivery/1785465623-37dacfc8.jpg": {
+    "mtime": 1785465623.6558108,
+    "ast_hash": "9a40ec421d82d02384812b286581ad7d",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/31/50E-18463/S1/delivery/1785465623-6c6fa4ed.jpg": {
+    "mtime": 1785465623.4593704,
+    "ast_hash": "9a40ec421d82d02384812b286581ad7d",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/31/50E-18463/S1/delivery/1785465623-a3159751.png": {
+    "mtime": 1785465623.855685,
+    "ast_hash": "9a40ec421d82d02384812b286581ad7d",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/31/50E-18463/S1/delivery/1785465624-53253907.webp": {
+    "mtime": 1785465624.0721118,
+    "ast_hash": "9a40ec421d82d02384812b286581ad7d",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/31/50E-18463/S1/delivery/1785465625-1512ed90.jpg": {
+    "mtime": 1785465625.457506,
+    "ast_hash": "a9f0e61a137d86aa9db53465e0801612",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/31/50E-18463/S1/delivery/1785465625-7129e6dd.jpg": {
+    "mtime": 1785465625.367503,
+    "ast_hash": "8b04d5e3775d298e78455efc5ca404d5",
+    "semantic_hash": ""
+  },
+  "DeliveryPlans/2026/07/31/50E-18463/S1/static_js/1785465625-4458c5c7.jpg": {
+    "mtime": 1785465625.1868606,
+    "ast_hash": "9a40ec421d82d02384812b286581ad7d",
+    "semantic_hash": ""
+  }
+}

@@ -524,6 +524,7 @@
       _id: String(nextAssignmentId++),
       vehicle_id: a.vehicle_id,
       driver_id: a.driver_id,
+      _driverName: a._driverName || null,
       notes: (a.notes || '') + ' (copy)',
       stops: a.stops.map((s) => ({ ...s, _id: String(nextStopId++) })),
     };
@@ -1123,6 +1124,11 @@
             plan_id: planId,
             vehicle_id: a.vehicle_id,
             driver_id: a.driver_id || null,
+            // Most drivers have no `drivers` row (they exist only as
+            // vehicles.current_driver text), so driver_id is usually null.
+            // Send the name too or the dispatch page falls back to the
+            // vehicle's default driver and the override is lost.
+            driver_name: a._driverName || '',
             sequence: i,
             notes: a.notes || '',
           }),

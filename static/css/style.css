@@ -1132,6 +1132,30 @@ select option {
 .toast.error   { background: var(--danger); }
 .toast.warning { background: var(--warning); }
 
+/* Inline action inside a toast (currently Undo after an advance/skip/cancel).
+   Sized past the 44px touch target on its long axis and given a wide hit area,
+   because it is aimed at on a phone, in a vehicle, by someone who has just
+   mis-tapped a button. */
+.toast-action {
+    display: inline-block;
+    margin-left: 12px;
+    padding: 6px 14px;
+    min-height: 32px;
+    border: 1px solid rgba(255, 255, 255, 0.85);
+    border-radius: var(--radius);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    cursor: pointer;
+}
+.toast-action:hover,
+.toast-action:focus {
+    background: rgba(255, 255, 255, 0.2);
+}
+
 /* ── Fetch Progress Modal ── */
 .fetch-progress-overlay {
     position: fixed;

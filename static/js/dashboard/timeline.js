@@ -56,6 +56,31 @@ window.DASH = window.DASH || {};
     if (el && el.textContent !== text) el.textContent = text;
   }
 
+  // When the ETA payload currently being rendered was received. eta_seconds is
+  // measured from that instant, so it is the baseline every arrival time has to
+  // be computed against — recomputing from Date.now() pushes arrivals later on
+  // every repaint. Held at module scope rather than threaded through
+  // render -> _patchStop -> buildDetailHtml -> etaCellHtml, all of which would
+  // otherwise grow a parameter they do nothing else with.
+  let etaBaselineMs = null;
+
+  // ETA is shown as a clock time rather than a countdown — see UI.etaClock().
+  // The remaining duration stays available on hover, since "how long from now"
+  // is still the faster read when the question is "can he make one more drop".
+  function etaCellHtml(eta) {
+    const clock = UI.etaClock(eta, etaBaselineMs);
+    if (clock) {
+      const relative = UI.etaRelative(eta);
+      return `<span class="label">ETA:</span><span class="value" title="in ${escapeHtml(relative)}">${escapeHtml(clock)}</span>`;
+    }
+    // A non-numeric eta ('--' from the API) is passed through as it was; a
+    // null one shows nothing at all rather than a fabricated time.
+    if (eta && typeof eta !== 'number') {
+      return `<span class="label">ETA:</span><span class="value">${escapeHtml(String(eta))}</span>`;
+    }
+    return '';
+  }
+
   const ACTIONABLE = ['planned', 'arrived'];
   const TERMINAL = ['completed', 'skipped', 'cancelled'];
 
@@ -125,19 +150,38 @@ window.DASH = window.DASH || {};
   // longer use prompt()/alert(): clicking either swaps the buttons for an
   // inline input, confirmed with Enter or a Confirm button, with errors
   // reported via UI.toast() instead of a blocking alert().
-  function buildActionsHtml(stopId, execStatus) {
-    if (!ACTIONABLE.includes(execStatus)) return '';
-    return `
-              <div class="timeline-actions" data-actions-for="${stopId}">
+  //
+  // Revert is rendered from the server's `can_revert` flag rather than from a
+  // status check here: the undo window is time-bounded, and a browser clock a
+  // few minutes off would otherwise offer a button the API refuses. It shows
+  // on terminal stops too — a stop mis-advanced to completed is exactly the
+  // one a dispatcher needs it on, and that row has no other actions at all.
+  function buildActionsHtml(stop, execStatus) {
+    const actionable = ACTIONABLE.includes(execStatus);
+    const revertible = !!stop.can_revert;
+    if (!actionable && !revertible) return '';
+    const stopId = stop.id;
+
+    const forwardHtml = actionable ? `
                 <button class="btn-nav" data-action="advance" data-stop-id="${stopId}" data-expected-status="${execStatus}">Advance</button>
                 <button class="btn-nav" data-action="skip" data-stop-id="${stopId}">Skip</button>
-                <button class="btn-danger" data-action="cancel" data-stop-id="${stopId}">Cancel</button>
-              </div>
+                <button class="btn-danger" data-action="cancel" data-stop-id="${stopId}">Cancel</button>` : '';
+
+    const revertHtml = revertible ? `
+                <button class="btn-nav btn-revert" data-action="revert" data-stop-id="${stopId}" data-expected-status="${execStatus}" title="Undo the last change to this stop">&#8617; Revert</button>` : '';
+
+    // The reason row only serves Skip/Cancel, so a terminal stop showing
+    // nothing but Revert doesn't carry one.
+    const reasonHtml = actionable ? `
               <div class="timeline-reason-row" data-reason-for="${stopId}" style="display:none;">
                 <input type="text" class="timeline-reason-input" data-reason-input>
                 <button class="btn-nav" data-reason-confirm="${stopId}">Confirm</button>
                 <button class="btn-nav" data-reason-cancel="${stopId}">&times;</button>
-              </div>`;
+              </div>` : '';
+
+    return `
+              <div class="timeline-actions" data-actions-for="${stopId}">${forwardHtml}${revertHtml}
+              </div>${reasonHtml}`;
   }
 
   // Stop ids with an open (mid-edit) reason row — content patching for
@@ -146,6 +190,16 @@ window.DASH = window.DASH || {};
   // out whatever the dispatcher is typing.
   const openReasonStopIds = new Set();
 
+  const REASON_PLACEHOLDER = {
+    cancel: 'Reason (required)',
+    skip: 'Reason (optional)',
+    // Reached only after the server has refused the completion for want of
+    // photos. A blank override would record that proof was waived and say
+    // nothing about why, which is the one thing that makes the exception
+    // defensible later.
+    advance: 'No photo — why? (required)',
+  };
+
   function showReasonRow(container, stopId, action) {
     const actionsRow = container.querySelector(`[data-actions-for="${stopId}"]`);
     const reasonRow = container.querySelector(`[data-reason-for="${stopId}"]`);
@@ -153,7 +207,7 @@ window.DASH = window.DASH || {};
     openReasonStopIds.add(String(stopId));
     reasonRow.dataset.pendingAction = action;
     const input = reasonRow.querySelector('[data-reason-input]');
-    input.placeholder = action === 'cancel' ? 'Reason (required)' : 'Reason (optional)';
+    input.placeholder = REASON_PLACEHOLDER[action] || 'Reason (optional)';
     input.value = '';
     actionsRow.style.display = 'none';
     reasonRow.style.display = '';
@@ -176,14 +230,17 @@ window.DASH = window.DASH || {};
     const input = reasonRow.querySelector('[data-reason-input]');
     const reason = input.value.trim();
 
-    if (action === 'cancel' && !reason) {
-      UI.toast('A reason is required to cancel a stop', 'error');
+    if (!reason && (action === 'cancel' || action === 'advance')) {
+      UI.toast(action === 'advance'
+        ? 'Say why there is no photo before completing without one'
+        : 'A reason is required to cancel a stop', 'error');
       input.focus();
       return;
     }
 
     hideReasonRow(container, stopId);
-    handleStopAction(parseInt(stopId, 10), action, reason);
+    handleStopAction(parseInt(stopId, 10), action, reason,
+                     reasonRow.dataset.expectedStatus, null, container);
   }
 
   // Guards against the same stop being actioned twice while the first request
@@ -192,7 +249,48 @@ window.DASH = window.DASH || {};
   // just an impatient second tap.
   const inFlightStopIds = new Set();
 
-  function handleStopAction(stopId, action, reason, expectedStatus, buttonEl) {
+  // How long the undo offer stays on screen. Deliberately longer than the
+  // default toast: the mis-tap is usually noticed a beat after it happens,
+  // once the panel repaints and shows the wrong stop.
+  const UNDO_TOAST_MS = 9000;
+
+  // The status a stop lands in, needed as the undo's staleness token before
+  // the refresh that would tell us. Advance's response says "advanced" or
+  // "completed", which are outcomes rather than statuses, so the walk is
+  // reproduced here from the status the button was rendered with.
+  //
+  // Returns null when that status is unknown, and the undo then goes without
+  // a token — the server still refuses anything it can't legally step back.
+  function resultingStatus(action, expectedStatus) {
+    if (action === 'skip') return 'skipped';
+    if (action === 'cancel') return 'cancelled';
+    if (action === 'advance') {
+      if (expectedStatus === 'planned') return 'arrived';
+      if (expectedStatus === 'arrived') return 'completed';
+    }
+    return null;
+  }
+
+  const UNDOABLE_MESSAGE = {
+    arrived: 'Stop marked arrived',
+    completed: 'Stop marked completed',
+    skipped: 'Stop skipped',
+    cancelled: 'Stop cancelled',
+  };
+
+  function offerUndo(stopId, action, expectedStatus) {
+    const landed = resultingStatus(action, expectedStatus);
+    const message = UNDOABLE_MESSAGE[landed] || 'Stop updated';
+    UI.toast(message, 'success', UNDO_TOAST_MS, {
+      actionLabel: 'Undo',
+      // Goes through handleStopAction rather than DASH.api.revert directly, so
+      // the undo inherits the same in-flight guard and error reporting as the
+      // Revert button — a double-tapped Undo is one request, not two.
+      onAction: () => handleStopAction(stopId, 'revert', '', landed || undefined),
+    });
+  }
+
+  function handleStopAction(stopId, action, reason, expectedStatus, buttonEl, container) {
     const token = `${stopId}:${action}`;
     if (inFlightStopIds.has(token)) return;
     inFlightStopIds.add(token);
@@ -200,7 +298,11 @@ window.DASH = window.DASH || {};
 
     let promise;
     if (action === 'advance') {
-      promise = DASH.api.advance(stopId, expectedStatus);
+      // `reason` is the override — empty on a normal advance, which is what
+      // lets the server refuse and ask for one.
+      promise = DASH.api.advance(stopId, expectedStatus, reason || '');
+    } else if (action === 'revert') {
+      promise = DASH.api.revert(stopId, expectedStatus);
     } else if (action === 'skip') {
       promise = DASH.api.skip(stopId, reason || '');
     } else if (action === 'cancel') {
@@ -212,8 +314,33 @@ window.DASH = window.DASH || {};
     }
 
     promise
-      .then(() => DASH.state.refreshNow())
-      .catch((err) => UI.toast(`${action.charAt(0).toUpperCase()}${action.slice(1)} failed: ${err.message}`, 'error', 6000))
+      .then((resp) => {
+        // The action just added a row to this stop's log. If the dispatcher
+        // has that panel open, it is now stale — and a history panel showing
+        // a change that already happened as absent is worse than no panel.
+        refreshHistoryFor(stopId);
+        if (action === 'revert') {
+          // No undo offered on an undo: the way forward from here is the
+          // Advance button, which is sitting right there and says so.
+          UI.toast(`Stop restored to ${statusLabel((resp && resp.status) || 'planned')}`, 'success');
+        } else {
+          offerUndo(stopId, action, expectedStatus);
+        }
+        return DASH.state.refreshNow();
+      })
+      .catch((err) => {
+        // A completion blocked for want of photos is not a failure to report
+        // and forget — it is a question. Offer the override inline, with the
+        // server's own message explaining which photo is missing.
+        if (err && err.body && err.body.proof_required && container) {
+          UI.toast(err.message, 'warning', 7000);
+          const reasonRow = container.querySelector(`[data-reason-for="${stopId}"]`);
+          if (reasonRow) reasonRow.dataset.expectedStatus = expectedStatus || '';
+          showReasonRow(container, String(stopId), 'advance');
+          return;
+        }
+        UI.toast(`${action.charAt(0).toUpperCase()}${action.slice(1)} failed: ${err.message}`, 'error', 6000);
+      })
       .finally(() => {
         inFlightStopIds.delete(token);
         // The button usually vanishes with the next render; re-enable anyway
@@ -233,8 +360,9 @@ window.DASH = window.DASH || {};
         if (actionBtn.disabled) return;
         const stopId = parseInt(actionBtn.dataset.stopId, 10);
         const action = actionBtn.dataset.action;
-        if (action === 'advance') {
-          handleStopAction(stopId, 'advance', '', actionBtn.dataset.expectedStatus, actionBtn);
+        if (action === 'advance' || action === 'revert') {
+          handleStopAction(stopId, action, '', actionBtn.dataset.expectedStatus,
+                           actionBtn, container);
         } else {
           showReasonRow(container, actionBtn.dataset.stopId, action);
         }
@@ -273,13 +401,10 @@ window.DASH = window.DASH || {};
 
     let loaded = false;
     let loading = false;
-    toggleBtn.addEventListener('click', async () => {
-      const opening = photosEl.style.display === 'none';
-      photosEl.style.display = opening ? '' : 'none';
-      if (!opening || loaded || loading) return;
 
+    async function load() {
+      if (loading) return;
       loading = true;
-      photosEl.innerHTML = '<span class="timeline-photos-status">Loading photos…</span>';
       try {
         const images = await DASH.api.stopImages(stopId);
         loaded = true;
@@ -296,7 +421,159 @@ window.DASH = window.DASH || {};
       } finally {
         loading = false;
       }
+    }
+
+    // Uploading invalidates the cache. Without this the gallery keeps showing
+    // the set of photos that existed when it was first opened — so the photo
+    // the dispatcher just took would be absent from the panel immediately
+    // below the button they took it with.
+    photoReloaders.set(String(stopId), () => {
+      loaded = false;
+      if (photosEl.style.display !== 'none') load();
     });
+
+    toggleBtn.addEventListener('click', () => {
+      const opening = photosEl.style.display === 'none';
+      photosEl.style.display = opening ? '' : 'none';
+      if (!opening || loaded || loading) return;
+      photosEl.innerHTML = '<span class="timeline-photos-status">Loading photos…</span>';
+      load();
+    });
+  }
+
+  // ── Proof upload ────────────────────────────────────────────────
+  // The two photos a stop needs before it can be completed. `capture` opens
+  // the camera directly on a phone, which is where this is used; on a
+  // desktop it degrades to an ordinary file picker.
+  //
+  // Lives in the stop row rather than the pinned current-stop card: that
+  // card is re-rendered by replacing its innerHTML whenever its content
+  // changes, which on a poll mid-selection would discard the file input and
+  // whatever the dispatcher had chosen. The row's nodes are stable.
+  const PROOF_CATEGORIES = [
+    ['unload', 'Unloaded goods'],
+    ['door', 'Locked door / gate'],
+  ];
+
+  const photoReloaders = new Map(); // stop_id → () => void
+
+  function buildUploadHtml(stopId) {
+    const options = PROOF_CATEGORIES
+      .map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
+    return `
+            <div class="timeline-upload-wrap">
+              <select class="timeline-upload-category" data-upload-category="${stopId}">${options}</select>
+              <label class="btn-nav timeline-upload-btn">
+                &#128248; Add photo
+                <input type="file" accept="image/*" capture="environment"
+                       data-upload-input="${stopId}" style="display:none;">
+              </label>
+              <span class="timeline-upload-status" data-upload-status="${stopId}"></span>
+            </div>`;
+  }
+
+  function bindUpload(bodyEl, stopId) {
+    const input = bodyEl.querySelector(`[data-upload-input="${stopId}"]`);
+    const categoryEl = bodyEl.querySelector(`[data-upload-category="${stopId}"]`);
+    const statusEl = bodyEl.querySelector(`[data-upload-status="${stopId}"]`);
+    if (!input || !categoryEl || !statusEl) return;
+
+    input.addEventListener('change', async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      const category = categoryEl.value;
+
+      statusEl.textContent = 'Uploading…';
+      input.disabled = true;
+      try {
+        await DASH.api.uploadStopImage(stopId, file, category);
+        const label = (PROOF_CATEGORIES.find((c) => c[0] === category) || [, category])[1];
+        statusEl.textContent = `${label} saved`;
+        UI.toast('Photo uploaded', 'success');
+        // The gallery caches its fetch, so without this the photo the
+        // dispatcher just took would be missing from the panel directly
+        // below the button they took it with.
+        const reload = photoReloaders.get(String(stopId));
+        if (reload) reload();
+      } catch (err) {
+        statusEl.textContent = '';
+        UI.toast(`Upload failed: ${err.message}`, 'error', 6000);
+      } finally {
+        input.disabled = false;
+        // Clearing the value matters: selecting the same file twice in a row
+        // fires no change event otherwise, so a retry after a failure would
+        // appear to do nothing.
+        input.value = '';
+      }
+    });
+  }
+
+  // ── Phase history ───────────────────────────────────────────────
+  // Same lazy pattern as the photo gallery, with one deliberate difference:
+  // photos cache forever, which is right for images and wrong here. This log
+  // changes every time a button on the stop is pressed, so the cache is
+  // invalidated by handleStopAction and the panel refetches while open.
+  const historyReloaders = new Map(); // stop_id → () => void
+
+  function historyRowsHtml(events) {
+    return events.map((e) => {
+      const when = formatTime(e.occurred_at);
+      const from = e.from_status ? statusLabel(e.from_status) : '—';
+      const move = `${from} &rarr; ${statusLabel(e.to_status)}`;
+      const action = e.action === 'revert' ? ' <em>(reverted)</em>' : '';
+      const reason = e.reason ? ` — ${escapeHtml(e.reason)}` : '';
+      return `<div class="timeline-history-row">
+                <span class="th-time">${escapeHtml(when)}</span>
+                <span class="th-move">${move}${action}${reason}</span>
+              </div>`;
+    }).join('');
+  }
+
+  function bindHistoryToggle(bodyEl, stopId) {
+    const toggleBtn = bodyEl.querySelector(`[data-history-toggle="${stopId}"]`);
+    const historyEl = bodyEl.querySelector(`[data-history-for="${stopId}"]`);
+    if (!toggleBtn || !historyEl) return;
+
+    let loading = false;
+
+    async function load() {
+      if (loading) return;
+      loading = true;
+      try {
+        const events = await DASH.api.stopHistory(stopId);
+        if (!events || events.length === 0) {
+          // Distinguishes "nothing has happened to this stop yet" from
+          // "this stop predates the log" — the second is permanent, and a
+          // dispatcher looking for a missing record deserves to know which.
+          historyEl.innerHTML =
+            '<span class="timeline-history-status">No phase changes recorded for this stop</span>';
+          return;
+        }
+        historyEl.innerHTML = historyRowsHtml(events);
+      } catch (err) {
+        historyEl.innerHTML =
+          `<span class="timeline-history-status">Failed to load history: ${escapeHtml(err.message)}</span>`;
+      } finally {
+        loading = false;
+      }
+    }
+
+    historyReloaders.set(String(stopId), () => {
+      if (historyEl.style.display !== 'none') load();
+    });
+
+    toggleBtn.addEventListener('click', () => {
+      const opening = historyEl.style.display === 'none';
+      historyEl.style.display = opening ? '' : 'none';
+      if (!opening) return;
+      historyEl.innerHTML = '<span class="timeline-history-status">Loading history…</span>';
+      load();
+    });
+  }
+
+  function refreshHistoryFor(stopId) {
+    const reload = historyReloaders.get(String(stopId));
+    if (reload) reload();
   }
 
   function buildDetailHtml(s, execStatus, eta) {
@@ -311,12 +588,12 @@ window.DASH = window.DASH || {};
                 ${s.product_description ? '<span class="label">Product:</span><span class="value">' + escapeHtml(s.product_description) + '</span>' : ''}
                 <span class="label">Arrival:</span><span class="value">${formatTime(s.actual_arrival_at)}</span>
                 <span class="label">Departure:</span><span class="value">${formatTime(s.actual_departure_at)}</span>
-                ${eta ? '<span class="label">ETA:</span><span class="value">' + (typeof eta === 'number' ? Math.round(eta / 60) + ' min' : escapeHtml(String(eta))) + '</span>' : ''}
+                ${etaCellHtml(eta)}
                 ${s.note ? '<span class="label">Notes:</span><span class="value" style="font-style:italic;">' + escapeHtml(s.note) + '</span>' : ''}
                 ${s.skip_reason ? '<span class="label">Skip reason:</span><span class="value">' + escapeHtml(s.skip_reason) + '</span>' : ''}
                 ${s.cancel_reason ? '<span class="label">Cancel reason:</span><span class="value">' + escapeHtml(s.cancel_reason) + '</span>' : ''}
               </div>
-              ${buildActionsHtml(s.id, execStatus)}`;
+              ${buildActionsHtml(s, execStatus)}`;
   }
 
   function createStop(s) {
@@ -339,9 +616,14 @@ window.DASH = window.DASH || {};
           </div>
           <div class="timeline-body" data-body="${s.id}">
             <div class="timeline-detail-wrap"></div>
+            ${buildUploadHtml(s.id)}
             <div class="timeline-photos-wrap">
               <button class="btn-nav timeline-photos-toggle" data-photos-toggle="${s.id}">&#128247; Photos</button>
               <div class="timeline-photos" data-photos-for="${s.id}" style="display:none;"></div>
+            </div>
+            <div class="timeline-history-wrap">
+              <button class="btn-nav timeline-history-toggle" data-history-toggle="${s.id}">&#128337; History</button>
+              <div class="timeline-history" data-history-for="${s.id}" style="display:none;"></div>
             </div>
           </div>`;
 
@@ -373,7 +655,9 @@ window.DASH = window.DASH || {};
     });
 
     bindActionDelegation(detailWrapEl);
+    bindUpload(bodyEl, s.id);
     bindPhotosToggle(bodyEl, s.id);
+    bindHistoryToggle(bodyEl, s.id);
 
     return {
       el,
@@ -394,6 +678,14 @@ window.DASH = window.DASH || {};
     _setKey: null,
     _currentStopCardHtml: null,
     _currentStopCardBound: false,
+
+    // The keyboard shortcuts in main.js must not fire while a skip/cancel
+    // reason is mid-typing — 'a' would otherwise advance a stop under the
+    // dispatcher's hands. Reuses the set that already suppresses content
+    // patching for the same rows rather than tracking open state twice.
+    hasOpenReasonRow() {
+      return openReasonStopIds.size > 0;
+    },
 
     // Full rebuild only when the set of stop ids changes (vehicle selection
     // switch, or a stop inserted); a same-assignment poll only patches the
@@ -436,12 +728,16 @@ window.DASH = window.DASH || {};
         this._setKey = key;
       }
 
+      etaBaselineMs = (etas && etas._receivedAt) || null;
+
       const etaMap = {};
       if (etas && etas.etas) {
         etas.etas.forEach((e) => {
           if (e.stop_id != null) etaMap[e.stop_id] = e.eta_seconds != null ? e.eta_seconds : (e.eta || '--');
         });
       }
+
+      this._renderRestrictionBanner(etas);
 
       list.forEach((s, idx) => {
         let entry = this._stopNodes.get(s.id);
@@ -456,6 +752,64 @@ window.DASH = window.DASH || {};
         }
         this._patchStop(entry, s, currentStopId, etaMap[s.id], list, idx);
       });
+    },
+
+    // One banner for the whole route rather than a warning per stop. The
+    // dispatcher's question is "is this route safe for this truck", which is
+    // answered once; repeating it on every affected stop would be noise, and
+    // threading it through _patchStop would put new state inside the diffing
+    // renderer for no gain. The map already says *which* legs are affected.
+    //
+    // Note this is per-selected-vehicle only: /api/execution/dashboard does no
+    // routing, so there is no fleet-wide restriction signal to put in the
+    // vehicle list without an ORS call per truck per poll.
+    _renderRestrictionBanner(etas) {
+      const el = document.getElementById('restrictionBanner');
+      if (!el) return;
+
+      const legs = (etas && etas.etas) || [];
+      const violated = legs.filter((l) => l.restriction_status === 'violated').length;
+      const source = etas && etas.restrictions_source;
+      const restrictions = (etas && etas.restrictions) || {};
+
+      // Nothing routed yet, or nothing worth saying.
+      if (legs.length === 0 || (violated === 0 && source !== 'type_default' && source !== 'mixed' && source !== 'none')) {
+        if (el.style.display !== 'none') {
+          el.style.display = 'none';
+          el.innerHTML = '';
+        }
+        return;
+      }
+
+      const limits = [];
+      if (restrictions.height) limits.push(`${restrictions.height} m tall`);
+      if (restrictions.width) limits.push(`${restrictions.width} m wide`);
+      if (restrictions.length) limits.push(`${restrictions.length} m long`);
+      if (restrictions.weight) limits.push(`${restrictions.weight} t`);
+      const limitText = limits.length ? limits.join(' · ') : 'no limits recorded';
+
+      let cls = 'restriction-banner';
+      let html = '';
+
+      if (violated > 0) {
+        cls += ' violated';
+        html = `<strong>${violated} leg${violated === 1 ? '' : 's'} shown in red exceed this vehicle's limits.</strong>
+          <span>No route respecting ${escapeHtml(limitText)} was found, so the red sections ignore those limits.
+          They may not be legal or physically passable for this truck — check before dispatching.</span>`;
+      } else if (source === 'none') {
+        cls += ' unchecked';
+        html = `<strong>Route not checked against this vehicle.</strong>
+          <span>No dimensions or weight are recorded for it, and its type has no estimate.</span>`;
+      } else {
+        cls += ' estimated';
+        html = `<strong>Routed on estimated dimensions.</strong>
+          <span>Using ${escapeHtml(limitText)} from the vehicle type${source === 'mixed' ? ' for the values this vehicle is missing' : ''},
+          not its registration certificate.</span>`;
+      }
+
+      if (el.className !== cls) el.className = cls;
+      if (el.innerHTML !== html) el.innerHTML = html;
+      el.style.display = '';
     },
 
     // Resets to the empty state and drops the node cache — use this instead
@@ -548,7 +902,9 @@ window.DASH = window.DASH || {};
       const phoneHtml = phone
         ? `<a class="cs-phone" href="tel:${escapeHtml(phone.replace(/[^0-9+]/g, ''))}">&#128222; ${escapeHtml(phone)}</a>`
         : '';
-      const etaText = typeof eta === 'number' ? `ETA ${Math.round(eta / 60)} min` : '';
+      const etaClock = UI.etaClock(eta, etas && etas._receivedAt);
+      const etaText = etaClock ? `ETA ${etaClock}` : '';
+      const etaTitle = etaClock ? ` title="in ${escapeHtml(UI.etaRelative(eta))}"` : '';
 
       const html = `
               <div class="cs-header">
@@ -560,9 +916,9 @@ window.DASH = window.DASH || {};
                 ${stop.address ? `<div class="cs-address">${escapeHtml(stop.address)}</div>` : ''}
                 ${stop.manager_name ? `<div class="cs-manager">${escapeHtml(stop.manager_name)}</div>` : ''}
                 ${phoneHtml}
-                ${etaText ? `<div class="cs-eta">${etaText}</div>` : ''}
+                ${etaText ? `<div class="cs-eta"${etaTitle}>${etaText}</div>` : ''}
               </div>
-              ${buildActionsHtml(stop.id, execStatus)}`;
+              ${buildActionsHtml(stop, execStatus)}`;
 
       card.style.display = '';
       if (openReasonStopIds.has(String(stop.id))) return;

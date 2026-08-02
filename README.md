@@ -30,6 +30,21 @@ request handler or in an assembled response. Run both for any delivery change.
 
 `pytest tests/` runs everything — **254 tests**.
 
+### Dispatch Dashboard Frontend Tests (34 drives, non-pytest)
+
+```bash
+npm install jsdom                    # once; dev-only, not vendored
+node tests/js/dashboard.test.js
+# jsdom installed elsewhere? NODE_PATH=/path/to/node_modules node tests/js/dashboard.test.js
+```
+
+Frontend changes get no pytest coverage at all, so this is the dashboard's only real
+verification. It drives the actual `static/js/dashboard/*` modules against the actual
+`templates/delivery-dashboard.html` (loaded from disk with its `<script>` tags stripped),
+with only the API and Leaflet map stubbed — so an element id renamed in the template but
+not in the JS fails here. Run it for any change under `static/js/dashboard/`, alongside
+`node --check` on the touched files.
+
 ### Truck Load Planner Tests (31 tests)
 
 ```bash

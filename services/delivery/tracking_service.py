@@ -69,7 +69,11 @@ def normalize_gps_position(raw_vehicle: dict) -> dict:
         "speed_kmh": _parse_speed_kmh(speed_status),
         "vehicle_status": vehicle.get("vehicle_status", "unknown"),
         "engine_status": vehicle.get("engine_status", ""),
+        # Raw TTAS text for display; the ISO twin for anything computing an
+        # age. None means "position is real, its age is unknown" — a third
+        # state the dashboard must show rather than guess at.
         "last_update": vehicle.get("last_update", ""),
+        "last_update_iso": vehicle.get("last_update_iso"),
         "driver_name": vehicle.get("driver_name", "Unknown"),
     }
 

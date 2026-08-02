@@ -9,6 +9,13 @@ from services.vehicle_identity import build_index, canonical_plate
 logger = logging.getLogger(__name__)
 
 
+# The driver shown for an assignment. A free-text name typed during plan
+# creation wins over the linked drivers row — the dispatcher was recording a
+# stand-in for that day. Aliased to ``driver_name`` (not the raw column name)
+# so it does not collide with the ``va.*`` these queries also select.
+DRIVER_NAME_SQL = "COALESCE(NULLIF(va.driver_name_override, ''), d.name) AS driver_name"
+
+
 # ---- Drivers ----
 
 def list_drivers(db_path: str):
@@ -55,8 +62,8 @@ def get_plan(db_path: str, plan_id: int):
             return None
         plan = dict(row)
 
-        c.execute("""
-            SELECT va.*, v.plate_number, d.name as driver_name
+        c.execute(f"""
+            SELECT va.*, v.plate_number, {DRIVER_NAME_SQL}
             FROM vehicle_assignments va
             LEFT JOIN vehicles v ON v.id = va.vehicle_id
             LEFT JOIN drivers d ON d.id = va.driver_id
@@ -132,8 +139,8 @@ def list_assignments(db_path: str, plan_id: Optional[int] = None):
     with DatabaseManager(db_path).connect() as conn:
         c = conn.cursor()
         if plan_id:
-            c.execute("""
-                SELECT va.*, v.plate_number, d.name as driver_name
+            c.execute(f"""
+                SELECT va.*, v.plate_number, {DRIVER_NAME_SQL}
                 FROM vehicle_assignments va
                 LEFT JOIN vehicles v ON v.id = va.vehicle_id
                 LEFT JOIN drivers d ON d.id = va.driver_id
@@ -141,8 +148,8 @@ def list_assignments(db_path: str, plan_id: Optional[int] = None):
                 ORDER BY va.sequence
             """, (plan_id,))
         else:
-            c.execute("""
-                SELECT va.*, v.plate_number, d.name as driver_name
+            c.execute(f"""
+                SELECT va.*, v.plate_number, {DRIVER_NAME_SQL}
                 FROM vehicle_assignments va
                 LEFT JOIN vehicles v ON v.id = va.vehicle_id
                 LEFT JOIN drivers d ON d.id = va.driver_id
@@ -154,8 +161,10 @@ def list_assignments(db_path: str, plan_id: Optional[int] = None):
 def get_assignment(db_path: str, assignment_id: int):
     with DatabaseManager(db_path).connect() as conn:
         c = conn.cursor()
-        c.execute("""
-            SELECT va.*, v.plate_number, d.name as driver_name
+        c.execute(f"""
+            SELECT va.*, v.plate_number, v.vehicle_type, {DRIVER_NAME_SQL},
+                   v.gross_weight_kg, v.overall_height_mm, v.overall_width_mm,
+                   v.overall_length_mm, v.axle_load_kg
             FROM vehicle_assignments va
             LEFT JOIN vehicles v ON v.id = va.vehicle_id
             LEFT JOIN drivers d ON d.id = va.driver_id
@@ -168,18 +177,22 @@ def get_assignment(db_path: str, assignment_id: int):
 
 
 def create_assignment(db_path: str, plan_id: int, vehicle_id: int,
-                      driver_id: Optional[int] = None, sequence: int = 0, notes: str = ""):
+                      driver_id: Optional[int] = None, sequence: int = 0, notes: str = "",
+                      driver_name: Optional[str] = None):
     with DatabaseManager(db_path).connect() as conn:
         c = conn.cursor()
         c.execute(
-            "INSERT INTO vehicle_assignments (plan_id, vehicle_id, driver_id, sequence, notes) VALUES (?, ?, ?, ?, ?)",
-            (plan_id, vehicle_id, driver_id, sequence, notes)
+            "INSERT INTO vehicle_assignments (plan_id, vehicle_id, driver_id, driver_name_override, sequence, notes)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (plan_id, vehicle_id, driver_id, (driver_name or "").strip(), sequence, notes)
         )
         return c.lastrowid
 
 
 def update_assignment(db_path: str, assignment_id: int, **kwargs):
-    allowed = {"vehicle_id", "driver_id", "sequence", "notes"}
+    if "driver_name" in kwargs:
+        kwargs["driver_name_override"] = (kwargs.pop("driver_name") or "").strip()
+    allowed = {"vehicle_id", "driver_id", "driver_name_override", "sequence", "notes"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
         return False
@@ -203,11 +216,18 @@ def delete_assignment(db_path: str, assignment_id: int):
 def list_stops(db_path: str, assignment_id: int):
     with DatabaseManager(db_path).connect() as conn:
         c = conn.cursor()
+        # plan_date rides along because correctability is decided per plan-day
+        # (execution_service.can_revert), and carrying it here keeps that
+        # answer computable from a single row rather than needing a second
+        # lookup per request.
         c.execute("""
             SELECT s.*, e.id as execution_id, e.execution_sequence, e.status as execution_status,
-                   e.skip_reason, e.cancel_reason, e.actual_arrival_at, e.actual_departure_at, e.completed_at
+                   e.skip_reason, e.cancel_reason, e.actual_arrival_at, e.actual_departure_at, e.completed_at,
+                   dp.plan_date
             FROM delivery_plan_stops s
             LEFT JOIN stop_executions e ON e.stop_id = s.id
+            LEFT JOIN vehicle_assignments va ON va.id = s.vehicle_assignment_id
+            LEFT JOIN delivery_plans dp ON dp.id = va.plan_id
             WHERE s.vehicle_assignment_id = ?
             ORDER BY COALESCE(e.execution_sequence, s.planned_sequence)
         """, (assignment_id,))

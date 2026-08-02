@@ -1,10 +1,13 @@
 import io
+import logging
 import os
 import sys
 import json
 import sqlite3
 import tempfile
 import pytest
+import requests
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -17,6 +20,7 @@ from services.delivery import image_service
 from services.delivery import tracking_service
 from services import vehicle_identity
 from services.delivery.database import init_delivery_tables
+from app.database.migrations import add_vehicle_envelope_columns
 from app.db import DatabaseManager
 
 
@@ -38,7 +42,7 @@ def isolated_upload_root(tmp_path, monkeypatch):
 
     root = tmp_path / "DeliveryPlans"
     root.mkdir()
-    monkeypatch.setattr(image_service, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(image_service, "DATA_ROOT", tmp_path)
     monkeypatch.setattr(image_service, "UPLOAD_ROOT", root)
     yield root
 
@@ -64,6 +68,9 @@ def db_path():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Run the real migration rather than restating its column list here — a
+    # duplicated list drifts silently until a query on the new columns fails.
+    add_vehicle_envelope_columns(conn)
     conn.execute("INSERT INTO vehicles (plate_number, current_driver) VALUES ('TEST-01', 'Test Driver')")
     conn.commit()
     conn.close()
@@ -73,8 +80,18 @@ def db_path():
     os.unlink(path)
 
 
-def _create_plan(db_path, name="Test Plan", plan_date="2026-07-26"):
-    return plan_service.create_plan(db_path, name, plan_date)
+def _create_plan(db_path, name="Test Plan", plan_date=None):
+    """Defaults to *today*, because a plan under execution is today's work.
+
+    This used to be a hard-coded 2026-07-26, which was fine while nothing
+    depended on the date. Correctability is now decided per plan-day
+    (execution_service.can_revert), so a frozen date would have silently
+    meant "closed record" and every revert test would have been asserting
+    the refusal path.
+    """
+    return plan_service.create_plan(
+        db_path, name, plan_date or date.today().isoformat()
+    )
 
 
 def _create_vehicle_assignment(db_path, plan_id, vehicle_id=1):
@@ -89,6 +106,54 @@ def _create_stop(db_path, assignment_id, seq, station_name="Stop", lat=10.8, lng
         manager_name="Mr T", manager_phone="0900000000",
         product_description="Test Product",
     )
+
+
+def _give_proof(db_path, stop_id, categories=None):
+    """Attach the photos a completion requires, without touching the disk.
+
+    The gate reads delivery_stop_images, not the filesystem, so rows are
+    enough — and a test that had to write real .jpg files to advance a stop
+    would be slower and would leave litter behind (the reason
+    isolated_upload_root exists at all).
+    """
+    conn = sqlite3.connect(db_path)
+    for cat in (categories or execution_service.PROOF_CATEGORIES):
+        conn.execute(
+            "INSERT INTO delivery_stop_images (stop_id, category, filename, relative_path) "
+            "VALUES (?, ?, ?, ?)",
+            (stop_id, cat, f"{cat}.jpg", f"DeliveryPlans/{cat}.jpg"),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _clear_status_events(db_path, stop_id):
+    """Erase a stop's phase log, standing in for every stop last touched
+    before the log existed — nothing was backfilled, so those are real."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM stop_status_events WHERE stop_id = ?", (stop_id,))
+    conn.commit()
+    conn.close()
+
+
+def _backdate(db_path, stop_id, minutes):
+    """Push a stop's action timestamps into the past.
+
+    Used to prove correctability is *not* governed by elapsed time any more:
+    the rule is the plan's date, so an action hours old on today's plan must
+    still be correctable.
+    """
+    then = (datetime.now() - timedelta(minutes=minutes)).isoformat()
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE stop_executions SET "
+        "  actual_arrival_at = CASE WHEN actual_arrival_at IS NULL THEN NULL ELSE ? END, "
+        "  completed_at      = CASE WHEN completed_at      IS NULL THEN NULL ELSE ? END "
+        "WHERE stop_id = ?",
+        (then, then, stop_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 # ===========================================================================
@@ -113,10 +178,15 @@ class TestEtaService:
         assert result["distance_km"] > 10
         assert result["duration_sec"] is None
 
-    @patch("services.delivery.eta_service.requests.get")
-    def test_calculate_eta_ors_success(self, mock_get):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
+    # ORS is reached through app.services.routing.request_directions now, so
+    # these patch requests.post there rather than requests.get here. The GET
+    # directions endpoint cannot carry an options body at all, which is why
+    # avoid_borders and the planned vehicle restrictions needed the move.
+    @patch("app.services.routing.requests.post")
+    def test_calculate_eta_ors_success(self, mock_post):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.ok = True
+        mock_post.return_value.json.return_value = {
             "features": [{
                 "geometry": {"coordinates": [[106.6, 10.8], [106.7, 10.9]]},
                 "properties": {"segments": [{"distance": 15000, "duration": 900}]}
@@ -124,22 +194,182 @@ class TestEtaService:
         }
         result = eta_service.calculate_eta("fake_key", "https://api.ors/v2/directions", 10.8, 106.6, 10.9, 106.7)
         assert result["source"] == "ors"
+        assert result["route_status"] == "ok"
         assert result["distance_km"] == 15.0
         assert result["duration_sec"] == 900
         # GeoJSON [lng, lat] must be converted to Leaflet [lat, lng]
         assert result["geometry"] == [[10.8, 106.6], [10.9, 106.7]]
 
+    @patch("app.services.routing.requests.post")
+    def test_calculate_eta_sends_avoid_borders(self, mock_post):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.ok = True
+        mock_post.return_value.json.return_value = {
+            "features": [{
+                "geometry": {"coordinates": [[106.6, 10.8], [106.7, 10.9]]},
+                "properties": {"segments": [{"distance": 15000, "duration": 900}]}
+            }]
+        }
+        eta_service.calculate_eta("fake_key", "https://api.ors/v2/directions", 10.8, 106.6, 10.9, 106.7)
+
+        _, kwargs = mock_post.call_args
+        body = kwargs["json"]
+        assert body["options"]["avoid_borders"] == "all"
+        # [lng, lat] pairs, in ORS order, origin first.
+        assert body["coordinates"] == [[106.6, 10.8], [106.7, 10.9]]
+        assert kwargs["headers"]["Authorization"] == "fake_key"
+
     def test_calculate_eta_no_api_key_has_no_geometry(self):
         result = eta_service.calculate_eta("", "", 10.8, 106.6, 10.9, 106.7)
         assert result["geometry"] is None
+        assert result["route_status"] == "not_configured"
 
-    @patch("services.delivery.eta_service.requests.get")
-    def test_calculate_eta_ors_failure_fallback(self, mock_get):
-        mock_get.side_effect = Exception("Connection error")
+    @patch("app.services.routing.requests.post")
+    def test_calculate_eta_ors_failure_fallback(self, mock_post):
+        mock_post.side_effect = requests.RequestException("Connection error")
         result = eta_service.calculate_eta("fake_key", "https://api.ors/v2/directions", 10.8, 106.6, 10.9, 106.7)
         assert result["source"] == "haversine_fallback"
+        assert result["route_status"] == "unavailable"
         assert result["distance_km"] > 10
         assert result["duration_sec"] is None
+
+    @patch("app.services.routing.requests.post")
+    def test_calculate_eta_no_route_is_not_reported_as_a_fallback(self, mock_post):
+        # ORS reports "no route" as HTTP 404 with 2009 in the body. Reading the
+        # status before the body would turn a routing finding into an
+        # indistinguishable network error — which is the whole point of the
+        # split, since with avoid_borders on, this is how a cross-border-only
+        # destination announces itself.
+        mock_post.return_value.status_code = 404
+        mock_post.return_value.ok = False
+        mock_post.return_value.json.return_value = {
+            "error": {"code": 2009, "message": "Route could not be found between locations."}
+        }
+        result = eta_service.calculate_eta("fake_key", "https://api.ors/v2/directions", 10.8, 106.6, 10.9, 106.7)
+        assert result["route_status"] == "no_route"
+        assert result["source"] == "haversine_no_route"
+        assert result["duration_sec"] is None
+
+    @patch("app.services.routing.requests.post")
+    def test_calculate_eta_point_not_found_is_also_no_route(self, mock_post):
+        mock_post.return_value.status_code = 404
+        mock_post.return_value.ok = False
+        mock_post.return_value.json.return_value = {
+            "error": {"code": 2010, "message": "Point was not found."}
+        }
+        result = eta_service.calculate_eta("fake_key", "https://api.ors/v2/directions", 10.8, 106.6, 10.9, 106.7)
+        assert result["route_status"] == "no_route"
+
+    # ── Phase C: the degraded-route ladder ───────────────────────────
+    def _ors_ok(self, mock_post):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.ok = True
+        mock_post.return_value.json.return_value = {
+            "features": [{
+                "geometry": {"coordinates": [[106.6, 10.8], [106.7, 10.9]]},
+                "properties": {"segments": [{"distance": 15000, "duration": 900}]}
+            }]
+        }
+
+    def _ors_no_route(self, mock_post):
+        mock_post.return_value.status_code = 404
+        mock_post.return_value.ok = False
+        mock_post.return_value.json.return_value = {
+            "error": {"code": 2009, "message": "Route could not be found between locations."}
+        }
+
+    OPTIONS = {"vehicle_type": "hgv",
+               "profile_params": {"restrictions": {"height": 3.2, "weight": 8.5}}}
+
+    @patch("app.services.routing.requests.post")
+    def test_a_route_found_under_restrictions_is_compliant(self, mock_post):
+        self._ors_ok(mock_post)
+        result = eta_service.calculate_eta("k", "https://api.ors/v2/directions",
+                                           10.8, 106.6, 10.9, 106.7, options=self.OPTIONS)
+        assert result["restriction_status"] == "compliant"
+        sent = mock_post.call_args.kwargs["json"]["options"]
+        assert sent["vehicle_type"] == "hgv"
+        assert sent["profile_params"]["restrictions"]["height"] == 3.2
+
+    @patch("app.services.routing.requests.post")
+    def test_a_route_with_no_restrictions_to_apply_is_unrestricted_not_compliant(self, mock_post):
+        self._ors_ok(mock_post)
+        result = eta_service.calculate_eta("k", "https://api.ors/v2/directions",
+                                           10.8, 106.6, 10.9, 106.7, options=None)
+        # "We did not check" must never read as "we checked and it passed".
+        assert result["restriction_status"] == "unrestricted"
+
+    @patch("app.services.routing.requests.post")
+    def test_no_compliant_route_retries_relaxed_and_marks_it_violated(self, mock_post):
+        responses = []
+
+        def side_effect(*args, **kwargs):
+            responses.append(kwargs["json"]["options"])
+            resp = MagicMock()
+            if len(responses) == 1:
+                resp.status_code, resp.ok = 404, False
+                resp.json.return_value = {"error": {"code": 2009, "message": "no route"}}
+            else:
+                resp.status_code, resp.ok = 200, True
+                resp.json.return_value = {
+                    "features": [{
+                        "geometry": {"coordinates": [[106.6, 10.8], [106.7, 10.9]]},
+                        "properties": {"segments": [{"distance": 21000, "duration": 1500}]}
+                    }]
+                }
+            return resp
+
+        mock_post.side_effect = side_effect
+        result = eta_service.calculate_eta("k", "https://api.ors/v2/directions",
+                                           10.8, 106.6, 10.9, 106.7, options=self.OPTIONS)
+
+        assert result["restriction_status"] == "violated"
+        assert result["route_status"] == "ok"
+        assert result["geometry"] is not None      # a line to draw, in red
+        assert len(responses) == 2
+
+        # The second attempt drops the dimensions but keeps vehicle_type, and
+        # avoid_borders survives both — the border rule is not part of what
+        # degrades.
+        assert "profile_params" not in responses[1]
+        assert responses[1]["vehicle_type"] == "hgv"
+        assert responses[0]["avoid_borders"] == "all"
+        assert responses[1]["avoid_borders"] == "all"
+
+    @patch("app.services.routing.requests.post")
+    def test_no_route_even_relaxed_gives_up_rather_than_looping(self, mock_post):
+        self._ors_no_route(mock_post)
+        result = eta_service.calculate_eta("k", "https://api.ors/v2/directions",
+                                           10.8, 106.6, 10.9, 106.7, options=self.OPTIONS)
+        assert result["route_status"] == "no_route"
+        assert result["restriction_status"] == "unknown"
+        assert mock_post.call_count == 2       # tried, relaxed, stopped
+
+    @patch("app.services.routing.requests.post")
+    def test_an_unrestricted_leg_does_not_retry(self, mock_post):
+        self._ors_no_route(mock_post)
+        eta_service.calculate_eta("k", "https://api.ors/v2/directions",
+                                  10.8, 106.6, 10.9, 106.7, options=None)
+        # Nothing to relax, so a second call would be a wasted request against
+        # a rate limit /api/eta is already close to.
+        assert mock_post.call_count == 1
+
+    @patch("app.services.routing.requests.post")
+    def test_a_transport_failure_is_not_retried_as_a_restriction_problem(self, mock_post):
+        mock_post.side_effect = requests.RequestException("connection reset")
+        result = eta_service.calculate_eta("k", "https://api.ors/v2/directions",
+                                           10.8, 106.6, 10.9, 106.7, options=self.OPTIONS)
+        assert result["route_status"] == "unavailable"
+        assert mock_post.call_count == 1
+
+    @patch("app.services.routing.requests.post")
+    def test_calculate_eta_server_error_is_unavailable_not_no_route(self, mock_post):
+        mock_post.return_value.status_code = 503
+        mock_post.return_value.ok = False
+        mock_post.return_value.text = "Service Unavailable"
+        mock_post.return_value.json.return_value = {"error": {"code": 2099, "message": "boom"}}
+        result = eta_service.calculate_eta("fake_key", "https://api.ors/v2/directions", 10.8, 106.6, 10.9, 106.7)
+        assert result["route_status"] == "unavailable"
 
     @patch("services.delivery.eta_service.calculate_eta")
     def test_calculate_etas_for_stops(self, mock_calc_eta):
@@ -181,6 +411,29 @@ class TestEtaService:
 
         assert mock_calc_eta.call_count == 1
         assert r1 == r2
+
+    @patch("services.delivery.eta_service.calculate_eta")
+    def test_route_cache_invalidated_when_the_vehicle_specs_change(self, mock_calc_eta):
+        mock_calc_eta.return_value = {"source": "ors", "distance_km": 5.0,
+                                      "duration_sec": 300, "geometry": None}
+        stops = [{"id": 1, "lat": 10.8, "lng": 106.6}]
+        short = {"vehicle_type": "hgv",
+                 "profile_params": {"restrictions": {"height": 3.0}}}
+        tall = {"vehicle_type": "hgv",
+                "profile_params": {"restrictions": {"height": 4.0}}}
+
+        eta_service.calculate_etas_for_stops("k", "u", 10.0, 106.0, stops,
+                                             assignment_id=1, options=short)
+        eta_service.calculate_etas_for_stops("k", "u", 10.0, 106.0, stops,
+                                             assignment_id=1, options=short)
+        assert mock_calc_eta.call_count == 1          # identical -> cached
+
+        # An assignment's vehicle is fixed, so without the restriction
+        # fingerprint in the key this would keep serving the 3.0 m route until
+        # the process restarted.
+        eta_service.calculate_etas_for_stops("k", "u", 10.0, 106.0, stops,
+                                             assignment_id=1, options=tall)
+        assert mock_calc_eta.call_count == 2
 
     @patch("services.delivery.eta_service.calculate_eta")
     def test_route_cache_invalidated_by_gps_move(self, mock_calc_eta):
@@ -324,6 +577,92 @@ class TestTrackingService:
         result = tracking_service.normalize_gps_position(_raw_ttas(speed="Chạy 42km/h"))
         assert result["speed_kmh"] == 42.0
 
+    def test_gps_position_carries_the_parsed_timestamp(self):
+        """The field every age computation reads. `last_update` stays raw for
+        display; `last_update_iso` is the one arithmetic may touch."""
+        result = tracking_service.normalize_gps_position(_raw_ttas(trktime="30/07/2026 10:00:00"))
+        assert result["last_update"] == "30/07/2026 10:00:00"
+        assert result["last_update_iso"] == "2026-07-30T10:00:00"
+
+    def test_unreadable_timestamp_yields_none_not_a_guess(self):
+        result = tracking_service.normalize_gps_position(_raw_ttas(trktime="sometime tuesday"))
+        assert result["last_update"] == "sometime tuesday"
+        assert result["last_update_iso"] is None
+
+
+class TestTtasTimestampParsing:
+    """TTAS writes dates day-first (`01/08/2026` is 1 August).
+
+    Before this was parsed server-side, `trktime` reached the browser as raw
+    text and `new Date()` read it **month-first**, which broke differently
+    depending on the day of the month — see `parse_ttas_timestamp`. The
+    dashboard reported every vehicle ~205 days stale on the 1st of a month,
+    and from the 13th reported nothing at all.
+
+    These fixtures deliberately use TTAS's real format. The pre-existing ones
+    used ISO, which is why the suite never caught any of it (audit T-01/T-02
+    is the same failure mode: a test asserting a contract production never
+    had).
+    """
+
+    def test_day_first_is_the_convention(self):
+        from app.services.ttas_client import parse_ttas_timestamp
+        # 1 August, not 8 January — the exact value behind the "GPS stale
+        # 4920h" reports, 4920h being precisely 8 Jan → 1 Aug.
+        assert parse_ttas_timestamp("01/08/2026 10:30:00") == "2026-08-01T10:30:00"
+
+    def test_a_day_past_the_twelfth_still_parses(self):
+        """The silent case. `13/08/2026` has no month 13, so `new Date()`
+        returned Invalid Date and the dashboard's isNaN guard skipped the
+        staleness check entirely for two thirds of every month."""
+        from app.services.ttas_client import parse_ttas_timestamp
+        assert parse_ttas_timestamp("13/08/2026 10:30:00") == "2026-08-13T10:30:00"
+        assert parse_ttas_timestamp("31/07/2026 09:00:00") == "2026-07-31T09:00:00"
+
+    def test_a_day_before_the_twelfth_is_not_swapped(self):
+        """`12/08/2026` read month-first as 8 December — a date in the
+        *future*, giving a negative age and therefore no warning."""
+        from app.services.ttas_client import parse_ttas_timestamp
+        assert parse_ttas_timestamp("12/08/2026 10:30:00") == "2026-08-12T10:30:00"
+
+    @pytest.mark.parametrize("value,expected", [
+        ("01/08/2026 10:30", "2026-08-01T10:30:00"),
+        ("01/08/2026", "2026-08-01T00:00:00"),
+        ("2026-08-01 10:30:00", "2026-08-01T10:30:00"),
+        ("2026-08-01T10:30:00", "2026-08-01T10:30:00"),
+        ("  01/08/2026 10:30:00  ", "2026-08-01T10:30:00"),
+    ])
+    def test_accepted_shapes(self, value, expected):
+        from app.services.ttas_client import parse_ttas_timestamp
+        assert parse_ttas_timestamp(value) == expected
+
+    @pytest.mark.parametrize("value", ["", None, "   ", "n/a", "32/08/2026", "01-08-2026 10:30"])
+    def test_unparseable_values_return_none(self, value):
+        """None means "age unknown", which the dashboard shows as its own
+        state. Returning a fabricated date here would be the original bug
+        with a different author."""
+        from app.services.ttas_client import parse_ttas_timestamp
+        assert parse_ttas_timestamp(value) is None
+
+    def test_an_unknown_format_is_logged_once_not_per_poll(self, caplog):
+        """40 vehicles on a 12s poll would write ~200 lines a minute. One line
+        per distinct shape is what makes a format change noticeable rather
+        than buried."""
+        from app.services import ttas_client
+        ttas_client._unparsed_timestamps_seen.discard("08.01.2026 10:30")
+        with caplog.at_level(logging.WARNING, logger=ttas_client.__name__):
+            for _ in range(5):
+                ttas_client.parse_ttas_timestamp("08.01.2026 10:30")
+        assert len([r for r in caplog.records if "Unrecognised TTAS timestamp" in r.message]) == 1
+
+    def test_normalize_vehicle_keeps_the_raw_text_alongside(self):
+        """static/js/map.js prints `last_update` verbatim in the fleet map
+        popup, so it must keep TTAS's own format."""
+        from app.services.ttas_client import normalize_vehicle
+        v = normalize_vehicle({"biensoxe": "50E-18463", "trktime": "01/08/2026 10:30:00"})
+        assert v["last_update"] == "01/08/2026 10:30:00"
+        assert v["last_update_iso"] == "2026-08-01T10:30:00"
+
     def test_speed_parses_decimal(self):
         result = tracking_service.normalize_gps_position(_raw_ttas(speed="Chạy 37.5 km/h"))
         assert result["speed_kmh"] == 37.5
@@ -374,6 +713,8 @@ class TestStopProgression:
         assert stop["status"] == "arrived"
         assert stop["actual_arrival_at"] is not None
 
+        # Completing needs proof photos; arriving does not.
+        _give_proof(db_path, stop_id)
         ok, msg = execution_service.advance_stop(db_path, stop_id)
         assert ok
 
@@ -387,6 +728,7 @@ class TestStopProgression:
         stop_id = _create_stop(db_path, assignment_id, 1)
 
         execution_service.advance_stop(db_path, stop_id)
+        _give_proof(db_path, stop_id)
         execution_service.advance_stop(db_path, stop_id)
         ok, msg = execution_service.advance_stop(db_path, stop_id)
         assert not ok
@@ -402,6 +744,7 @@ class TestStopProgression:
         assert cs["id"] == s1
 
         execution_service.advance_stop(db_path, s1)
+        _give_proof(db_path, s1)
         execution_service.advance_stop(db_path, s1)
 
         cs = execution_service.get_current_stop(db_path, assignment_id)
@@ -460,6 +803,7 @@ class TestPlanAutoCompletion:
         s2 = _create_stop(db_path, assignment_id, 2)
 
         execution_service.advance_stop(db_path, s1)  # planned -> arrived
+        _give_proof(db_path, s1)
         execution_service.advance_stop(db_path, s1)  # arrived -> completed
         assert plan_service.get_plan(db_path, plan_id)["status"] == "confirmed"
 
@@ -659,7 +1003,7 @@ class TestImageService:
         img_id = image_service.upload_image(db_path, stop_id, f)
 
         img = image_service.get_image(db_path, img_id)
-        file_path = image_service.BASE_DIR / img["relative_path"]
+        file_path = image_service.DATA_ROOT / img["relative_path"]
         assert file_path.exists()
 
         ok = image_service.delete_image(db_path, img_id)
@@ -709,6 +1053,7 @@ class TestProgress:
         _create_stop(db_path, assignment_id, 3)
 
         execution_service.advance_stop(db_path, s1)
+        _give_proof(db_path, s1)
         execution_service.advance_stop(db_path, s1)
 
         prog = execution_service.get_assignment_progress(db_path, assignment_id)
@@ -1045,6 +1390,7 @@ class TestAdvanceAtomicity:
 
         ok, msg = execution_service.advance_stop(db_path, stop_id, expected_status="planned")
         assert (ok, msg) == (True, "advanced")
+        _give_proof(db_path, stop_id)
         ok, msg = execution_service.advance_stop(db_path, stop_id, expected_status="arrived")
         assert (ok, msg) == (True, "completed")
         assert execution_service.get_stop_execution(db_path, stop_id)["status"] == "completed"
@@ -1060,6 +1406,480 @@ class TestAdvanceAtomicity:
         execution_service.skip_stop(db_path, stop_id, "no access")
         ok, msg = execution_service.advance_stop(db_path, stop_id)
         assert ok is False and "skipped" in msg
+
+
+class TestRevertStop:
+    """Advance is one unconfirmed tap sitting beside Skip and Cancel, pressed
+    on a phone in a moving vehicle. The double-tap guard (C-07) stops a mis-tap
+    landing twice, but nothing walked back the one that did land — the remedy
+    was hand-editing stop_executions."""
+
+    def _stop(self, db_path):
+        plan_id = _create_plan(db_path)
+        assignment_id = _create_vehicle_assignment(db_path, plan_id)
+        return _create_stop(db_path, assignment_id, 1)
+
+    def test_arrived_reverts_to_planned_and_drops_the_arrival(self, db_path):
+        stop_id = self._stop(db_path)
+        execution_service.advance_stop(db_path, stop_id, expected_status="planned")
+
+        ok, target = execution_service.revert_stop(db_path, stop_id, expected_status="arrived")
+
+        assert (ok, target) == (True, "planned")
+        e = execution_service.get_stop_execution(db_path, stop_id)
+        assert e["status"] == "planned"
+        assert e["actual_arrival_at"] is None, (
+            "a stop that was never reached kept an arrival time — the same "
+            "corruption of dwell time C-07 caused"
+        )
+
+    def test_completed_reverts_one_step_to_arrived(self, db_path):
+        stop_id = self._stop(db_path)
+        execution_service.advance_stop(db_path, stop_id, expected_status="planned")
+        _give_proof(db_path, stop_id)
+        execution_service.advance_stop(db_path, stop_id, expected_status="arrived")
+
+        ok, target = execution_service.revert_stop(db_path, stop_id)
+
+        assert (ok, target) == (True, "arrived")
+        e = execution_service.get_stop_execution(db_path, stop_id)
+        assert e["actual_arrival_at"] is not None, "the arrival really happened"
+        assert e["actual_departure_at"] is None
+        assert e["completed_at"] is None
+
+    def test_skip_reverts_and_forgets_its_reason(self, db_path):
+        stop_id = self._stop(db_path)
+        execution_service.skip_stop(db_path, stop_id, "wrong button")
+
+        ok, target = execution_service.revert_stop(db_path, stop_id)
+
+        assert (ok, target) == (True, "planned")
+        e = execution_service.get_stop_execution(db_path, stop_id)
+        assert e["skip_reason"] == ""
+        assert e["completed_at"] is None
+
+    def test_cancel_reverts_and_forgets_its_reason(self, db_path):
+        stop_id = self._stop(db_path)
+        execution_service.cancel_stop(db_path, stop_id, "customer closed")
+
+        ok, target = execution_service.revert_stop(db_path, stop_id)
+
+        assert (ok, target) == (True, "planned")
+        assert execution_service.get_stop_execution(db_path, stop_id)["cancel_reason"] == ""
+
+    def test_skip_after_arrival_reverts_to_arrived(self, db_path):
+        """Nothing records what a stop was before it was skipped, but an
+        arrival timestamp can only have come from an advance — so this one
+        goes back to 'arrived' rather than stranding that timestamp on a stop
+        the dashboard would call unvisited."""
+        stop_id = self._stop(db_path)
+        execution_service.advance_stop(db_path, stop_id, expected_status="planned")
+        execution_service.skip_stop(db_path, stop_id, "nobody home")
+
+        ok, target = execution_service.revert_stop(db_path, stop_id)
+
+        assert (ok, target) == (True, "arrived")
+        assert execution_service.get_stop_execution(db_path, stop_id)["actual_arrival_at"] is not None
+
+    def test_revert_makes_the_stop_current_again(self, db_path):
+        plan_id = _create_plan(db_path)
+        assignment_id = _create_vehicle_assignment(db_path, plan_id)
+        first = _create_stop(db_path, assignment_id, 1)
+        second = _create_stop(db_path, assignment_id, 2)
+        execution_service.skip_stop(db_path, first, "mis-tap")
+        assert execution_service.get_current_stop(db_path, assignment_id)["id"] == second
+
+        execution_service.revert_stop(db_path, first)
+
+        assert execution_service.get_current_stop(db_path, assignment_id)["id"] == first
+
+    def test_revert_reopens_an_auto_completed_plan(self, db_path):
+        """The mirror of _maybe_complete_plan. Without this the corrected plan
+        stays 'completed' and drops out of the dashboard's active view, so the
+        dispatcher can't see the vehicle they just fixed."""
+        plan_id = _create_plan(db_path)
+        assignment_id = _create_vehicle_assignment(db_path, plan_id)
+        stop_id = _create_stop(db_path, assignment_id, 1)
+        execution_service.advance_stop(db_path, stop_id)
+        _give_proof(db_path, stop_id)
+        execution_service.advance_stop(db_path, stop_id)
+        assert plan_service.get_plan(db_path, plan_id)["status"] == "completed"
+
+        execution_service.revert_stop(db_path, stop_id)
+
+        assert plan_service.get_plan(db_path, plan_id)["status"] == "executing"
+
+    def test_stale_token_is_refused(self, db_path):
+        stop_id = self._stop(db_path)
+        execution_service.advance_stop(db_path, stop_id)
+        _give_proof(db_path, stop_id)
+        execution_service.advance_stop(db_path, stop_id)
+
+        ok, msg = execution_service.revert_stop(db_path, stop_id, expected_status="arrived")
+
+        assert ok is False and "already" in msg
+        assert execution_service.get_stop_execution(db_path, stop_id)["status"] == "completed"
+
+    def test_planned_stop_cannot_be_reverted(self, db_path):
+        stop_id = self._stop(db_path)
+        ok, msg = execution_service.revert_stop(db_path, stop_id)
+        assert ok is False and "Cannot revert" in msg
+
+    def test_missing_stop_is_reported(self, db_path):
+        ok, msg = execution_service.revert_stop(db_path, 99999)
+        assert ok is False and "not found" in msg
+
+    def test_a_closed_days_plan_can_no_longer_be_corrected(self, db_path):
+        """Yesterday's route is a finished record. Correcting a stop is
+        bookkeeping, and bookkeeping closes at the end of the shift."""
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        plan_id = _create_plan(db_path, plan_date=yesterday)
+        assignment_id = _create_vehicle_assignment(db_path, plan_id)
+        stop_id = _create_stop(db_path, assignment_id, 1)
+        execution_service.advance_stop(db_path, stop_id)
+
+        ok, msg = execution_service.revert_stop(db_path, stop_id)
+
+        assert ok is False and "date has passed" in msg
+        assert execution_service.get_stop_execution(db_path, stop_id)["status"] == "arrived"
+
+    def test_a_stop_stays_correctable_all_day_not_for_15_minutes(self, db_path):
+        """The rule that replaced the original 15-minute window. An advance
+        made hours ago on today's plan is still correctable."""
+        stop_id = self._stop(db_path)
+        execution_service.advance_stop(db_path, stop_id)
+        _backdate(db_path, stop_id, minutes=8 * 60)
+
+        assert execution_service.revert_stop(db_path, stop_id)[0] is True
+
+    def test_a_future_dated_plan_is_correctable(self, db_path):
+        """Plans are built ahead. A stop actioned early on tomorrow's route
+        must not be frozen for being in the future."""
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        plan_id = _create_plan(db_path, plan_date=tomorrow)
+        assignment_id = _create_vehicle_assignment(db_path, plan_id)
+        stop_id = _create_stop(db_path, assignment_id, 1)
+        execution_service.advance_stop(db_path, stop_id)
+
+        assert execution_service.revert_stop(db_path, stop_id)[0] is True
+
+
+class TestProofRequired:
+    """A stop cannot be marked completed without photographic proof: the
+    goods off the truck, and the door shut afterwards.
+
+    The pair is the point — 'delivered' and 'secured' are the two things a
+    dispute actually turns on, and either alone leaves half the question
+    open.
+    """
+
+    def _arrived_stop(self, db_path):
+        plan_id = _create_plan(db_path)
+        assignment_id = _create_vehicle_assignment(db_path, plan_id)
+        stop_id = _create_stop(db_path, assignment_id, 1)
+        execution_service.advance_stop(db_path, stop_id)
+        return stop_id
+
+    def test_completing_without_photos_is_refused(self, db_path):
+        stop_id = self._arrived_stop(db_path)
+
+        ok, msg = execution_service.advance_stop(db_path, stop_id)
+
+        assert (ok, msg) == (False, execution_service.PROOF_REQUIRED)
+        assert execution_service.get_stop_execution(db_path, stop_id)["status"] == "arrived"
+
+    def test_arriving_is_not_gated(self, db_path):
+        """Arriving somewhere is not a claim about what happened there, so
+        there is nothing yet to prove."""
+        plan_id = _create_plan(db_path)
+        assignment_id = _create_vehicle_assignment(db_path, plan_id)
+        stop_id = _create_stop(db_path, assignment_id, 1)
+
+        assert execution_service.advance_stop(db_path, stop_id)[0] is True
+
+    @pytest.mark.parametrize("supplied,missing", [
+        (["unload"], ["door"]),
+        (["door"], ["unload"]),
+        ([], ["unload", "door"]),
+    ])
+    def test_one_photo_is_not_enough(self, db_path, supplied, missing):
+        stop_id = self._arrived_stop(db_path)
+        if supplied:
+            _give_proof(db_path, stop_id, supplied)
+
+        ok, msg = execution_service.advance_stop(db_path, stop_id)
+
+        assert (ok, msg) == (False, execution_service.PROOF_REQUIRED)
+        assert execution_service.missing_proof(db_path, stop_id) == missing
+
+    def test_both_photos_allow_completion(self, db_path):
+        stop_id = self._arrived_stop(db_path)
+        _give_proof(db_path, stop_id)
+
+        assert execution_service.advance_stop(db_path, stop_id) == (True, "completed")
+        assert execution_service.missing_proof(db_path, stop_id) == []
+
+    def test_an_unrelated_category_does_not_satisfy_the_gate(self, db_path):
+        """Categories are sanitized rather than whitelisted on upload (audit
+        S-04), so a typo produces a category nobody asked for. The safe
+        consequence is that it cannot stand in for real proof."""
+        stop_id = self._arrived_stop(db_path)
+        _give_proof(db_path, stop_id, ["extra", "unloaded", "Door"])
+
+        assert execution_service.advance_stop(db_path, stop_id)[1] == execution_service.PROOF_REQUIRED
+
+    def test_an_override_completes_the_stop(self, db_path):
+        stop_id = self._arrived_stop(db_path)
+
+        ok, msg = execution_service.advance_stop(
+            db_path, stop_id, override_reason="driver's phone battery died")
+
+        assert (ok, msg) == (True, "completed")
+
+    def test_the_override_reason_is_kept_in_the_history(self, db_path):
+        """The only place it lives. Nothing on stop_executions records that a
+        completion was waived, so if the log did not hold the reason the
+        exception would be invisible a day later."""
+        stop_id = self._arrived_stop(db_path)
+        execution_service.advance_stop(db_path, stop_id, override_reason="gate shut, no light")
+
+        event = execution_service.list_status_events(db_path, stop_id)[-1]
+
+        assert event["to_status"] == "completed"
+        assert event["reason"] == "gate shut, no light"
+
+    def test_a_blank_override_is_not_an_override(self, db_path):
+        """Whitespace would record that proof was waived while saying nothing
+        about why — the one thing that makes the exception defensible."""
+        stop_id = self._arrived_stop(db_path)
+
+        assert execution_service.advance_stop(
+            db_path, stop_id, override_reason="   ")[1] == execution_service.PROOF_REQUIRED
+
+    def test_a_normal_completion_records_no_reason(self, db_path):
+        stop_id = self._arrived_stop(db_path)
+        _give_proof(db_path, stop_id)
+        execution_service.advance_stop(db_path, stop_id)
+
+        assert execution_service.list_status_events(db_path, stop_id)[-1]["reason"] == ""
+
+    def test_skip_and_cancel_are_not_gated(self, db_path):
+        """They already carry a typed reason, and photographing a delivery
+        that never happened is usually impossible."""
+        plan_id = _create_plan(db_path)
+        assignment_id = _create_vehicle_assignment(db_path, plan_id)
+        skipped = _create_stop(db_path, assignment_id, 1)
+        cancelled = _create_stop(db_path, assignment_id, 2)
+
+        assert execution_service.skip_stop(db_path, skipped, "gate locked") is True
+        assert execution_service.cancel_stop(db_path, cancelled, "closed") is True
+
+
+class TestExportNaming:
+    """Driver folder names, which are the fiddly part of the handover.
+
+    The operator's folders read `HuynhQuocTrong_79791` — accents stripped,
+    words run together, then the plate's 5-digit serial.
+    """
+
+    def test_vietnamese_accents_are_stripped(self):
+        from services.delivery import export_service
+        assert export_service.strip_accents("Huỳnh Quốc Trọng") == "HuynhQuocTrong"
+        assert export_service.strip_accents("Nguyễn Thành Giang") == "NguyenThanhGiang"
+        assert export_service.strip_accents("Lê Tấn Quốc") == "LeTanQuoc"
+
+    def test_the_letter_d_with_stroke_is_handled(self):
+        """đ/Đ is a distinct letter, not d-plus-diacritic, so NFD leaves it
+        alone — the classic way this kind of function drops characters."""
+        from services.delivery import export_service
+        assert export_service.strip_accents("Đỗ Đình Đức") == "DoDinhDuc"
+        assert export_service.strip_accents("đường") == "duong"
+
+    def test_a_driver_folder_pairs_name_with_the_plate_serial(self):
+        from services.delivery import export_service
+        assert export_service.driver_folder_name("Huỳnh Quốc Trọng", "50E-79791") \
+            == "HuynhQuocTrong_79791"
+
+    @pytest.mark.parametrize("plate", ["50E-79791", "50E79791", "50E 79791", "79791"])
+    def test_the_serial_is_stable_across_plate_formats(self, plate):
+        """Same reduction the GPS matching uses (audit C-03), so the number
+        in the folder is the one the rest of the system agrees on."""
+        from services.delivery import export_service
+        assert export_service.driver_folder_name("A", plate).endswith("_79791")
+
+    def test_a_nameless_driver_still_produces_a_folder(self):
+        from services.delivery import export_service
+        folder = export_service.driver_folder_name("", "50E-79791")
+        assert folder == "KhongRoTaiXe_79791", "an empty segment would collapse the path"
+
+    def test_punctuation_and_spacing_never_reach_the_path(self):
+        from services.delivery import export_service
+        assert export_service.strip_accents("Trần  Hoàng-Quân (A)") == "TranHoangQuanA"
+
+
+class TestStatusHistory:
+    """Every phase change is recorded, and revert returns the stop to the
+    phase it is recorded as having come from.
+
+    Before this the reverse transition was a static table, which had to
+    *infer* where a skipped stop had been. The log makes the answer a matter
+    of record instead of deduction.
+    """
+
+    def _stop(self, db_path):
+        plan_id = _create_plan(db_path)
+        assignment_id = _create_vehicle_assignment(db_path, plan_id)
+        return _create_stop(db_path, assignment_id, 1)
+
+    def test_advance_is_recorded(self, db_path):
+        stop_id = self._stop(db_path)
+        execution_service.advance_stop(db_path, stop_id)
+
+        events = execution_service.list_status_events(db_path, stop_id)
+        assert len(events) == 1
+        assert (events[0]["from_status"], events[0]["to_status"]) == ("planned", "arrived")
+        assert events[0]["action"] == "advance"
+        assert events[0]["occurred_at"]
+
+    def test_the_log_reads_in_the_order_it_happened(self, db_path):
+        stop_id = self._stop(db_path)
+        execution_service.advance_stop(db_path, stop_id)
+        _give_proof(db_path, stop_id)
+        execution_service.advance_stop(db_path, stop_id)
+        execution_service.revert_stop(db_path, stop_id)
+
+        events = execution_service.list_status_events(db_path, stop_id)
+        assert [(e["from_status"], e["to_status"], e["action"]) for e in events] == [
+            ("planned", "arrived", "advance"),
+            ("arrived", "completed", "advance"),
+            ("completed", "arrived", "revert"),
+        ]
+
+    def test_skip_and_cancel_record_their_reason(self, db_path):
+        skipped = self._stop(db_path)
+        execution_service.skip_stop(db_path, skipped, "gate locked")
+        event = execution_service.list_status_events(db_path, skipped)[-1]
+        assert (event["action"], event["reason"]) == ("skip", "gate locked")
+        assert (event["from_status"], event["to_status"]) == ("planned", "skipped")
+
+    def test_a_refused_transition_records_nothing(self, db_path):
+        """The event is written on the same connection as the UPDATE and only
+        after it reported a rowcount, so a rejected action leaves no trace
+        claiming it happened."""
+        stop_id = self._stop(db_path)
+        execution_service.advance_stop(db_path, stop_id, expected_status="planned")
+        execution_service.advance_stop(db_path, stop_id, expected_status="planned")  # stale, refused
+
+        assert len(execution_service.list_status_events(db_path, stop_id)) == 1
+
+    def test_revert_returns_to_the_recorded_phase(self, db_path):
+        stop_id = self._stop(db_path)
+        execution_service.advance_stop(db_path, stop_id)          # planned -> arrived
+        execution_service.skip_stop(db_path, stop_id, "no access")  # arrived -> skipped
+
+        ok, target = execution_service.revert_stop(db_path, stop_id)
+
+        assert (ok, target) == (True, "arrived")
+
+    def test_a_second_revert_steps_back_again_rather_than_redoing(self, db_path):
+        """The subtle one. After advance, advance, revert, the newest event
+        landing on 'arrived' is the revert itself — whose from_status is
+        'completed'. Reading that would send the next revert *forward*,
+        turning a second undo into a redo."""
+        stop_id = self._stop(db_path)
+        execution_service.advance_stop(db_path, stop_id)   # planned -> arrived
+        _give_proof(db_path, stop_id)
+        execution_service.advance_stop(db_path, stop_id)   # arrived -> completed
+        execution_service.revert_stop(db_path, stop_id)    # -> arrived
+
+        ok, target = execution_service.revert_stop(db_path, stop_id)
+
+        assert (ok, target) == (True, "planned")
+        assert execution_service.get_stop_execution(db_path, stop_id)["status"] == "planned"
+
+    def test_advance_after_revert_starts_a_fresh_forward_record(self, db_path):
+        stop_id = self._stop(db_path)
+        execution_service.advance_stop(db_path, stop_id)
+        execution_service.revert_stop(db_path, stop_id)
+        execution_service.advance_stop(db_path, stop_id)
+
+        assert execution_service.get_stop_execution(db_path, stop_id)["status"] == "arrived"
+        assert execution_service.revert_stop(db_path, stop_id)[1] == "planned"
+
+    def test_a_stop_with_no_log_still_reverts_by_inference(self, db_path):
+        """Nothing was backfilled, so every stop touched before the log
+        existed has an empty history. Those must keep working."""
+        stop_id = self._stop(db_path)
+        execution_service.advance_stop(db_path, stop_id)
+        execution_service.skip_stop(db_path, stop_id, "x")
+        _clear_status_events(db_path, stop_id)
+
+        ok, target = execution_service.revert_stop(db_path, stop_id)
+
+        # Falls back to inferring from actual_arrival_at, as it did before.
+        assert (ok, target) == (True, "arrived")
+        assert execution_service.list_status_events(db_path, stop_id)[-1]["action"] == "revert"
+
+    def test_history_is_empty_for_an_untouched_stop(self, db_path):
+        assert execution_service.list_status_events(db_path, self._stop(db_path)) == []
+
+
+class TestCanRevert:
+    """The predicate the dashboard's Revert button is drawn from. It runs
+    server-side so the button and the endpoint enforcing it read one calendar.
+
+    The rule is the plan's own day, not elapsed time — a correction is
+    bookkeeping, and bookkeeping is finished at the end of a shift rather
+    than within fifteen minutes of the mistake.
+    """
+
+    TODAY = date(2026, 8, 1)
+
+    def test_todays_plan_is_correctable_in_every_actioned_status(self):
+        for status in ("arrived", "completed", "skipped", "cancelled"):
+            assert execution_service.can_revert(status, plan_date="2026-08-01", today=self.TODAY), status
+
+    def test_planned_has_nothing_to_correct(self):
+        assert execution_service.can_revert("planned", plan_date="2026-08-01", today=self.TODAY) is False
+
+    def test_a_past_plan_is_closed(self):
+        assert execution_service.can_revert("completed", plan_date="2026-07-31", today=self.TODAY) is False
+
+    def test_a_future_plan_is_open(self):
+        """Routes are built ahead of the day they run."""
+        assert execution_service.can_revert("completed", plan_date="2026-08-02", today=self.TODAY) is True
+
+    def test_elapsed_time_alone_never_closes_the_record(self):
+        """The behaviour that replaced the 15-minute window: nothing about
+        how long ago the action happened enters into it."""
+        assert execution_service.can_revert("arrived", plan_date="2026-08-01", today=self.TODAY) is True
+
+    def test_a_missing_or_unreadable_date_reads_as_closed(self):
+        """Unknown is treated as closed rather than open — the same
+        conservative choice made everywhere else here."""
+        assert execution_service.can_revert("completed", plan_date=None, today=self.TODAY) is False
+        assert execution_service.can_revert("completed", plan_date="", today=self.TODAY) is False
+        assert execution_service.can_revert("completed", plan_date="not a date", today=self.TODAY) is False
+
+    def test_a_timestamp_valued_plan_date_still_compares_by_day(self):
+        assert execution_service.can_revert(
+            "completed", plan_date="2026-08-01 00:00:00", today=self.TODAY) is True
+
+    def test_annotate_uses_the_execution_status_alias(self, db_path):
+        """list_stops aliases the column to execution_status; reading 'status'
+        here would silently mark every stop unrevertible."""
+        plan_id = _create_plan(db_path)
+        assignment_id = _create_vehicle_assignment(db_path, plan_id)
+        first = _create_stop(db_path, assignment_id, 1)
+        _create_stop(db_path, assignment_id, 2)
+        execution_service.advance_stop(db_path, first)
+
+        stops = execution_service.annotate_revertible(
+            plan_service.list_stops(db_path, assignment_id)
+        )
+
+        assert stops[0]["can_revert"] is True
+        assert stops[1]["can_revert"] is False
 
 
 class TestReorderValidation:
@@ -1134,3 +1954,122 @@ class TestProgressWithoutStops:
         prog = execution_service.get_assignment_progress(db_path, aid)
         assert (prog["total"], prog["completed"], prog["remaining"]) == (4, 1, 3)
         assert prog["progress_pct"] == 25.0
+
+
+class TestPlanDriverOverride:
+    """The driver typed during plan creation is who drove *that day*.
+
+    Drivers mostly exist as `vehicles.current_driver` text with no `drivers`
+    row, so `driver_id` is almost always NULL and every reader used to fall
+    back to the vehicle's default — silently discarding a stand-in the
+    dispatcher had typed. The name is now stored free-text on the assignment
+    and outranks both the linked record and the vehicle default.
+    """
+
+    def _confirmed_plan_with_driver(self, db_path, driver_name=None, driver_id=None):
+        plan_id = _create_plan(db_path, "Override")
+        plan_service.update_plan(db_path, plan_id, status="confirmed")
+        aid = plan_service.create_assignment(
+            db_path, plan_id, 1, driver_id=driver_id, sequence=1,
+            driver_name=driver_name,
+        )
+        return plan_id, aid
+
+    def test_typed_name_beats_the_vehicle_default_on_the_dashboard(self, db_path):
+        self._confirmed_plan_with_driver(db_path, "Nguyen Van Thay")
+
+        entry = execution_service.get_dashboard_data(db_path)[0]
+        assert entry["current_driver"] == "Nguyen Van Thay", \
+            "dispatcher would be told the wrong man is behind the wheel"
+
+    def test_vehicle_default_still_used_when_nothing_was_typed(self, db_path):
+        self._confirmed_plan_with_driver(db_path, None)
+
+        entry = execution_service.get_dashboard_data(db_path)[0]
+        assert entry["current_driver"] == "Test Driver"
+
+    def test_a_blank_entry_does_not_blank_the_dashboard(self, db_path):
+        """An empty box means "no opinion", not "no driver" — whitespace has
+        to reduce to the same thing or the column goes empty."""
+        self._confirmed_plan_with_driver(db_path, "   ")
+
+        entry = execution_service.get_dashboard_data(db_path)[0]
+        assert entry["current_driver"] == "Test Driver"
+
+    def test_a_linked_driver_record_still_wins_over_the_vehicle(self, db_path):
+        did = plan_service.create_driver(db_path, "Registered Driver")
+        self._confirmed_plan_with_driver(db_path, None, driver_id=did)
+
+        entry = execution_service.get_dashboard_data(db_path)[0]
+        assert entry["current_driver"] == "Registered Driver"
+
+    def test_typed_name_beats_even_a_linked_record(self, db_path):
+        """Both set means the dispatcher edited the prefilled name — the
+        edit is the newer intent."""
+        did = plan_service.create_driver(db_path, "Registered Driver")
+        self._confirmed_plan_with_driver(db_path, "Stand In", driver_id=did)
+
+        entry = execution_service.get_dashboard_data(db_path)[0]
+        assert entry["current_driver"] == "Stand In"
+
+    def test_no_driver_record_is_created(self, db_path):
+        """A one-off stand-in must not accumulate in the drivers list."""
+        self._confirmed_plan_with_driver(db_path, "One Off Guy")
+
+        assert [d["name"] for d in plan_service.list_drivers(db_path)] == ["Test Driver"], \
+            "list_drivers only synthesises from vehicles; a typed name must not persist"
+
+    def test_reopening_the_plan_shows_the_name_that_was_typed(self, db_path):
+        """The look-back case: the plan is a record of that exact day."""
+        plan_id, _ = self._confirmed_plan_with_driver(db_path, "Nguyen Van Thay")
+
+        plan = plan_service.get_plan(db_path, plan_id)
+        assert plan["assignments"][0]["driver_name"] == "Nguyen Van Thay"
+
+    def test_the_record_survives_the_vehicle_changing_hands(self, db_path):
+        """Reassigning the truck must not rewrite last week's plan."""
+        plan_id, _ = self._confirmed_plan_with_driver(db_path, "Nguyen Van Thay")
+
+        conn = sqlite3.connect(db_path)
+        conn.execute("UPDATE vehicles SET current_driver = 'Somebody Else' WHERE id = 1")
+        conn.commit()
+        conn.close()
+
+        plan = plan_service.get_plan(db_path, plan_id)
+        assert plan["assignments"][0]["driver_name"] == "Nguyen Van Thay"
+
+    def test_listing_assignments_carries_the_name(self, db_path):
+        plan_id, _ = self._confirmed_plan_with_driver(db_path, "Nguyen Van Thay")
+
+        rows = plan_service.list_assignments(db_path, plan_id)
+        assert rows[0]["driver_name"] == "Nguyen Van Thay"
+
+    def test_get_assignment_carries_the_name(self, db_path):
+        _, aid = self._confirmed_plan_with_driver(db_path, "Nguyen Van Thay")
+
+        assert plan_service.get_assignment(db_path, aid)["driver_name"] == "Nguyen Van Thay"
+
+    def test_the_name_can_be_edited_afterwards(self, db_path):
+        plan_id, aid = self._confirmed_plan_with_driver(db_path, "First Guess")
+
+        assert plan_service.update_assignment(db_path, aid, driver_name="Second Guess")
+        assert plan_service.get_assignment(db_path, aid)["driver_name"] == "Second Guess"
+
+    def test_clearing_the_name_falls_back_to_the_vehicle(self, db_path):
+        plan_id, aid = self._confirmed_plan_with_driver(db_path, "First Guess")
+
+        plan_service.update_assignment(db_path, aid, driver_name="")
+        entry = execution_service.get_dashboard_data(db_path)[0]
+        assert entry["current_driver"] == "Test Driver"
+
+    def test_the_export_folder_uses_the_typed_name(self, db_path):
+        """Photo handover folders are named after the driver, so they have to
+        agree with the dashboard or the operator gets two answers."""
+        from services.delivery import export_service
+
+        _, aid = self._confirmed_plan_with_driver(db_path, "Huỳnh Quốc Trọng")
+        _create_stop(db_path, aid, 1)
+
+        summary = export_service.day_summary(db_path, date.today().isoformat())
+        assert summary["drivers"][0]["driver_name"] == "Huỳnh Quốc Trọng"
+        assert summary["drivers"][0]["folder"].startswith("HuynhQuocTrong_")

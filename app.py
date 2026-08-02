@@ -166,6 +166,11 @@ def delivery_dashboard():
     return render_template("delivery-dashboard.html")
 
 
+@app.route("/delivery/export")
+def delivery_export():
+    return render_template("delivery-export.html")
+
+
 @app.route("/api/manual-locations")
 def api_manual_locations():
     return jsonify(read_manual_locations())

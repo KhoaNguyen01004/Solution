@@ -35,8 +35,15 @@ const UI = {
      * Show a toast notification. Reuses the page's `#toast-container`
      * element if present (adding the `.toast-container` class needed
      * for fixed positioning), otherwise creates one on first use.
+     *
+     * `options.actionLabel` + `options.onAction` add a single inline button
+     * to the toast — used for undo, where the offer has to appear without
+     * interrupting whatever the dispatcher does next. Clicking it dismisses
+     * the toast immediately, and the toast still expires on its own if it is
+     * ignored. Omitting them leaves the toast exactly as it was, so existing
+     * three-argument callers are unaffected.
      */
-    toast(message, type = 'info', duration = 3000) {
+    toast(message, type = 'info', duration = 3000, options = {}) {
         let container = document.getElementById('toast-container');
         if (!container) {
             container = document.createElement('div');
@@ -56,12 +63,36 @@ const UI = {
         el.textContent = message;
         container.appendChild(el);
 
-        setTimeout(() => {
+        let dismissTimer = null;
+        const dismiss = () => {
+            if (dismissTimer) clearTimeout(dismissTimer);
+            // The node lingers for the fade. Without this an action button
+            // stays clickable while invisible, so a second impatient tap on
+            // Undo fires a second request at a stop that has already moved.
+            el.style.pointerEvents = 'none';
             el.style.transition = 'opacity 0.35s ease, transform 0.35s ease';
             el.style.opacity = '0';
             el.style.transform = 'translateX(100%)';
             setTimeout(() => el.remove(), 350);
-        }, duration);
+        };
+
+        // textContent above already cleared the node, so the button is
+        // appended rather than built into an innerHTML string — the message
+        // never reaches an HTML parser.
+        if (options && options.actionLabel && typeof options.onAction === 'function') {
+            const btn = document.createElement('button');
+            btn.className = 'toast-action';
+            btn.type = 'button';
+            btn.textContent = options.actionLabel;
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                dismiss();
+                options.onAction();
+            });
+            el.appendChild(btn);
+        }
+
+        dismissTimer = setTimeout(dismiss, duration);
     },
 
     /**
@@ -70,6 +101,52 @@ const UI = {
     escapeHtml(value) {
         const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
         return String(value == null ? '' : value).replace(/[&<>"']/g, (ch) => map[ch]);
+    },
+
+    /**
+     * Clock time of arrival from a remaining duration in seconds — "14:35".
+     *
+     * Dispatchers work against the clock, not a stopwatch: "arrives 14:35" is
+     * directly comparable to a delivery window, a site's closing time or a
+     * driver's shift end, where "in 47 min" has to be added to the current
+     * time first, and is wrong again by the time you look back at it.
+     *
+     * Returns null for anything that isn't a usable duration, so callers keep
+     * showing a placeholder rather than a confident wrong time — a null ETA
+     * once rendered as "0 min", i.e. "arriving now" (audit L-10).
+     */
+    etaClock(seconds, fromMs) {
+        if (typeof seconds !== 'number' || !isFinite(seconds) || seconds < 0) return null;
+        const now = new Date();
+        // `seconds` is "from when the server answered", not "from now". Adding
+        // it to the current time pushes the arrival later on every repaint,
+        // which the 15s age ticker would otherwise do four times a minute.
+        // Callers pass the moment the ETA landed; without one this falls back
+        // to now, which is right on the first paint and drifts after.
+        const base = typeof fromMs === 'number' && isFinite(fromMs) ? fromMs : now.getTime();
+        const arrival = new Date(base + seconds * 1000);
+        const time = arrival.toLocaleTimeString([], {
+            hour: '2-digit', minute: '2-digit', hour12: false,
+        });
+        // A route running past midnight would otherwise show a time earlier
+        // than now, which reads as "already late" rather than "tomorrow".
+        const days = Math.round(
+            (new Date(arrival).setHours(0, 0, 0, 0) - new Date(now).setHours(0, 0, 0, 0)) / 86400000
+        );
+        return days > 0 ? `${time} +${days}d` : time;
+    },
+
+    /**
+     * The same duration as a span — "47 min", "2h 15m". Kept for tooltips
+     * beside etaClock(), where "how long from now" is still the faster read.
+     */
+    etaRelative(seconds) {
+        if (typeof seconds !== 'number' || !isFinite(seconds) || seconds < 0) return null;
+        const mins = Math.round(seconds / 60);
+        if (mins < 60) return `${mins} min`;
+        const h = Math.floor(mins / 60);
+        const m = mins % 60;
+        return m ? `${h}h ${m}m` : `${h}h`;
     },
 };
 
