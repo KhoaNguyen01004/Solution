@@ -1092,6 +1092,7 @@ function stuckFor(ms) {
       h.DASH.timeline.render([revertStop({ id: 30, execution_status: 'arrived' })], null, null);
 
       const input = h.window.document.querySelector('[data-upload-input="30"]');
+      const multiInput = h.window.document.querySelector('[data-upload-multi-input="30"]');
       const categoryEl = h.window.document.querySelector('[data-upload-category="30"]');
 
       test('every stop offers both proof categories, unload first', () => {
@@ -1099,15 +1100,29 @@ function stuckFor(ms) {
           Array.from(categoryEl.options).map((o) => o.value), ['unload', 'door']);
       });
 
-      test('the file input opens the camera on a phone', () => {
+      test('the camera input opens the camera on a phone', () => {
         assert.strictEqual(input.getAttribute('capture'), 'environment');
         assert.strictEqual(input.getAttribute('accept'), 'image/*');
       });
 
+      test('the second input takes a batch and does not force the camera', () => {
+        // `capture` and `multiple` are mutually exclusive — a browser that
+        // honours capture opens the camera for one shot and ignores
+        // multiple. If capture ever reappears here, batch selection is dead
+        // on exactly the devices this page is used on.
+        assert.ok(multiInput, 'no multi-select input rendered');
+        assert.ok(multiInput.hasAttribute('multiple'));
+        assert.strictEqual(multiInput.hasAttribute('capture'), false);
+      });
+
       // jsdom won't let a real FileList be assigned, so the property is
-      // redefined — the handler only ever reads files[0].
-      const fakeFile = { name: 'door.jpg' };
-      Object.defineProperty(input, 'files', { value: [fakeFile], writable: true });
+      // redefined. The handler reads the whole list, not just files[0].
+      const setFiles = (el, names) =>
+        Object.defineProperty(el, 'files', {
+          value: names.map((name) => ({ name })), writable: true, configurable: true,
+        });
+
+      setFiles(input, ['door.jpg']);
       categoryEl.value = 'door';
       input.dispatchEvent(new h.window.Event('change'));
       await settle(h.window);
@@ -1137,6 +1152,90 @@ function stuckFor(ms) {
 
       test('an upload refreshes the open photo gallery', () => {
         assert.ok(photoCalls > afterOpen, 'the gallery kept its stale cache');
+      });
+
+      // ── A batch of photos in one selection ───────────────────────
+      uploads.length = 0;
+      const beforeBatch = photoCalls;
+      setFiles(multiInput, ['a.jpg', 'b.jpg', 'c.jpg']);
+      categoryEl.value = 'unload';
+      multiInput.dispatchEvent(new h.window.Event('change'));
+      await settle(h.window, 10);
+
+      test('every file in one selection is uploaded', () => {
+        assert.deepStrictEqual(uploads, [
+          [30, 'a.jpg', 'unload'],
+          [30, 'b.jpg', 'unload'],
+          [30, 'c.jpg', 'unload'],
+        ]);
+      });
+
+      test('the batch reports how many landed', () => {
+        const status = h.window.document.querySelector('[data-upload-status="30"]').textContent;
+        assert.match(status, /3 Unloaded goods photos saved/);
+      });
+
+      test('a batch refreshes the gallery once, not once per file', () => {
+        // Ten photos must not mean ten refetches of the same gallery.
+        assert.strictEqual(photoCalls - beforeBatch, 1);
+      });
+
+      test('the multi input is cleared after the batch', () => {
+        assert.strictEqual(multiInput.value, '');
+      });
+
+      // Category is read once, at selection time. A dispatcher who changes
+      // the dropdown while a batch is in flight must not split the batch
+      // across two categories.
+      uploads.length = 0;
+      h.DASH.api.uploadStopImage = (stopId, file, category) => {
+        uploads.push([stopId, file && file.name, category]);
+        categoryEl.value = 'door'; // change it mid-flight
+        return Promise.resolve({ id: 1 });
+      };
+      setFiles(multiInput, ['x.jpg', 'y.jpg']);
+      categoryEl.value = 'unload';
+      multiInput.dispatchEvent(new h.window.Event('change'));
+      await settle(h.window, 10);
+
+      test('a category change mid-batch does not split the batch', () => {
+        assert.deepStrictEqual(uploads.map((u) => u[2]), ['unload', 'unload']);
+      });
+
+      // ── One bad file in the middle ───────────────────────────────
+      uploads.length = 0;
+      const toasts = [];
+      h.window.UI.toast = (msg, kind) => { toasts.push([msg, kind]); };
+      h.DASH.api.uploadStopImage = (stopId, file, category) => {
+        uploads.push([stopId, file && file.name, category]);
+        return file.name === 'bad.gif'
+          ? Promise.reject(new Error("Unsupported file type '.gif'"))
+          : Promise.resolve({ id: 1 });
+      };
+      setFiles(multiInput, ['ok1.jpg', 'bad.gif', 'ok2.jpg']);
+      categoryEl.value = 'unload';
+      multiInput.dispatchEvent(new h.window.Event('change'));
+      await settle(h.window, 10);
+
+      test('one rejected file does not abandon the rest of the batch', () => {
+        // Otherwise a dispatcher has no way to tell which of ten photos
+        // actually landed, and re-picking all ten duplicates the good ones.
+        assert.deepStrictEqual(uploads.map((u) => u[1]), ['ok1.jpg', 'bad.gif', 'ok2.jpg']);
+      });
+
+      test('a partial batch says how many failed', () => {
+        const status = h.window.document.querySelector('[data-upload-status="30"]').textContent;
+        assert.match(status, /2 saved, 1 failed/);
+      });
+
+      test('a partial batch surfaces the failure as an error toast', () => {
+        assert.ok(toasts.some(([msg, kind]) => kind === 'error' && /gif/.test(msg)),
+          'the rejected file was never reported');
+      });
+
+      test('both inputs are re-enabled after a partial batch', () => {
+        assert.strictEqual(input.disabled, false);
+        assert.strictEqual(multiInput.disabled, false);
       });
 
       h.DASH.polling.stop();

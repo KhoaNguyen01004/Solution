@@ -442,9 +442,19 @@ window.DASH = window.DASH || {};
   }
 
   // ── Proof upload ────────────────────────────────────────────────
-  // The two photos a stop needs before it can be completed. `capture` opens
-  // the camera directly on a phone, which is where this is used; on a
-  // desktop it degrades to an ordinary file picker.
+  // The two photos a stop needs before it can be completed.
+  //
+  // Two inputs, one handler, because `capture` and `multiple` cannot be
+  // combined: a browser that honours `capture` opens the camera for a single
+  // shot and ignores `multiple` entirely. Collapsing to one input would mean
+  // choosing which workflow to make worse, so both exist —
+  //   [data-upload-input]        `capture=environment`, one photo, straight
+  //                              to the camera. The phone path, unchanged.
+  //   [data-upload-multi-input]  `multiple`, no capture. The gallery path,
+  //                              for a dispatcher who shot a batch first or
+  //                              is working from a desktop.
+  // Neither costs the other a tap, which matters for something pressed at
+  // every stop of every run.
   //
   // Lives in the stop row rather than the pinned current-stop card: that
   // card is re-rendered by replacing its innerHTML whenever its content
@@ -464,47 +474,98 @@ window.DASH = window.DASH || {};
             <div class="timeline-upload-wrap">
               <select class="timeline-upload-category" data-upload-category="${stopId}">${options}</select>
               <label class="btn-nav timeline-upload-btn">
-                &#128248; Add photo
+                &#128248; Take photo
                 <input type="file" accept="image/*" capture="environment"
                        data-upload-input="${stopId}" style="display:none;">
+              </label>
+              <label class="btn-nav timeline-upload-btn">
+                &#128193; Add photos
+                <input type="file" accept="image/*" multiple
+                       data-upload-multi-input="${stopId}" style="display:none;">
               </label>
               <span class="timeline-upload-status" data-upload-status="${stopId}"></span>
             </div>`;
   }
 
   function bindUpload(bodyEl, stopId) {
-    const input = bodyEl.querySelector(`[data-upload-input="${stopId}"]`);
+    const inputs = [
+      bodyEl.querySelector(`[data-upload-input="${stopId}"]`),
+      bodyEl.querySelector(`[data-upload-multi-input="${stopId}"]`),
+    ].filter(Boolean);
     const categoryEl = bodyEl.querySelector(`[data-upload-category="${stopId}"]`);
     const statusEl = bodyEl.querySelector(`[data-upload-status="${stopId}"]`);
-    if (!input || !categoryEl || !statusEl) return;
+    if (!inputs.length || !categoryEl || !statusEl) return;
 
-    input.addEventListener('change', async () => {
-      const file = input.files && input.files[0];
-      if (!file) return;
+    // Both inputs are disabled for the duration of a batch, not just the one
+    // that fired: they upload to the same stop under the same category
+    // dropdown, and a second batch started mid-flight would interleave its
+    // progress counts into the shared status line.
+    const setDisabled = (value) => inputs.forEach((el) => { el.disabled = value; });
+
+    async function handleFiles(input) {
+      const files = input.files ? Array.from(input.files) : [];
+      if (!files.length) return;
+      // Read once, up front: the dispatcher can change the dropdown while a
+      // batch is in flight, and every file in one selection belongs to the
+      // category that was showing when they picked it.
       const category = categoryEl.value;
+      const label = (PROOF_CATEGORIES.find((c) => c[0] === category) || [, category])[1];
 
-      statusEl.textContent = 'Uploading…';
-      input.disabled = true;
+      setDisabled(true);
+      let done = 0;
+      const failures = [];
       try {
-        await DASH.api.uploadStopImage(stopId, file, category);
-        const label = (PROOF_CATEGORIES.find((c) => c[0] === category) || [, category])[1];
-        statusEl.textContent = `${label} saved`;
-        UI.toast('Photo uploaded', 'success');
-        // The gallery caches its fetch, so without this the photo the
+        for (const file of files) {
+          statusEl.textContent = files.length > 1
+            ? `Uploading ${done + failures.length + 1} of ${files.length}…`
+            : 'Uploading…';
+          try {
+            // Sequential, not Promise.all: production is a single synchronous
+            // worker, so firing a whole batch at once would queue them anyway
+            // and starve every other dashboard request while they waited.
+            // Same reasoning as delivery-export.js.
+            await DASH.api.uploadStopImage(stopId, file, category);
+            done += 1;
+          } catch (err) {
+            // One bad file must not abandon the rest of the batch — the
+            // dispatcher would have no way to tell which of ten photos
+            // actually landed.
+            failures.push(`${file.name || 'photo'}: ${err.message}`);
+          }
+        }
+
+        if (done && !failures.length) {
+          statusEl.textContent = files.length > 1
+            ? `${done} ${label} photos saved`
+            : `${label} saved`;
+          UI.toast(done > 1 ? `${done} photos uploaded` : 'Photo uploaded', 'success');
+        } else if (done) {
+          statusEl.textContent = `${done} saved, ${failures.length} failed`;
+          UI.toast(`${failures.length} of ${files.length} failed: ${failures[0]}`, 'error', 6000);
+        } else {
+          statusEl.textContent = '';
+          UI.toast(`Upload failed: ${failures[0]}`, 'error', 6000);
+        }
+
+        // The gallery caches its fetch, so without this the photos the
         // dispatcher just took would be missing from the panel directly
-        // below the button they took it with.
-        const reload = photoReloaders.get(String(stopId));
-        if (reload) reload();
-      } catch (err) {
-        statusEl.textContent = '';
-        UI.toast(`Upload failed: ${err.message}`, 'error', 6000);
+        // below the button they took them with. Once per batch, not per
+        // file — a ten-photo selection should not fire ten refetches.
+        if (done) {
+          const reload = photoReloaders.get(String(stopId));
+          if (reload) reload();
+        }
       } finally {
-        input.disabled = false;
+        setDisabled(false);
         // Clearing the value matters: selecting the same file twice in a row
         // fires no change event otherwise, so a retry after a failure would
         // appear to do nothing.
         input.value = '';
       }
+    }
+
+    inputs.forEach((input) => {
+      input.addEventListener('change', () => handleFiles(input));
     });
   }
 

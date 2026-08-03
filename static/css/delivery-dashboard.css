@@ -1204,6 +1204,16 @@
     cursor: pointer;
 }
 
+/* A batch upload disables both buttons, not just the one that fired, so the
+   pair needs to look inert while it runs — otherwise the untouched button
+   reads as available and silently swallows the tap (a disabled control
+   ignores activation forwarded from its label). :has() is the whole check;
+   where it is unsupported this degrades to the previous no-op styling. */
+.timeline-upload-btn:has(input:disabled) {
+    opacity: 0.5;
+    cursor: default;
+}
+
 .timeline-upload-status {
     font-size: 11px;
     color: var(--text-secondary);
