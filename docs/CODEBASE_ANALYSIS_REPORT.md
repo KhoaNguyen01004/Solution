@@ -1,8 +1,11 @@
 # Codebase Analysis Report — Fleet Fuel Management System
 
-**Generated:** 2026-07-29  
+**Generated:** 2026-07-29 · **Last reviewed:** 2026-08-06 (addendum 2026-08-06b)  
 **Scope:** Full codebase scan of `D:\ChiTuyen\Solution`  
 **Project:** Fleet Fuel Management (Flask + Vanilla JS + SQLite)
+
+> This report accumulates **dated addenda** at the end of §9 rather than being rewritten.
+> Read the newest addendum first — it carries the corrections to everything above it.
 
 > **Implementation status (2026-07-29):** Most of Sections 6.1–6.4's proposals below have
 > since been built — see [§9 Priority Action Items](#9-priority-action-items) for the
@@ -768,7 +771,8 @@ around them that change how they should be read.
 (duplicated TTAS handling) and on how §5's testing analysis should be read.
 
 - **The duplicated TTAS speed extraction was a live bug, not just duplication.**
-  `tracking_service._parse_speed_kmh` and `app/routes/trips.py:401` both took the first
+  `tracking_service._parse_speed_kmh` and `app/routes/trips.py` (the `current_speed`
+  block, line 403 as of 2026-08-06) both took the first
   number out of TTAS's speed *phrase*. For a stopped vehicle that phrase counts parking
   time (`Dừng 3h30'`), so the dashboard reported a parked truck as doing 3 km/h, rising
   the longer it sat. Fixed in `tracking_service`; **`trips.py` still has it**. Worth
@@ -780,6 +784,86 @@ around them that change how they should be read.
 
 The wider audit that drove that work is `docs/DELIVERY_AUDIT_2026-07-31.md`, which is a
 separate, delivery-specific document; this report remains the whole-codebase view.
+
+**Addendum 2026-08-06** (documentation pass; no code changed): still no movement in the
+Priority Action Items table. Three corrections and one new observation.
+
+- **`pytest tests/` is 491 and passes clean**, re-run 2026-08-06. Breakdown:
+  `test_delivery.py` 223, `test_delivery_routes.py` 135, `test_vehicle_specs.py` 40,
+  `test_vehicle_core_data.py` 36, `test_scorer.py` 26, `test_routing.py` 15,
+  `test_fleet_routes.py` 11, `test_auto_arrange_e2e.py` 5. `test_all.py` collects but
+  asserts nothing — it is an argparse CLI that happens to match pytest's discovery glob.
+- **`test_delivery_routes.py` has an undeclared hard dependency on `playwright`.** It
+  reaches the app through `main.py`, which imports `playwright` at module level, so
+  without the package installed all 135 tests error on import rather than failing on
+  anything real. Worth noting next to §5's testing analysis: the route suite is the one
+  that catches handler-level bugs, and it is also the one that silently disappears on a
+  fresh environment.
+- **The frontend jsdom suites are 122 + 10, not 112 + 10.** Counts in `README.md`,
+  `CLAUDE.md` and `DELIVERY_MODULE.md` had drifted; corrected 2026-08-06. One dashboard
+  ETA case is time-of-day dependent — it asserts a 36-hour ETA renders `+1d`, but
+  `UI.etaClock()` counts calendar days crossed, so from 12:00 local onwards it correctly
+  renders `+2d` and the assertion fails. The test is wrong, not the code; the fix is the
+  injectable clock §7 has wanted for other reasons.
+- **§2.6 (untracked temporary/generated files) has grown a new instance.** The working
+  tree carries whole-file diffs on ~40 source files that are pure CRLF/LF line-ending
+  churn, which buries the two real uncommitted changes. A `.gitattributes` with
+  `* text=auto` would settle it. Noted, not actioned — outside this pass's scope.
+
+**Addendum 2026-08-06b** (whole-workspace audit; code changed). Full findings in
+`docs/AUDIT_2026-08-06.md`, plan in `docs/BUGFIX_PLAN_2026-08-06.md`, concurrency
+measurements in `docs/CONCURRENCY_PLAN_2026-08-06.md`. Still no movement in the Priority
+Action Items table — none of these were table items. Six fixes landed:
+
+- **Two Criticals, both inside a request handler.** `POST /api/tlp/auto-arrange` with a
+  `shipment_id` returned an unhandled 500 for the endpoint's whole life (aliased column
+  vs. `Package.from_row`'s `row["name"]`), with a wrong-`package_id` defect hidden behind
+  it. And `app/routes/trips.py`'s geofence loop opened an explicit `BEGIN` inside a
+  per-trip `for`, which cannot work — the driver-name `UPDATE` above it had already opened
+  an implicit transaction, and on the non-arrival path nothing committed, so the next
+  iteration collided too. The per-trip `except` swallowed both, so trips silently stopped
+  advancing. **Both lived where a service-level suite is structurally blind**, which is the
+  same lesson §5 and `DELIVERY_AUDIT_2026-07-31.md` already record.
+- **`static/js/truck-load-planner.js` had zero HTML escaping.** Item 1 in the Phase 1 table
+  above is marked "✅ Done — Eliminates XSS gap". That was true of every page *except* this
+  one, which the 2026-07-29 refactor missed: 0 `escapeHtml` calls against 28 in
+  `delivery-plan-builder.js`, while interpolating package and customer names into
+  `innerHTML`. Now 13 sites escaped, guarded by a dependency-free `tests/js/tlp-escaping.test.js`.
+  **Item 1's status is accurate about what was built and misleading about the outcome**; read
+  it as "the utilities exist and are adopted on 11 of 12 files".
+- **22 write handlers leaked their connection on the exception path** (`conn.close()` after
+  the happy path, skipped by the `except`). Fixed with `finally` for write handlers only;
+  read-only handlers deliberately left alone (operator's scope call). Relevant to item 7:
+  `app/routes/*.py` still uses raw `sqlite3.connect()` and was still not migrated to
+  `DatabaseManager` — that split remains deliberate.
+- **`GET /api/fuel-log` opened ~1,900 connections per request.** Four helpers per row, each
+  opening its own. Measured on live data: 1,900 connections / 591 ms → 1 / 31 ms. This is a
+  second instance of item 8's N+1 pattern, in a module item 8 never looked at.
+- **`DELETE /api/tlp/packages/<id>` left orphaned rows** — no `ON DELETE CASCADE` and
+  `enable_fk=False`, both deliberate, so the cascade has to be manual and wasn't.
+
+**Testing.** `pytest tests/` is now **548** (was 491), all passing. Four new route-layer
+files: `test_write_handler_connections.py` (36), `test_tlp_routes.py` (8),
+`test_trips_geofence.py` (7), `test_fuel_routes.py` (6). Before them the truck load
+planner, `app/routes/trips.py` and `app/routes/fuel.py` had no coverage that issued a
+request. JS drives are now 137 (122 + 10 + 5).
+
+**Corrections to the previous addendum:**
+
+- `playwright` is **not** an undeclared dependency — it is pinned in `requirements.txt`
+  (`playwright==1.61.0`). The file is UTF-16, so `grep` finds nothing and reports the
+  opposite, which is how the claim got in. The failure mode it describes is real; the
+  cause is a stale environment, not a missing declaration.
+- The CRLF churn noted under §2.6 is confirmed and **larger than stated**: 105 files, not
+  ~40, and it affects the whole tree rather than a subset. `core.autocrlf` is unset and
+  there is no `.gitattributes`. Still not actioned — a repo-wide renormalisation is its
+  own deliberate commit.
+
+**One §2.6-adjacent finding worth recording:** git cannot create commits through the
+agent's mount, because it can create its `*.lock` files but not unlink them, leaving each
+one to block the next command. `scripts/commit_audit_fixes.py` exists so the commits can
+be made from Windows instead. Any future automation that writes to `.git` from that side
+will hit the same wall.
 
 ### Phase 1: Immediate Wins (Pillars 1 & 3) — High Impact, Low Effort
 
@@ -827,11 +911,11 @@ separate, delivery-specific document; this report remains the whole-codebase vie
 
 | # | Action | Pillar | Effort | Impact | Status |
 |---|--------|--------|--------|--------|--------|
-| 23 | Add connection pooling or migrate from SQLite | Encapsulation | 1-2w | Concurrent user support | ⬜ Pending — **do `PRAGMA journal_mode=WAL` first.** Production is currently a single Gunicorn worker (§7.1), so raising worker count is the cheap half of this item and would convert queueing latency straight into lock errors |
+| 23 | Add connection pooling or migrate from SQLite | Encapsulation | 1-2w | Concurrent user support | ⬜ Pending — **premise corrected 2026-08-06.** This cell said raising worker count would "convert queueing latency straight into lock errors" and that WAL was the prerequisite. Measured: `database is locked` is writer-vs-writer and **WAL does not fix it**; a held write lock does not block readers at all. WAL is worth enabling for throughput (2.3× reads), and the actual blocker on `--workers` is that `app/state.py` is process-global. See `docs/CONCURRENCY_PLAN_2026-08-06.md` |
 | 24 | Implement SSE/WebSocket for dashboard | (performance) | 1w | Eliminates polling overhead | ⬜ Pending |
 | 25 | Add JS build step (Vite/esbuild) | (tooling) | 2d | Bundling, tree-shaking, ES modules | ⬜ Pending |
 | 26 | Split CSS into partials | (tooling) | 1d | Maintainability | ⬜ Pending |
-| 27 | Secure dynamic UPDATE SQL with query builder | Encapsulation | 1d | Eliminates SQL injection risk | ⬜ Pending |
+| 27 | Secure dynamic UPDATE SQL with query builder | Encapsulation | 1d | Eliminates SQL injection risk | ⬜ Pending — **no live injection exists.** All 26 dynamically-built queries were inspected individually 2026-08-06: every interpolated fragment is composed from literals or `','.join('?' * n)` placeholder runs, and user values always arrive as `?` parameters. This item is about defence in depth, not an open vulnerability |
 | 28 | Write `CLAUDE.md` and directory-level `README.md` files | AI Ops | 2h | Reduces token waste — see §10 | ✅ Done — root `CLAUDE.md` only; directory-level `README.md` files (§10.2) not written |
 
 ## 10. AI Context & Token Optimization Strategy

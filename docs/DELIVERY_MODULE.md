@@ -55,14 +55,17 @@
 ```
 templates/
 ├── delivery-plan-builder.html     Plan creation / editing wizard
-└── delivery-dashboard.html        Operational dispatch dashboard
+├── delivery-dashboard.html        Operational dispatch dashboard
+└── delivery-export.html           End-of-day export page
 
 static/css/
 ├── delivery-plan-builder.css      Wizard styles, modals, responsive
-└── delivery-dashboard.css         3-panel layout, vehicle cards, timeline
+├── delivery-dashboard.css         3-panel layout, vehicle cards, timeline
+└── delivery-export.css            Export page layout
 
 static/js/
 ├── delivery-plan-builder.js       Single-file wizard (state machine, 5 steps)
+├── delivery-export.js             Export page — sequential uploads, day.zip download
 └── dashboard/
     ├── main.js                    Orchestrator, state, filters, detail loading, plan mgmt
     ├── api.js                     All API calls (20s client-side timeout)
@@ -85,7 +88,11 @@ static/js/
 | 4 | Review | Validate, save draft, or confirm |
 | 5 | Success | View plan ID, open/edit, create another |
 
-All steps share a single state object. Auto-save runs every 30s when dirty.
+All steps share a single state object. Auto-save runs every 30s while the plan is dirty,
+not saving, and already has a `planId`.
+
+Reopening a plan at `/delivery/edit/<plan_id>` runs the same wizard. Since 2026-08-06 a
+**confirmed** plan reopens editable rather than read-only — see Key Design Decisions #1.
 
 ### Dashboard Panels
 
@@ -93,7 +100,7 @@ All steps share a single state object. Auto-save runs every 30s when dirty.
 |-------|---------|--------|
 | Left (280px) | Vehicle cards with progress, status, GPS time, attention indicator (stuck / GPS-stale / GPS-age-unknown / no-GPS / reported-stopped), and quick filters including **No GPS** — which covers both an unmatched plate and a TTAS lost-signal (`MTH`) vehicle | Every 12s poll |
 | Center (flex) | Leaflet map: vehicle markers, stop pins, road-following route, basemap switcher, imagery capture-date popup | On selection + every poll |
-| Right (300px) | Pinned current-stop card (contact, `tel:` link, primary actions) + stop timeline with photo gallery, inline skip/cancel reason editing, and per-stop reorder controls | Progressively on selection, then every poll |
+| Right (300px) | Pinned current-stop card (contact, `tel:` link, primary actions incl. Revert) + stop timeline with photo gallery, single-shot **and** batch photo upload, per-stop phase history, inline skip/cancel reason editing, and per-stop reorder controls | Progressively on selection, then every poll |
 
 All three panels use incremental DOM diffing (not full rebuilds) — see `CHANGELOG.md`'s Phase 1 entry for why.
 
@@ -167,7 +174,11 @@ means the dispatcher edited a prefilled value, and the edit is the newer
 intent. It also deliberately **does not create a `drivers` record** — these
 are stand-ins for one day, and the plan stays a snapshot, so reassigning a
 truck next week does not rewrite who drove it today.
-| updated_at | TIMESTAMP | Auto |
+
+> The column list above ended with a stray `| updated_at | TIMESTAMP | Auto |` row,
+> orphaned outside the table by an earlier edit. Removed 2026-08-06 — **there is no
+> `updated_at` column on `vehicle_assignments`**, in `database.py`'s `CREATE TABLE`
+> or in the live database. It was documentation of a column that never existed.
 
 ### `delivery_plan_stops`
 
@@ -257,6 +268,8 @@ Plans table as a reminder of what it would look like if that ever changes.
 | POST | `/api/plans/<id>/confirm` | Set status → confirmed | None |
 | POST | `/api/plans/batch-delete` | Delete several plans (`plan_ids[]`) | None |
 | POST | `/api/plans/clear` | **Delete every plan and everything under it** | None |
+| POST | `/api/plans/import/parse` | Parse an uploaded Excel file into a preview, without writing | None |
+| POST | `/api/plans/import/save` | Commit a parsed import to plans/assignments/stops | None |
 
 ### Assignments
 
@@ -281,6 +294,7 @@ Plans table as a reminder of what it would look like if that ever changes.
 | POST | `/api/stops/<id>/cancel` | Mark cancelled |
 | POST | `/api/stops/reorder` | Reorder stops (`assignment_id`, `stop_ids[]` — must name **every** stop of the assignment exactly once) |
 | POST | `/api/stops/insert` | Insert temp stop between existing stops |
+| GET | `/api/stops/<id>/history` | Phase-change log for the stop, oldest first; reverts are labelled as such |
 
 ### Execution
 
@@ -288,6 +302,7 @@ Plans table as a reminder of what it would look like if that ever changes.
 |--------|------|-------------|
 | GET | `/api/execution/current?assignment_id=X` | Current active stop |
 | POST | `/api/execution/advance` | Advance stop (`planned→arrived→completed`) |
+| POST | `/api/execution/revert` | Undo the last phase change; guarded by an expected-status check so a stale board cannot revert the wrong transition |
 | GET | `/api/execution/dashboard` | All assignments + GPS + progress |
 | GET | `/api/execution/progress?assignment_id=X` | Progress stats per assignment |
 
@@ -313,6 +328,22 @@ Plans table as a reminder of what it would look like if that ever changes.
 | GET | `/api/images/<id>/file` | Serve image file |
 | DELETE | `/api/images/<id>` | Delete image |
 
+### End-of-Day Export
+
+Backed by `export_service.py`; the page is `/delivery/export`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/export/summary?day=YYYY-MM-DD` | Per-day rollup: assignments, stops, phase outcomes, photo counts |
+| GET | `/api/export/day.zip?day=YYYY-MM-DD` | Packaged download — stop photos foldered per driver, plus a manifest CSV |
+| GET | `/api/export/day-images` | List day-level (not stop-level) images (`?day=`, optional `?category=`) |
+| POST | `/api/export/day-images` | Upload a day-level image |
+| DELETE | `/api/export/day-images/<id>` | Delete a day-level image |
+
+Driver folder names inside the zip are accent-stripped (`strip_accents`) and fall back to
+the plate, so a Vietnamese driver name never produces an unopenable path on a Windows
+machine downstream.
+
 ### Legacy (in app.py)
 
 | Method | Path | Description |
@@ -327,17 +358,32 @@ Plans table as a reminder of what it would look like if that ever changes.
 | Service | File | Responsibility |
 |---------|------|----------------|
 | `plan_service` | `plan_service.py` | CRUD for plans, assignments, stops. Excel parse/validate. |
-| `execution_service` | `execution_service.py` | Stop progression (advance/skip/cancel), reordering, dashboard data, progress calculation. |
-| `eta_service` | `eta_service.py` | ETA calculation using OpenRouteService API. |
+| `execution_service` | `execution_service.py` | Stop progression (advance/skip/cancel/revert), phase history, reordering, dashboard data, progress calculation. |
+| `eta_service` | `eta_service.py` | ETA calculation using OpenRouteService API, with vehicle envelope restrictions and a Haversine fallback. |
 | `image_service` | `image_service.py` | Image upload/serve/delete for delivery stops. |
-| `tracking_service` | `tracking_service.py` | Normalize GPS positions from TTAS. |
+| `export_service` | `export_service.py` | End-of-day summary, day-level images, `day.zip` packaging, accent-stripped driver folder names. |
+| `tracking_service` | `tracking_service.py` | Normalize GPS positions from TTAS, including speed-phrase parsing and `MTH` lost-signal state. |
 | `database` | `database.py` | Create delivery tables (idempotent migrations). |
+
+`services/vehicle_identity.py` and `services/plate_utils.py` sit one level up, outside
+`delivery/`, because fuel, oil and TLP resolve plates too — plate normalization is a
+fleet-wide concern, not a delivery one.
 
 ---
 
 ## Key Design Decisions
 
-1. **Plan tables are immutable after import** — Once confirmed, the plan structure cannot be changed. Execution changes happen through the execution layer (advance/skip/cancel).
+1. **A confirmed plan is editable; execution history is not.** *(Changed 2026-08-06 —
+   this decision previously read "Plan tables are immutable after import".)* Reopening a
+   confirmed plan at `/delivery/edit/<plan_id>` gives a fully editable builder: the
+   read-only banner is suppressed, autosave keeps running, and saving no longer demotes
+   the plan back to `draft`. The original rule made confirming a one-way door, with no
+   route back into a plan whose stop needed fixing.
+
+   The half that did **not** change is the one that matters: what happened during a run
+   is still owned by the execution layer (advance / skip / cancel / revert) and its
+   `stop_status_events` log. Editing a confirmed plan rewrites the plan; it does not
+   rewrite the record of the run.
 
 2. **Current stop is derived** — No `is_current` column. The current stop is the first stop with status `planned`, `enroute`, or `arrived` (ordered by execution_sequence).
 
@@ -433,7 +479,7 @@ ROUTE_REFRESH_INTERVAL=Route cache refresh seconds (default: 60)
 ### Running Tests
 
 ```bash
-# Everything — 491 tests
+# Everything — 548 tests
 pytest tests/
 
 # Delivery — run BOTH for any delivery change
@@ -456,8 +502,13 @@ drives real HTTP through `app.test_client()` with TTAS mocked. Neither substitut
 other.
 
 Frontend code gets no pytest coverage. Two jsdom suites stand in, run with plain `node`:
-`tests/js/dashboard.test.js` (112) and `tests/js/plan-builder.test.js` (10). See
-`CLAUDE.md` § Definition of Done.
+`tests/js/dashboard.test.js` (122) and `tests/js/plan-builder.test.js` (10). See
+`CLAUDE.md` § Definition of Done — including the one dashboard ETA case that fails from
+12:00 local onwards for reasons unrelated to your change.
+
+`test_delivery_routes.py` needs `playwright` installed (it reaches the app via `main.py`,
+which imports it at module level). Without it all 135 error out on import rather than
+failing on anything real.
 
 ### Test Coverage — services (`test_delivery.py`)
 

@@ -1549,7 +1549,7 @@ class LoadPlannerApp {
       row.className = "tlp-vehicle-row";
       row.style.cssText = "cursor:pointer;padding:4px 6px;border-radius:4px;" + (active ? "background:rgba(47,140,235,0.15);" : "");
       row.innerHTML = `
-        <span class="tlp-vehicle-label">${r.plate_number}</span>
+        <span class="tlp-vehicle-label">${UI.escapeHtml(r.plate_number)}</span>
         <span class="tlp-vehicle-value">${r.package_count} pkgs</span>
       `;
       row.onclick = async () => {
@@ -1927,7 +1927,7 @@ class LoadPlannerApp {
     el.innerHTML = sorted.map(p => `
       <div class="tlp-seq-item">
         <span class="tlp-seq-num">${p.load_sequence || "?"}</span>
-        <span>${p._name || "Unknown"}</span>
+        <span>${UI.escapeHtml(p._name || "Unknown")}</span>
       </div>
     `).join("");
   }
@@ -2279,7 +2279,7 @@ class LoadPlannerApp {
       const stackingLabel = pkg.allow_stacking ? '<span class="tlp-stack-badge stackable">Stackable</span>' : '<span class="tlp-stack-badge non-stackable">Non-stackable</span>';
 
       info.innerHTML = `
-        <div class="tlp-pkg-name">${pkg.name} ${stackingLabel}</div>
+        <div class="tlp-pkg-name">${UI.escapeHtml(pkg.name)} ${stackingLabel}</div>
         <div class="tlp-pkg-dims">${pkg.length}\u00D7${pkg.width}\u00D7${pkg.height} mm &middot; ${pkg.weight_kg} kg</div>
         ${vehicleStr}
       `;
@@ -2471,8 +2471,8 @@ class LoadPlannerApp {
       const item = document.createElement("div");
       item.className = "modal-select-item";
       item.innerHTML = `
-        <div class="name">${v.plate_number}</div>
-        <div class="desc">${v.vehicle_type || ""} &middot; ${v.container_name || ""} &middot; ${v.current_driver || "No driver"}</div>
+        <div class="name">${UI.escapeHtml(v.plate_number)}</div>
+        <div class="desc">${UI.escapeHtml(v.vehicle_type || "")} &middot; ${UI.escapeHtml(v.container_name || "")} &middot; ${UI.escapeHtml(v.current_driver || "No driver")}</div>
       `;
       item.onclick = () => { this._selectVehicle(v.vehicle_id); this.closeModal("vehicle-modal"); };
       list.appendChild(item);
@@ -2546,8 +2546,8 @@ class LoadPlannerApp {
       item.className = "modal-select-item";
       const itemCount = (s.items || []).length;
       item.innerHTML = `
-        <div class="name">${s.customer_name}</div>
-        <div class="desc">${s.reference_number || "No ref"} &middot; ${itemCount} package types</div>
+        <div class="name">${UI.escapeHtml(s.customer_name)}</div>
+        <div class="desc">${UI.escapeHtml(s.reference_number || "No ref")} &middot; ${itemCount} package types</div>
       `;
       item.onclick = () => { this._selectShipment(s.id); this.closeModal("shipment-modal"); };
       list.appendChild(item);
@@ -2664,7 +2664,7 @@ class LoadPlannerApp {
       return `
         <div style="display:flex;align-items:center;gap:4px;padding:3px 0;border-bottom:1px solid var(--border);font-size:11px;">
           <span style="width:10px;height:10px;border-radius:2px;background:${color};flex-shrink:0;"></span>
-          <span style="flex:1;color:var(--text-secondary);">${item.package_name}</span>
+          <span style="flex:1;color:var(--text-secondary);">${UI.escapeHtml(item.package_name)}</span>
           <span style="color:var(--text-muted);">x${item.quantity}</span>
           <button onclick="app.removeShipmentItem(${item._tempId})" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:12px;">&times;</button>
         </div>
@@ -2716,8 +2716,8 @@ class LoadPlannerApp {
       item.className = "modal-select-item";
       const pkgCount = (p.placements || []).length;
       item.innerHTML = `
-        <div class="name">${p.name || "Unnamed"}</div>
-        <div class="desc">${p.plate_number || "?"} &middot; ${pkgCount} packages &middot; ${p.status || "draft"}</div>
+        <div class="name">${UI.escapeHtml(p.name || "Unnamed")}</div>
+        <div class="desc">${UI.escapeHtml(p.plate_number || "?")} &middot; ${pkgCount} packages &middot; ${UI.escapeHtml(p.status || "draft")}</div>
       `;
       item.onclick = () => { this._loadPlan(p.id); this.closeModal("load-modal"); };
       list.appendChild(item);

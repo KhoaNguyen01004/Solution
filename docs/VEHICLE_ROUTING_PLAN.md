@@ -2,11 +2,32 @@
 
 Status: **Phases A, B and C shipped 2026-07-31** (see `docs/CHANGELOG.md`).
 
-The feature is live and running entirely on `type_default` estimates — the
-registration-certificate data in §3.1 is still missing, and was not treated as a
-release blocker. Every route computed from an estimate is labelled as one on
-screen. Swapping estimates for measured values is now a data task with no code
-attached: fill the five envelope columns and the routing follows.
+**Envelope data as of 2026-08-06** — verified against `routing_system.db`, not assumed:
+
+| Column | Populated | Note |
+|---|---|---|
+| `gross_weight_kg` | **32 of 36 vehicles** | Backfilled 2026-07-31 from the fleet spreadsheet (`scripts/fill_vehicle_gvw_2026-07-31.sql`). The 4 gaps are exactly the 4 Container vehicles |
+| `overall_height_mm` | 0 of 36 | |
+| `overall_width_mm` | 0 of 36 | |
+| `overall_length_mm` | 0 of 36 | |
+| `axle_load_kg` | 0 of 36 | |
+
+So the original "running entirely on `type_default` estimates" is no longer quite
+right: **weight** is real data for every non-container vehicle, which is the input
+`ors_vehicle_type()` uses to choose `goods` vs `hgv`. **Dimensions and axle load are
+still entirely `type_default`**, and every route computed from an estimate is labelled
+as one on screen.
+
+The registration-certificate data in §3.1 is still missing for the four dimension
+columns and was not treated as a release blocker. Swapping estimates for measured
+values remains a data task with no code attached: fill the columns and the routing
+follows. Re-derive the table above with:
+
+```sql
+SELECT COUNT(*), COUNT(gross_weight_kg), COUNT(overall_height_mm),
+       COUNT(overall_width_mm), COUNT(overall_length_mm), COUNT(axle_load_kg)
+FROM vehicles;
+```
 
 One decision changed during implementation: `options.vehicle_type` is derived
 from **actual gross weight**, not the vehicle_type label. See the phase C

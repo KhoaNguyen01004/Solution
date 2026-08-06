@@ -13,6 +13,37 @@ delivery schema in `routing_system.db`, and every vehicle-identity path that fee
 > with the evidence that disproves them, rather than deleted. Treat any remaining "Confirmed"
 > label in this document as provisional until it has been re-verified by execution; several
 > were asserted from reading alone, and at least two did not survive contact with a runtime.
+>
+> **Re-checked 2026-08-06.** No new closures. Two notes:
+> - **L-07 (orphaned photo files) is still open**, verified by execution rather than by
+>   reading: `grep -n unlink services/delivery/*.py` finds unlinks only in
+>   `image_service.py`, `export_service.py` and a temp-file cleanup in `routes.py`.
+>   `plan_service.delete_stop` / `delete_plan` / `delete_plans` / `clear_plans` still
+>   rely on `ON DELETE CASCADE` for the rows and leave the files on disk. `DeliveryPlans/`
+>   grows unbounded.
+> - **Line references in this document are frozen at 2026-07-31** and the files have moved
+>   substantially since (`routes.py` alone gained ~450 lines). Cited line numbers such as
+>   `routes.py:358` are historical pointers — grep for the symbol, not the line.
+> - **The "49 passing tests" in §1 is likewise a 2026-07-31 figure.** The delivery suites
+>   are now 223 (service) + 135 (route); the route suite did not exist when this was
+>   written, and building it was Phase 5 of the remediation.
+>
+> **Re-checked 2026-08-06b** (see `docs/AUDIT_2026-08-06.md`). Two findings resolve, both
+> against evidence rather than reading:
+> - **D-10 is CLOSED.** `render.yaml` now declares a 20 GB persistent disk
+>   (`fleetfuel-data`) at `/var/data`, with `DB_PATH` and `DATA_DIR` pointed at it. The
+>   database and the proof-of-delivery photos survive a redeploy. §8 of the priority table
+>   and the "verify this first" instruction below are both discharged. `CLAUDE.md` carried
+>   the stale claim until 2026-08-06 as well.
+> - **D-09's reasoning is corrected, and it is still open.** WAL is still not configured,
+>   but the harm was mis-stated. Measured: `database is locked` is a **writer-vs-writer**
+>   failure and **WAL does not prevent it** — a held write lock does not block readers at
+>   all. Delivery writes competing with `trips.py`'s refresh thread is real, but the
+>   errors came from that thread holding a transaction across serial ORS calls, which was
+>   a distinct bug and is now fixed. WAL remains worth enabling for throughput. See
+>   `docs/CONCURRENCY_PLAN_2026-08-06.md`.
+> - The delivery module itself needed **no changes** in the 2026-08-06 audit; all 135
+>   route tests and 223 service tests still pass unmodified.
 **Method:** graphify node/link extraction for the module map, then a full line-by-line read of
 all 1,741 lines of `services/delivery/`, all 1,673 lines of `static/js/dashboard/`, plus
 targeted reads of `app/services/ttas_client.py`, `app/db.py`, `app/__init__.py`, `app.py`,
@@ -580,8 +611,8 @@ read
 | D-06 | `planned_sequence` and `execution_sequence` diverge by design but nothing keeps them reconcilable. `insert_temp_stop` sets `planned_sequence = MAX+1` while `execution_sequence = after_sequence+1`. The UI shows `planned_sequence` (`timeline.js:372`, `map.js:58`) while ordering by `execution_sequence` — **an inserted stop displays a number inconsistent with its position**. | Medium | Confirmed |
 | D-07 | `bulk_create_stops` defaults `planned_sequence` to `0` (`plan_service.py:287,302`). Multiple stops at sequence 0 make `ORDER BY execution_sequence` non-deterministic. | Medium | Confirmed |
 | D-08 | `drivers.name` is not UNIQUE, and `list_drivers` merges real driver rows with synthetic `{"id": None}` entries derived from `vehicles.current_driver`. Selecting a synthetic driver cannot produce a `driver_id`, so the assignment silently keeps `driver_id = NULL`. | Medium | Likely |
-| D-09 | No `PRAGMA journal_mode=WAL` (pre-existing, per `CLAUDE.md`). Every delivery write competes with `trips.py`'s background refresh thread on the same file. | Medium | Confirmed |
-| D-10 | `render.yaml` has no `disk:` block. If no persistent disk is attached in the Render dashboard, **`routing_system.db` and every proof-of-delivery photo under `DeliveryPlans/` are destroyed on each redeploy.** | Critical | Likely — verify in dashboard |
+| D-09 | No `PRAGMA journal_mode=WAL` (pre-existing, per `CLAUDE.md`). Every delivery write competes with `trips.py`'s background refresh thread on the same file. | Medium | Confirmed — **but the harm was mis-stated; WAL does not prevent `database is locked`. Corrected 2026-08-06, see `CONCURRENCY_PLAN_2026-08-06.md`** |
+| D-10 | `render.yaml` has no `disk:` block. If no persistent disk is attached in the Render dashboard, **`routing_system.db` and every proof-of-delivery photo under `DeliveryPlans/` are destroyed on each redeploy.** | Critical | ~~Likely — verify in dashboard~~ **CLOSED 2026-08-06: a 20 GB disk at `/var/data` is declared; data persists** |
 | D-11 | No table stores GPS history. Nothing can answer "where was 50E-18463 at 14:30 yesterday". | Medium | Confirmed |
 
 ---

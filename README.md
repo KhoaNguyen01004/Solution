@@ -10,7 +10,9 @@ Flask-based fleet management with GPS tracking, fuel monitoring, and a 3D/2D **T
 - **Truck Load Planner** (`/truck-load-planner`) — 3D/2D cargo loader with auto-arrange, stacking, step animation
 - **Vehicle Management** (`/vehicle-management`) — Vehicle CRUD and interactive 3D container diagram (Three.js)
 - **Oil Change** (`/oil-change`) — Oil change tracking
-- **Delivery Management** — Delivery plan oriented trip management with Excel import pipeline (`/delivery/new`), per-assignment driver naming that overrides the vehicle's usual driver for that plan, and an operational **Dispatch Dashboard** (`/delivery/dashboard`) with stop-level execution tracking, road-aware ETA/distance, attention indicators (stuck/GPS-stale/reported-stopped), a **No GPS** quick filter covering both unmatched plates and TTAS lost-signal (`MTH`) vehicles, a pinned current-stop card with click-to-call, inline skip/cancel reason editing, a read-only photo gallery, follow-vehicle map mode, live stop reordering, click-a-stop-to-locate-it, and a switchable basemap (satellite / streets / muted) with Esri imagery capture dates
+- **Delivery Management** — Delivery plan oriented trip management with Excel import pipeline (`/delivery/new`), per-assignment driver naming that overrides the vehicle's usual driver for that plan, and an operational **Dispatch Dashboard** (`/delivery/dashboard`) with stop-level execution tracking, road-aware ETA/distance, attention indicators (stuck/GPS-stale/reported-stopped), a **No GPS** quick filter covering both unmatched plates and TTAS lost-signal (`MTH`) vehicles, a pinned current-stop card with click-to-call, inline skip/cancel reason editing, per-stop phase history with undo, single-shot and batch photo upload, a read-only photo gallery, follow-vehicle map mode, live stop reordering, click-a-stop-to-locate-it, and a switchable basemap (satellite / streets / muted) with Esri imagery capture dates
+- **Delivery Plan Editor** (`/delivery/edit/<plan_id>`) — Reopens a saved plan in the builder. Confirmed plans are editable, not read-only; plan names in the dashboard's Plans panel link straight here
+- **End-of-Day Export** (`/delivery/export`) — Per-day delivery summary, day-level image attachments, and a packaged `day.zip` download
 
 > **No authentication.** Every endpoint, including the destructive ones, is open to anyone who can reach the host — a deliberate 2026-07-31 decision for an internal-network deployment. See `docs/DELIVERY_MODULE.md` § Key Design Decisions before exposing this publicly.
 
@@ -28,16 +30,55 @@ python -m pytest tests/test_delivery_routes.py -v  # 135 — route layer, real H
 `app.test_client()` end to end, which is the only suite that sees bugs living inside a
 request handler or in an assembled response. Run both for any delivery change.
 
-`pytest tests/` runs everything — **491 tests**.
+`pytest tests/` runs everything — **548 tests**.
 
-### Frontend Tests (122 drives, non-pytest)
+> **`test_delivery_routes.py` needs `playwright` importable** even though it never drives a
+> browser: it imports the app through `main.py`, which imports `playwright` at module
+> level. Without it all 135 tests error out with `ModuleNotFoundError: No module named
+> 'playwright'` rather than failing on anything real. It **is** pinned in
+> `requirements.txt` (`playwright==1.61.0`), so this means your environment is behind —
+> `pip install -r requirements.txt` fixes it. The browser binaries
+> (`playwright install`) are not needed. Note `requirements.txt` is UTF-16, so
+> `grep playwright requirements.txt` finds nothing and will tell you the opposite.
+
+### Route-layer Tests (57 tests)
 
 ```bash
-npm install jsdom                    # once; dev-only, not vendored
-node tests/js/dashboard.test.js      # 112 — dispatch dashboard
-node tests/js/plan-builder.test.js   # 10  — delivery plan builder
+python -m pytest tests/test_write_handler_connections.py -v  # 36 — write handlers, all four route modules
+python -m pytest tests/test_tlp_routes.py -v                 # 8  — truck load planner
+python -m pytest tests/test_trips_geofence.py -v             # 7  — background route refresher
+python -m pytest tests/test_fuel_routes.py -v                # 6  — fuel log
+python -m pytest tests/test_fleet_routes.py -v               # 11 — fleet CRUD
+```
+
+Added 2026-08-06 (see `docs/AUDIT_2026-08-06.md`), except `test_fleet_routes.py`. Before
+them the truck load planner, `app/routes/trips.py` and `app/routes/fuel.py` had **no**
+coverage that issued a request — and the audit's two Critical findings both lived inside
+a request handler, where a service-level suite is structurally blind. `test_tlp_routes.py`
+and `test_trips_geofence.py` each fail against the pre-fix code, which is the property
+that makes them worth keeping.
+
+`test_write_handler_connections.py` is parametrised over all 18 reachable write endpoints:
+it swaps `sqlite3.connect` for a wrapper whose `cursor()` raises, forcing an exception at
+exactly the point each handler's `finally` exists to cover.
+
+### Frontend Tests (137 drives, non-pytest)
+
+```bash
+npm install jsdom                    # once, at the repo root; dev-only, not vendored
+node tests/js/dashboard.test.js      # 122 — dispatch dashboard      (needs jsdom)
+node tests/js/plan-builder.test.js   # 10  — delivery plan builder   (needs jsdom)
+node tests/js/tlp-escaping.test.js   # 5   — truck load planner escaping (no deps)
 # jsdom installed elsewhere? NODE_PATH=/path/to/node_modules node tests/js/dashboard.test.js
 ```
+
+`node_modules/` is gitignored. Node resolves it by walking up from the test file, so a
+single `npm install jsdom` at the repo root is enough — no `NODE_PATH` needed.
+
+`tlp-escaping.test.js` is deliberately dependency-free so it runs in a checkout with no
+`node_modules` at all. It guards `truck-load-planner.js` against losing its HTML escaping
+again (it had none until 2026-08-06), and that is the kind of regression that recurs years
+later — a test that needs setup is a test that stops being run.
 
 Frontend changes get no pytest coverage at all, so these are the only real verification
 those pages get. Both drive the actual `static/js/` modules against the actual template
@@ -52,20 +93,30 @@ where a field is captured and rendered correctly and then simply left out of the
 Run the matching suite for any change under `static/js/`, alongside `node --check` on the
 touched files.
 
-**Two dashboard ETA cases are time-of-day dependent** — run after ~23:13 local, a
-47-minute ETA crosses midnight and picks up the `+1d` marker the assertions do not
-expect. Known, unrelated to whatever you are changing; the fix is an injectable clock.
+**One dashboard ETA case is time-of-day dependent** — `a route running past midnight is
+marked, not shown as already late` feeds `UI.etaClock()` a 36-hour ETA and asserts the
+result ends in `+1d`. `etaClock` counts *calendar days* crossed, so from 12:00 local
+onwards 36 hours lands two dates away and it renders `+2d` instead. The suite therefore
+reports **122/122 before noon and 121/122 after**. Known, unrelated to whatever you are
+changing; the fix is an injectable clock. Verify with `TZ=UTC node tests/js/dashboard.test.js`
+if you need a clean run mid-afternoon.
 
-### Truck Load Planner Tests (31 tests)
+### Truck Load Planner Tests (39 tests)
 
 ```bash
-python -m pytest tests/test_scorer.py tests/test_auto_arrange_e2e.py -v
+python -m pytest tests/test_scorer.py tests/test_auto_arrange_e2e.py tests/test_tlp_routes.py -v
 ```
 
 `test_scorer.py` (26) covers scoring/candidate-generation units; `test_auto_arrange_e2e.py`
 (5) runs realistic-sized shipments through the real production entry points and asserts
 on utilization, stacking behavior, the stack-depth cap, and multi-vehicle truck-count
 minimization — see `docs/TRUCK_LOAD_PLANNER.md` for the algorithm these exercise.
+`test_tlp_routes.py` (8) is the only one of the three that issues an HTTP request, and so
+the only one that could have caught the `shipment_id` 500 fixed on 2026-08-06.
+
+Note `tests/test_all.py` is a **script**, not a pytest module — it defines zero `def test_`
+and is collected by `pytest tests/` without contributing any tests. Its subcommands are
+below.
 
 ### TLP Benchmarks, Diagnostics & Manual Debugging (non-pytest)
 
@@ -132,6 +183,13 @@ app.py                          # Entry point: create_app() + remaining core rou
 wsgi.py                         # Gunicorn entry point (`gunicorn wsgi:app`) — see note below
 main.py                         # Standalone TTAS GPS tracking tool
 manual_test.py                  # Manual pipeline test with instrumentation
+routing_system.db               # The live SQLite database
+database.sql                    # Full `sqlite3 .dump` backup of the above, committed to git.
+                                 #   UTF-16LE — grep/head fail on it silently. NOT the schema
+                                 #   of record; that's app/database/schema.py +
+                                 #   services/delivery/database.py
+graphify-out/                   # Knowledge graph (graph.json, GRAPH_REPORT.md, graph.html).
+                                 #   Rebuild with `graphify update .` — see CLAUDE.md § graphify
 app/                            # Flask application package (see app/__init__.py's create_app())
   __init__.py                   # App factory: config, init_db(), blueprint registration
   config.py                     # Env vars, constants
@@ -144,9 +202,12 @@ app/                            # Flask application package (see app/__init__.py
     geo.py                      # Distance/polygon/centroid helpers
     export.py                   # Shared CSV-response helper
   services/
-    ttas_client.py               # TTAS session, live vehicle fetch, report scraping
+    ttas_client.py               # TTAS session, live vehicle fetch, report scraping,
+                                 #   speed-phrase parsing and MTH lost-signal detection
     routing.py                   # OpenRouteService routing helpers
     locations.py                 # Manual-location file I/O
+    vehicle_specs.py             # Vehicle envelope (weight/height/width/length/axle-load):
+                                 #   validation, per-type defaults, ORS restriction options
   routes/                       # Flask Blueprints
     fleet.py                     # Vehicle CRUD
     fuel.py                      # Fuel log CRUD, profiles, CSV export, Google Sheet sync
@@ -155,40 +216,59 @@ app/                            # Flask application package (see app/__init__.py
                                  # (Trip Management / Trip History pages removed 2026-07-31 —
                                  #  superseded by the Dispatch dashboard)
 tests/                          # All test, debug, and diagnostic files
-  test_all.py                   # Unified test harness (16 subcommands)
+  conftest.py                   # Points DB_PATH at a throwaway file before any test module
+                                 #   imports app/ — without it the suite migrates the real DB
+  test_all.py                   # Unified test harness (16 subcommands; no pytest tests)
   test_scorer.py                # Pytest unit tests (TLP scoring — 26 tests)
   test_auto_arrange_e2e.py      # Pytest end-to-end TLP tests (5 tests)
-  test_delivery.py              # Pytest unit tests (delivery services — 99 tests)
-  test_delivery_routes.py       # Pytest route-layer tests (delivery HTTP API — 88 tests)
+  test_delivery.py              # Pytest unit tests (delivery services — 223 tests)
+  test_delivery_routes.py       # Pytest route-layer tests (delivery HTTP API — 135 tests)
+  test_fleet_routes.py          # Pytest route-layer tests (fleet HTTP API — 11 tests)
+  test_routing.py               # Pytest unit tests (ORS options, restrictions — 15 tests)
+  test_vehicle_specs.py         # Pytest unit tests (envelope validation/defaults — 40 tests)
+  test_vehicle_core_data.py     # Pytest guards on the master vehicles table — 36 tests
+  js/                           # jsdom drives of the real frontend modules, run with plain node
+    dashboard.test.js           # Dispatch dashboard (122)
+    plan-builder.test.js        # Delivery plan builder (10)
   debug_arrange.py              # Per-package auto-arrange debugger
   merge_duplicate_vehicles.py   # One-time DB dedup utility
 reports/                        # Test and debug output files
 docs/                           # CHANGELOG, CODEBASE_ANALYSIS_REPORT, DELIVERY_MODULE,
-                                 # TRUCK_LOAD_PLANNER reference docs
+                                 # TRUCK_LOAD_PLANNER, DISPATCH_UX_PLAN, VEHICLE_ROUTING_PLAN,
+                                 # DELIVERY_AUDIT_2026-07-31 reference docs
 services/                       # Application services (not to be confused with app/services/ above)
+  plate_utils.py                # normalize_plate() — the one canonical plate normalizer
+  vehicle_identity.py           # Canonical-plate index; resolves a plate/serial to one vehicle
+  google_sheet_service.py       # Google Sheets fuel-log ingest (parsing + sync)
   delivery/                     # Delivery plan management
     database.py                 # Schema DDL, table initialization
     plan_service.py             # Plans, assignments, stops CRUD + Excel import pipeline
-    execution_service.py        # Current stop derivation, advance, skip, cancel, reorder
+    execution_service.py        # Current stop derivation, advance, skip, cancel, revert, reorder
     tracking_service.py         # TTAS GPS wrapper, vehicle lookup
     eta_service.py              # ORS-based ETA calculation (Haversine fallback)
     image_service.py            # Stop image upload, serve, delete
-    routes.py                   # Flask Blueprint (35 endpoints under /api, none authenticated)
+    export_service.py           # End-of-day summary, day-level images, day.zip packaging
+    routes.py                   # Flask Blueprint (42 endpoints under /api, none authenticated)
 scripts/
   migrate_to_delivery.py        # Idempotent migration from legacy vehicle_trips
+  fill_vehicle_gvw_2026-07-31.sql  # One-off backfill of gross vehicle weights
 truck_load_planner/             # Core application package
   routes.py                     # Flask routes / API endpoints
   session.py                    # Load planning session
   db.py                         # Database initialization
-  engine/                       # Packing algorithms (17 modules)
+  engine/                       # Packing algorithms (21 modules — see docs/TRUCK_LOAD_PLANNER.md §13)
   engines/                      # Packing engine abstraction (internal + py3dbp)
+  geometry/                     # Canonical AABB, grid, coordinate transforms
+  optimization/                 # vehicle_cost.py — cost model, kept out of the geometry engine
   models/                       # Data models
   logistics/                    # Legacy validation helpers — adapters.py delegates check_boundary/
                                  # calculate_total_weight/check_weight to engine/; volume.py and
                                  # constraints.py::get_door_status have no engine equivalent and
                                  # remain self-contained
 static/                         # Frontend assets (JS, CSS)
-  js/utils.js                   # ApiClient (fetch wrapper) + UI (toast, escapeHtml) namespace, shared by all pages
+  js/utils.js                   # ApiClient (fetch wrapper) + UI (toast, escapeHtml, etaClock)
+                                 #   namespace, shared by all pages
+  js/delivery-export.js         # End-of-day export page
   js/dashboard/                 # Dispatch dashboard, split by panel — the only multi-file page
     main.js                     # Orchestrator: state, filters, selection, detail loading, plan management
     api.js                      # Every dashboard fetch, with a 20s client timeout

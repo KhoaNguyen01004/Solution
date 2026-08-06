@@ -1,4 +1,20 @@
+# Agent Instructions
+
+**Read `CLAUDE.md` first.** It is the primary context file for this repository and carries
+the architecture notes, the DB-access and frontend conventions, the Scope Control rules,
+and the Definition of Done. This file only adds the graphify rules on top of it.
+
 ## graphify
+
+**Standing instruction: query the knowledge graph at `graphify-out/` before grepping or
+opening files** for any question about how this codebase fits together. `CLAUDE.md`
+§ graphify carries the full command table, the two silent-failure modes (no
+per-subcommand `--help`; substring matching with no stemming), and the confidence-tag
+rules. Read that section rather than relying on the summary below.
+
+Quick reference: the package is `graphifyy` (three y's), the command is `graphify`.
+`query` / `path` / `explain` / `affected` / `god-nodes` read the graph; `graphify update .`
+rebuilds it by AST with no LLM cost.
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
 

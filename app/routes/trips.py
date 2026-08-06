@@ -53,6 +53,7 @@ def api_refresh_routes():
 @bp.route("/api/advance-trip", methods=["POST"])
 def api_advance_trip():
     """Force advance trip phase or complete trip."""
+    conn = None
     try:
         data = request.json or {}
         trip_id = data.get("trip_id")
@@ -68,7 +69,6 @@ def api_advance_trip():
         c.execute('SELECT * FROM vehicle_trips WHERE id = ?', (trip_id,))
         trip = c.fetchone()
         if not trip:
-            conn.close()
             return jsonify({"success": False, "message": "Trip not found"}), 404
 
         trip = dict(trip)
@@ -93,7 +93,12 @@ def api_advance_trip():
                 ''', (next_trip['id'],))
 
             conn.commit()
+            # Closed before do_refresh_route_data(), which opens its own
+            # connection and writes: leaving this one open across it would
+            # have two writers on the same file from one request. The finally
+            # is the guarantee, this is the scoping.
             conn.close()
+            conn = None
 
             state.last_manual_update = time.time()
             do_refresh_route_data()
@@ -143,6 +148,7 @@ def api_advance_trip():
 
                 conn.commit()
                 conn.close()
+                conn = None
 
                 state.last_manual_update = time.time()
                 do_refresh_route_data()
@@ -154,6 +160,7 @@ def api_advance_trip():
                 ''', (next_phase, trip_id))
                 conn.commit()
                 conn.close()
+                conn = None
 
                 state.last_manual_update = time.time()
                 do_refresh_route_data()
@@ -162,11 +169,15 @@ def api_advance_trip():
 
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/cancel-trip", methods=["POST"])
 def api_cancel_trip():
     """Cancel an active or queued trip."""
+    conn = None
     try:
         data = request.json or {}
         trip_id = data.get("trip_id")
@@ -183,7 +194,6 @@ def api_cancel_trip():
         c.execute('SELECT vehicle_id, status FROM vehicle_trips WHERE id = ?', (trip_id,))
         trip_before = c.fetchone()
         if not trip_before:
-            conn.close()
             return jsonify({"success": False, "message": "Trip not found"}), 404
 
         was_active = trip_before['status'] == 'active'
@@ -210,6 +220,7 @@ def api_cancel_trip():
 
         conn.commit()
         conn.close()
+        conn = None
 
         state.last_manual_update = time.time()
         do_refresh_route_data()
@@ -217,6 +228,9 @@ def api_cancel_trip():
         return jsonify({"success": True, "message": "Trip canceled"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 # --------------------------
@@ -224,6 +238,7 @@ def api_cancel_trip():
 # --------------------------
 def do_refresh_route_data():
     _call_start = time.time()
+    conn = None
     try:
         raw_vehicles, _, _ = fetch_vehicle_data()
         vehicles = [normalize_vehicle(v) for v in raw_vehicles]
@@ -296,13 +311,36 @@ def do_refresh_route_data():
                             return dest_lat, dest_lng, dest_name, 'destination'
                         return None, None, None, None
 
-                    # Update driver_name on trip
-                    if driver_name and driver_name != active_trip.get('driver_name', ''):
-                        c.execute('UPDATE vehicle_trips SET driver_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (driver_name, trip_id))
-
-                    # Begin transaction for geofence detection
-                    conn.execute('BEGIN')
+                    # One transaction per trip: the driver-name update and the
+                    # geofence advance either both land or neither does.
+                    #
+                    # This block used to open an explicit `conn.execute('BEGIN')`
+                    # here, which could not work (2026-08-06 audit). Two ways:
+                    #
+                    #   1. Python's sqlite3 opens a transaction implicitly
+                    #      before the driver_name UPDATE below, so an explicit
+                    #      BEGIN after it raised "cannot start a transaction
+                    #      within a transaction";
+                    #   2. when no vehicle had arrived — the normal case —
+                    #      neither commit branch ran, so the transaction stayed
+                    #      open and the *next* iteration's BEGIN raised the
+                    #      same error.
+                    #
+                    # The per-trip `except` below swallowed both, so geofence
+                    # auto-advance silently stopped happening for every trip
+                    # after the first. It also left an uncommitted write
+                    # holding a RESERVED lock across the ORS calls further down
+                    # this function, which is one concrete source of
+                    # "database is locked".
+                    #
+                    # Every other write path in this file (api_advance_trip,
+                    # api_cancel_trip) uses the implicit transaction and a
+                    # plain commit. This now matches them.
                     try:
+                        # Update driver_name on trip
+                        if driver_name and driver_name != active_trip.get('driver_name', ''):
+                            c.execute('UPDATE vehicle_trips SET driver_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (driver_name, trip_id))
+
                         # Check geofence for current target
                         target_lat, target_lng, target_name, target_type = get_target_for_phase(db_phase)
 
@@ -339,9 +377,6 @@ def do_refresh_route_data():
                                             UPDATE vehicle_trips SET status = 'active', phase = 1 WHERE id = ?
                                         ''', (next_trip['id'],))
                                         print(f"Activating next trip for vehicle {vehicle_id}")
-
-                                    conn.commit()
-                                    continue
                                 else:
                                     # Advance to next phase
                                     c.execute('''
@@ -349,7 +384,11 @@ def do_refresh_route_data():
                                     ''', (next_phase, trip_id))
                                     print(f"Vehicle {vehicle_id} arrived at '{target_name}' (phase {db_phase}), advancing to phase {next_phase}")
 
-                                conn.commit()
+                        # Single exit point. The completion branch used to
+                        # commit and `continue` purely to dodge a second commit
+                        # below; with one commit per iteration both branches
+                        # converge here and the `continue` is unnecessary.
+                        conn.commit()
                     except Exception:
                         conn.rollback()
                         raise
@@ -490,6 +529,7 @@ def do_refresh_route_data():
             print(f"Error fetching trips: {e}")
 
         conn.close()
+        conn = None
 
         with state.cache_lock:
             if _call_start >= state.last_manual_update:
@@ -501,6 +541,12 @@ def do_refresh_route_data():
         print(f"Error refreshing routes: {e}")
         traceback.print_exc()
         return False
+    finally:
+        # This runs on the background refresh thread every
+        # ROUTE_REFRESH_INTERVAL seconds, forever. A connection leaked on the
+        # error path here is leaked once per cycle, not once per request.
+        if conn is not None:
+            conn.close()
 
 
 def refresh_route_data():

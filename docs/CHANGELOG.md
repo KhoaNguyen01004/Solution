@@ -1,5 +1,301 @@
 # Changelog
 
+## 2026-08-06 — Audit fixes: TLP shipment arrange, geofence transactions, TLP escaping
+
+> **Uncommitted at the time of writing.** This entry documents the working tree, not
+> `HEAD`.
+
+Findings and reproduction are in `docs/AUDIT_2026-08-06.md`; the phased plan they were
+fixed under is `docs/BUGFIX_PLAN_2026-08-06.md`. Every fix below was mutation-checked —
+the fix reverted, the new tests confirmed failing, the fix restored.
+
+### Fixed — `POST /api/tlp/auto-arrange` with a `shipment_id` returned 500
+
+`_get_packages_from_request` selected `p.name AS package_name` and then handed the row to
+`LegacyPackage.from_row`, which reads `row["name"]`. `tlp_shipment_items` has no `name`
+column, so the key did not exist and the handler — which has no try/except — answered an
+unhandled 500. This was not an API-only corner: `truck-load-planner.js:1403` sends
+`shipment_id` whenever a shipment is selected, so "select a shipment → Auto Arrange" was
+dead. It went unnoticed because the table currently holds zero shipment items.
+
+A second defect sat behind the first. `si.*` put the **shipment item's** id in
+`row["id"]`, so once the `KeyError` was fixed every placement would have carried the
+wrong `package_id` — a loud crash traded for silent bad data. Both are fixed together by
+replacing `si.*` with an explicit aliased column list:
+
+```sql
+SELECT si.quantity AS quantity, si.package_id AS package_id,
+       p.id AS id, p.name AS name, ...
+```
+
+`Package.from_row` is deliberately **not** changed. Its other caller
+(`validate_placement`) passes a genuine `tlp_packages` row and is correct today;
+loosening it to tolerate aliases would make it lie about its contract for both callers to
+accommodate one bad query.
+
+An item whose package no longer exists is now skipped with a `logger.warning` rather than
+arranged. The `LEFT JOIN` is kept so the row still surfaces — without the guard,
+`from_row` builds a package with a null name and 0mm sides and the planner packs it
+happily, i.e. an invisible box in the load plan.
+
+### Fixed — the background trip refresher's geofence advance never ran past the first trip
+
+`app/routes/trips.py` opened an explicit `conn.execute('BEGIN')` inside its per-trip loop.
+That cannot work, in two independent ways:
+
+1. Python's `sqlite3` opens a transaction implicitly before the driver-name `UPDATE`
+   immediately above it, so the explicit `BEGIN` raised
+   `cannot start a transaction within a transaction`;
+2. on the normal path — vehicle not yet at its stop — neither `commit()` branch ran, so
+   the transaction stayed open and the *next* iteration's `BEGIN` raised the same error.
+
+The per-trip `except` printed and moved on, so there was no error anybody saw. The symptom
+was trips that quietly stopped advancing phase and never auto-completed.
+
+The `BEGIN` is removed and each iteration now ends in exactly one `commit()` or
+`rollback()`, with the driver-name `UPDATE` moved inside that transaction so it rolls back
+with the rest. This matches what every other write path in the file (`api_advance_trip`,
+`api_cancel_trip`) already did; the explicit `BEGIN` was the outlier.
+
+**This also closes a `database is locked` window.** The uncommitted driver-name write held
+a `RESERVED` lock from the top of the loop until the first commit in the *second* half of
+the function — which is after N serial `get_route_coords()` calls to OpenRouteService. A
+write lock was held across those network round trips on every refresh cycle. Note this is
+independent of the WAL / `--workers` decision, which is untouched.
+
+### Fixed — `static/js/truck-load-planner.js` had no HTML escaping at all
+
+The 2026-07-29 refactor moved every page onto `UI.escapeHtml()`. This file was missed: as
+of the audit it had **zero** calls, against 28 in `delivery-plan-builder.js` and 27 in
+`map.js` — while interpolating package names, customer names, plate numbers, container
+names and driver names straight into `innerHTML`. `utils.js` was already loaded by the
+template, so the function was there and simply never used.
+
+Thirteen interpolations across seven sites are now escaped, with `||` defaults inside the
+call so a `null` never reaches `escapeHtml`. Numeric and boolean interpolations are left
+alone. With no authentication on any endpoint (deliberate, see `CLAUDE.md`), anything that
+could reach the network could persist a payload via a package name and have it execute in
+every dispatcher's browser on the TLP page.
+
+### Fixed — 22 write handlers leaked their connection on the exception path
+
+`fleet.py`, `fuel.py`, `oil.py` and `trips.py` all followed `conn = sqlite3.connect(...)`
+… `conn.close()` … `except: return 500`, so an exception skipped the close. On a write
+path an uncommitted connection holds a `RESERVED` lock until garbage collection — the same
+failure mode as the geofence bug, one size down. All 22 now close in a `finally`.
+
+Read-only handlers are deliberately unchanged (operator's scope call): there the cost is a
+standards violation, not a lock. Raw `sqlite3.connect()` stays — the DB-access-pattern
+split is deliberate and was not migrated.
+
+### Changed — `GET /api/fuel-log` opened 1,900 connections per request
+
+`api_fuel_log_list` called four helpers per row, each opening its own connection (two of
+them opening a second). Measured against the live database: **1,900 connections and 591 ms
+for 323 rows**, all serialised behind `render.yaml`'s single synchronous worker.
+
+The helpers now take an optional `conn`, and the two loops (`list` and `export`) pass
+their open connection down. Same request: **1 connection, 31 ms** — 19× faster, with a
+payload proven byte-identical by `test_response_is_unchanged_by_connection_reuse`. The
+parameter is optional so the create/update handlers, which compute a single entry, are
+untouched.
+
+### Fixed — `DELETE /api/tlp/packages/<id>` left orphaned rows
+
+It deleted only `tlp_packages`, while the sibling `clear_all_packages` also clears
+`tlp_placements` and `tlp_shipment_items`. This schema runs `enable_fk=False` with no
+`ON DELETE CASCADE` (both deliberate), so nothing else caught it. The children are now
+removed first, which also means the `rowcount` deciding the 404 is the package row's own.
+
+### Added — three test files, covering three modules that had none
+
+| File | Tests | Module |
+|---|---|---|
+| `tests/test_tlp_routes.py` | 8 | first route-layer coverage for the Truck Load Planner |
+| `tests/test_trips_geofence.py` | 7 | first coverage of any kind for `app/routes/trips.py` |
+| `tests/test_write_handler_connections.py` | 36 | write handlers across all four route modules |
+| `tests/test_fuel_routes.py` | 6 | first route-layer coverage for `app/routes/fuel.py` |
+| `tests/js/tlp-escaping.test.js` | 5 | dependency-free, no jsdom needed |
+
+`test_all.py` is a script (zero `def test_`) and `test_scorer.py` / `test_auto_arrange_e2e.py`
+drive the planner directly, so nothing could see a bug inside a TLP request handler — which
+is exactly where this one lived. Same lesson `tests/test_delivery_routes.py` records for the
+delivery module.
+
+### Measured — WAL and `--workers`, and a correction to two documents
+
+`CLAUDE.md` carried this as one open decision: "adding workers without enabling WAL first
+trades that latency for lock errors; treat the pair as one decision." Measured against a
+copy of the live database, that is wrong in a way that matters:
+
+- **A held write lock does not block readers.** Four readers arriving during a 7-second
+  write hold all completed in under 5 ms, in both journal modes.
+- **`database is locked` is writer-vs-writer, and WAL does not fix it.** SQLite serialises
+  writers either way. It fires when a write is held past the busy timeout — which is
+  Python's 5-second default, set by accident rather than decision.
+- So the fix for the lock errors was **the geofence transaction fix above**, not WAL. The
+  hold went from N serial ORS round trips to one loop iteration.
+- WAL is still worth enabling, on throughput grounds: 2.3× read throughput, read p95
+  81 ms → 29.5 ms, write p50 24 ms → 0.8 ms. `journal_mode` persists in the database file,
+  so it is one line in `init_db()`.
+- The real blocker on `--workers` is not the database: `app/state.py` is process-global, so
+  a second worker means two route caches, two TTAS sessions, and `state.sync_lock` /
+  `state.oil_fetch_lock` silently ceasing to be mutual exclusion.
+
+Written up in `docs/CONCURRENCY_PLAN_2026-08-06.md`. **Recommendation only — nothing in
+`render.yaml`, `app/db.py` or `app/database/` was changed.** The corresponding claims in
+`docs/AUDIT_2026-08-06.md` §2 and `docs/DELIVERY_AUDIT_2026-07-31.md` D-09 were corrected
+in place with dated notes rather than edited away.
+
+### Documentation
+
+`services/plate_utils.py`'s docstring claimed the 5-digit serial was "globally unique". It
+is not — it carries no province code, so `50H-09473` and `51C-09473` collapse to the same
+key. No behaviour change: `VehicleIndex._ambiguous_serials` and `_gps_by_plate_key` already
+handle collisions, and the fleet has none today (36 vehicles, verified). The docstring now
+says so and names both guards.
+
+A documentation pass brought the rest of the reference set in line:
+
+| Document | Change |
+|---|---|
+| `README.md` | test counts 491 → 548, new Route-layer Tests section, frontend drives 132 → 137, TLP 31 → 39, playwright note corrected, `test_all.py` flagged as a script |
+| `CLAUDE.md` | concurrency entry rewritten around the measurements; `render.yaml` disk claim corrected; playwright claim corrected; graph counts refreshed; new docs added to Reference Documents |
+| `docs/TRUCK_LOAD_PLANNER.md` | §15 documents both auto-arrange payload shapes and the `shipment_id` fix; §14 gains a "delete semantics — the cascade is manual" table; §11 gains the escaping rule |
+| `docs/CODEBASE_ANALYSIS_REPORT.md` | addendum 2026-08-06b; items 23 and 27 corrected (WAL premise; no live SQL injection) |
+| `docs/DELIVERY_AUDIT_2026-07-31.md` | **D-10 closed** — the Render persistent disk exists, so the "verify this first" Critical is discharged; D-09's reasoning corrected |
+| `docs/DELIVERY_MODULE.md` | test count |
+
+**`docs/DELIVERY_AUDIT_2026-07-31.md` D-10 deserves its own line.** It was the audit's only
+"verify this first" Critical — if no disk were attached, `routing_system.db` and every
+proof-of-delivery photo would be destroyed on each redeploy. A disk **is** attached
+(20 GB at `/var/data`, with `DB_PATH` and `DATA_DIR` pointed at it). Both `CLAUDE.md` and
+that audit had said otherwise for as long as the disk has existed.
+
+### Removed — stale generated docs, and ~20 MB of graphify artifacts out of git
+
+| Removed | Why |
+|---|---|
+| `project_tree.txt` | 274 KB, UTF-16, generated 2026-07-30 by `tree` **without** `/F` — so it lists directories and no filenames at all. 3,225 of its 3,685 lines are directory names, 453 of them graphify cache folders. Nothing referenced it. |
+| `INSTRUCTIONS.md` | The prompt that commissioned the delivery audit ("Perform a complete architectural investigation… Do not modify any files"). That audit shipped as `docs/DELIVERY_AUDIT_2026-07-31.md`; the brief has been spent since. |
+| `reports/*.txt` | Four benchmark/diagnostic outputs from 2026-07-29. `tests/test_all.py` regenerates them and creates the directory itself (`os.makedirs(exist_ok=True)`), so both the files and the tracking were disposable. |
+
+**Untracked but kept on disk:** `graphify-out/cache/` (~9 MB AST extraction cache, rebuilt
+by `graphify update .`) and the rotating dated backup directories (~2-3 MB each, four of
+them). Together roughly **20 MB of generated artifacts that were tracked in git**.
+`graph.json`, `graph.html` and `GRAPH_REPORT.md` stay tracked — they are what the standing
+"query the graph before grepping" instruction actually reads. `.gitignore` gained rules for
+all of it, plus `node_modules/`.
+
+**Kept deliberately.** `graphify-cli-reference.txt` looks like a candidate at 25 KB, but
+`CLAUDE.md` records that graphify has no per-subcommand `--help` and that asking for one
+returns real-looking noise — so a full CLI dump is load-bearing. The two Vietnamese report
+files at the repo root are unrelated to the app, which is not the same as redundant.
+
+## 2026-08-06 — A confirmed plan is editable, and reachable from the board
+
+> **Uncommitted at the time of writing.** This entry documents the working tree, not
+> `HEAD`. The changes live in `static/js/delivery-plan-builder.js` and
+> `static/js/dashboard/main.js` and have not been committed.
+
+Confirming a plan used to be a one-way door. `loadExistingPlan()` set
+`state.readOnly = plan.status === 'confirmed'`, which raised the read-only banner and
+called `stopAutoSave()`; step 4 then hid both **Save draft** and **Confirm**. A
+dispatcher who confirmed a plan and then needed to fix a stop had no route back into it
+from the UI at all.
+
+### Changed — `readOnly` is no longer derived from `confirmed`
+
+```js
+state.readOnly = false;
+state._confirmedStatus = plan.status === 'confirmed';
+```
+
+The banner is explicitly hidden, autosave keeps running, and step 4 shows its buttons
+whatever the status. `_confirmedStatus` carries the fact that used to be conflated with
+editability, and is now used for two narrower things:
+
+- **Saving no longer demotes the plan to `draft`.** `saveDraft()` set
+  `state.planInfo.status = 'draft'` unconditionally — harmless while confirmed plans
+  could not be saved, and a silent status regression the moment they can. Only a plan
+  with no backend record yet starts as a draft.
+- **The toast reads "Changes saved" rather than "Draft saved successfully"** when
+  editing a confirmed plan, because the latter would now be a lie about what happened.
+
+### Added — plan names in the dashboard's Plans panel link to the editor
+
+`main.js` renders each plan name as `<a href="/delivery/edit/${p.id}">` instead of a
+`<span>`. The route already existed; nothing on the board pointed at it. The anchor sits
+inside the `<label>` that wraps the selection checkbox, so a click on the name navigates
+while a click anywhere else in the row still toggles selection.
+
+### The design decision this reverses
+
+`docs/DELIVERY_MODULE.md` § Key Design Decisions #1 read *"Plan tables are immutable
+after import — once confirmed, the plan structure cannot be changed"*. That is no longer
+true of the builder and the doc has been updated to match. What has **not** changed is
+the execution layer: advance / skip / cancel / revert remain the mechanism for what
+happens during a run. Editing a confirmed plan rewrites the plan; it does not rewrite
+execution history.
+
+`tests/js/plan-builder.test.js` still passes 10/10, including the two cases that assert a
+reopened plan keeps its stored driver name across a save.
+
+---
+
+## 2026-08-04 — numpy's version pin removed
+
+`requirements.txt` pinned an exact numpy version; it now reads a bare `numpy`. Render
+resolves it against whatever Python it builds with, which is what the pin was fighting.
+No code change and no behaviour change — numpy is a transitive convenience here, not
+something the packing engine's arithmetic depends on.
+
+---
+
+## 2026-08-03 — A dispatcher can upload a batch of photos, not just one at a time
+
+The proof-of-delivery control was a single `<input type="file" capture="environment">`.
+`capture` is the right default on a phone — it opens the camera directly at the stop —
+but a browser that honours it opens the camera for **one** shot and ignores `multiple`
+entirely. A dispatcher working from a desktop, or from photos already shot into the
+gallery, had to repeat the whole select-upload-wait cycle per photo.
+
+### Added — two inputs, one handler
+
+`capture` and `multiple` cannot be combined, so collapsing to one input would have meant
+choosing which workflow to make worse. Both now exist in the stop row:
+
+| Control | Input | Path |
+|---|---|---|
+| 📸 **Take photo** | `capture=environment`, single | The phone path, unchanged |
+| 📁 **Add photos** | `multiple`, no capture | Gallery or desktop batch |
+
+Neither costs the other a tap, which matters for something pressed at every stop of
+every run.
+
+### The batch decisions, and why
+
+- **Sequential, not `Promise.all`.** Production is a single synchronous Gunicorn worker
+  (see `render.yaml`), so firing ten uploads at once queues them anyway *and* starves
+  every other dashboard request while they wait. Same reasoning as `delivery-export.js`.
+- **One bad file does not abandon the batch.** Each upload is caught individually and
+  collected into a `failures` list; the dispatcher gets `"3 saved, 1 failed"` rather
+  than a partial upload with no way to tell which of ten photos landed.
+- **The category is read once, up front.** The dropdown is live during the upload, and
+  every file in one selection belongs to the category that was showing when it was
+  picked.
+- **Both inputs are disabled for the whole batch**, not just the one that fired — they
+  share a status line, and a second batch started mid-flight would interleave its
+  progress counts into it. CSS follows with `.timeline-upload-btn:has(input:disabled)`,
+  because a disabled control silently swallows activation forwarded from its label: the
+  untouched button would otherwise look available and do nothing.
+- **The gallery refetches once per batch, not per file.** A ten-photo selection should
+  not fire ten refetches of the panel directly below the button.
+
+Covered by the dashboard jsdom suite, now 122 drives.
+
+---
+
 ## 2026-08-03 — A truck TTAS says it has lost is now in the No GPS list
 
 Operator report, following the speed fix below: a vehicle that had lost GPS
@@ -184,11 +480,20 @@ the modal through the DOM, because the bug was invisible in any single
 function: capture, render and save were each correct in isolation. Mutation
 check — removing the one added line from the POST body fails 7 of the 10.
 
-`tests/js/dashboard.test.js` is unchanged at 108, but note two of its ETA
-cases are **time-of-day dependent**: run after ~23:13 local, a 47-minute ETA
-crosses midnight and picks up the `+1d` marker the assertions do not expect.
-Pre-existing, unrelated to this change, and worth fixing with an injected
-clock rather than by rerunning in the morning.
+`tests/js/dashboard.test.js` is unchanged at 108, but note that one of its ETA
+cases is **time-of-day dependent**. Pre-existing, unrelated to this change, and
+worth fixing with an injected clock rather than by rerunning in the morning.
+
+> **Corrected 2026-08-06.** This paragraph originally read *"two of its ETA cases
+> ... run after ~23:13 local, a 47-minute ETA crosses midnight"*. Both details were
+> wrong, and the diagnosis was written from reading rather than from running. It is
+> **one** case — `a route running past midnight is marked, not shown as already
+> late` — and it feeds `UI.etaClock()` a **36-hour** ETA, not 47 minutes. `etaClock`
+> counts *calendar days crossed*, so from **12:00 local onwards** 36 hours lands two
+> dates away and it renders `+2d` where the assertion expects `+1d`. The failure
+> window is half the day, not the last 47 minutes of it. Verified by running the
+> suite across shifted `TZ` values. The suggested fix — an injectable clock — still
+> stands.
 
 ## 2026-08-02 — End-of-day export, and a persistent disk
 
@@ -2068,6 +2373,7 @@ Implements Phase 1 items 1–6, Phase 2 items 7–8, Phase 3 items 13–15, and 
 
 #### `app/` package — extracted from the `app.py` monolith
 `app.py` shrank from **3,625 lines to 225 lines**. New structure:
+
 | Module | Contents |
 |---|---|
 | `app/config.py` | Env vars, constants (`DB_PATH`, `ORS_*`, `TTAS_*`, `FLASK_*`) |

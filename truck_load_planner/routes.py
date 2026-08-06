@@ -4,12 +4,15 @@ All routes are prefixed with /api/tlp.
 """
 
 import json
+import logging
 import time
 import uuid
 import datetime
 from flask import Blueprint, jsonify, request
 
 from app.db import DatabaseManager
+
+logger = logging.getLogger(__name__)
 
 tlp_bp = Blueprint("tlp", __name__, url_prefix="/api/tlp")
 
@@ -260,10 +263,23 @@ def update_package(pkg_id):
 
 @tlp_bp.route("/packages/<int:pkg_id>", methods=["DELETE"])
 def delete_package(pkg_id):
+    # This schema has no ON DELETE CASCADE and runs with enable_fk=False (see
+    # the module note above), so the children have to be removed by hand —
+    # exactly as clear_all_packages already does for the whole table. Deleting
+    # only the package left its placements and shipment items behind as rows
+    # pointing at an id that no longer exists; saved load plans then reloaded
+    # through the LEFT JOIN in list_plans with a null name and zero
+    # dimensions, i.e. as invisible boxes.
+    #
+    # Children first, so `deleted` below is the package row's own count and
+    # not a child table's.
     with DatabaseManager(DB_PATH).connect(enable_fk=False) as conn:
         c = conn.cursor()
+        c.execute("DELETE FROM tlp_placements WHERE package_id = ?", (pkg_id,))
+        c.execute("DELETE FROM tlp_shipment_items WHERE package_id = ?", (pkg_id,))
         c.execute("DELETE FROM tlp_packages WHERE id = ?", (pkg_id,))
-    if c.rowcount == 0:
+        deleted = c.rowcount
+    if deleted == 0:
         return jsonify({"error": "Package not found"}), 404
     return jsonify({"success": True})
 
@@ -698,9 +714,26 @@ def _get_packages_from_request(data, conn):
 
     shipment_id = data.get("shipment_id")
     if shipment_id:
+        # Columns are listed explicitly and aliased to the names
+        # ``LegacyPackage.from_row`` reads. The previous ``si.*`` broke this
+        # path in two ways at once, and they had to be fixed together:
+        #
+        #   1. ``p.name`` was aliased to ``package_name``, so ``from_row``'s
+        #      ``row["name"]`` raised KeyError — an unhandled 500 on every
+        #      "select a shipment -> Auto Arrange", which is what the frontend
+        #      sends whenever a shipment is selected.
+        #   2. ``si.*`` put the *shipment item's* id in ``row["id"]``, so even
+        #      once (1) was fixed every placement would have carried the wrong
+        #      ``package_id`` — a loud crash traded for silent bad data.
+        #
+        # ``from_row`` itself is deliberately left alone: its other caller
+        # (validate_placement) passes a genuine tlp_packages row and is
+        # correct today. The query was what lied about its columns.
         items = conn.execute(
-            "SELECT si.*, p.name AS package_name, p.length, p.width, p.height, "
-            "p.weight_kg, p.allow_stacking, p.allow_rotation, p.fragile, p.color, "
+            "SELECT si.quantity AS quantity, si.package_id AS package_id, "
+            "p.id AS id, p.name AS name, "
+            "p.length, p.width, p.height, p.weight_kg, "
+            "p.allow_stacking, p.allow_rotation, p.fragile, p.color, "
             "p.max_top_weight_kg, p.max_stack_layers "
             "FROM tlp_shipment_items si "
             "LEFT JOIN tlp_packages p ON p.id = si.package_id "
@@ -710,6 +743,18 @@ def _get_packages_from_request(data, conn):
         pkgs = []
         for it in items:
             itd = dict(it)
+            # The LEFT JOIN is kept so a shipment item orphaned by a package
+            # delete still surfaces — but it is skipped and logged rather than
+            # arranged, since from_row would otherwise build a package with a
+            # null name and zero dimensions and the planner would happily pack
+            # an invisible box. Loud degradation, matching _gps_by_plate_key.
+            if itd.get("id") is None:
+                logger.warning(
+                    "Shipment %s item references package_id %s which no longer "
+                    "exists — skipping it",
+                    shipment_id, itd.get("package_id"),
+                )
+                continue
             lpkg = LegacyPackage.from_row(itd)
             qty = itd.get("quantity", 1) or 1
             ep = EnginePackage.from_legacy(lpkg)

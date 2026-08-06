@@ -91,6 +91,7 @@ def api_vehicles_list():
 
 @bp.route("/api/fleet/vehicles", methods=["POST"])
 def api_vehicles_create():
+    conn = None
     try:
         data = request.json or {}
         plate = (data.get("plate_number") or "").strip().upper()
@@ -133,7 +134,6 @@ def api_vehicles_create():
                 )
             c.execute("UPDATE vehicles SET container_config_id = ? WHERE id = ?", (cc_id, vehicle_id))
         conn.commit()
-        conn.close()
         return jsonify({
             "success": True,
             "message": "Vehicle created",
@@ -149,11 +149,15 @@ def api_vehicles_create():
         return jsonify({"success": False, "message": "Vehicle with that plate number already exists"}), 409
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/fleet/vehicles/<int:vehicle_id>/container", methods=["PUT"])
 def api_vehicle_set_container(vehicle_id):
     """Link a vehicle to a container config, or remove the link."""
+    conn = None
     try:
         data = request.json or {}
         cc_id = data.get("container_config_id")
@@ -167,16 +171,19 @@ def api_vehicle_set_container(vehicle_id):
                       (vehicle_id,))
         conn.commit()
         affected = c.rowcount
-        conn.close()
         if affected == 0:
             return jsonify({"success": False, "message": "Vehicle not found"}), 404
         return jsonify({"success": True, "message": "Container config updated"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/fleet/vehicles/<int:vehicle_id>", methods=["PUT"])
 def api_vehicles_update(vehicle_id):
+    conn = None
     try:
         data = request.json or {}
         plate = (data.get("plate_number") or "").strip().upper()
@@ -199,7 +206,6 @@ def api_vehicles_update(vehicle_id):
             (plate, vtype, driver, *envelope_params, vehicle_id)
         )
         if c.rowcount == 0:
-            conn.close()
             return jsonify({"success": False, "message": "Vehicle not found"}), 404
         # Handle container config
         cargo_len = data.get("cargo_length_mm")
@@ -237,16 +243,19 @@ def api_vehicles_update(vehicle_id):
                     )
                 c.execute("UPDATE vehicles SET container_config_id = ? WHERE id = ?", (cc_id, vehicle_id))
         conn.commit()
-        conn.close()
         return jsonify({"success": True, "message": "Vehicle updated", "warnings": warnings})
     except sqlite3.IntegrityError:
         return jsonify({"success": False, "message": "Plate number already exists"}), 409
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/fleet/vehicles/<int:vehicle_id>", methods=["DELETE"])
 def api_vehicles_delete(vehicle_id):
+    conn = None
     try:
         conn = sqlite3.connect(config.DB_PATH)
         c = conn.cursor()
@@ -258,19 +267,21 @@ def api_vehicles_delete(vehicle_id):
             c.execute("DELETE FROM container_configs WHERE id = ?", (row[0],))
         c.execute("DELETE FROM vehicles WHERE id=?", (vehicle_id,))
         if c.rowcount == 0:
-            conn.close()
             return jsonify({"success": False, "message": "Vehicle not found"}), 404
         c.execute("UPDATE fuel_log SET vehicle_id = NULL WHERE vehicle_id = ?", (vehicle_id,))
         conn.commit()
-        conn.close()
         return jsonify({"success": True, "message": "Vehicle deleted"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/fleet/vehicles/bulk-delete", methods=["POST"])
 def api_vehicles_bulk_delete():
     """Delete multiple vehicles by ID. Runs inside a transaction."""
+    conn = None
     try:
         data = request.json or {}
         ids = data.get("ids", [])
@@ -295,14 +306,15 @@ def api_vehicles_bulk_delete():
                     c.execute("UPDATE fuel_log SET vehicle_id = NULL WHERE vehicle_id = ?", (vid,))
                     deleted += 1
             conn.commit()
-            conn.close()
             return jsonify({"success": True, "message": f"{deleted} vehicle(s) deleted", "deleted": deleted})
         except Exception:
             conn.rollback()
-            conn.close()
             raise
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/fleet/vehicles/search")
@@ -343,6 +355,7 @@ def api_vehicle_types_list():
 
 @bp.route("/api/fleet/vehicle-types", methods=["POST"])
 def api_vehicle_types_create():
+    conn = None
     try:
         data = request.json or {}
         name = (data.get("name") or "").strip()
@@ -353,25 +366,29 @@ def api_vehicle_types_create():
         c.execute("INSERT INTO vehicle_types (name) VALUES (?)", (name,))
         conn.commit()
         type_id = c.lastrowid
-        conn.close()
         return jsonify({"success": True, "message": "Type added", "id": type_id, "name": name})
     except sqlite3.IntegrityError:
         return jsonify({"success": False, "message": "Type already exists"}), 409
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/fleet/vehicle-types/<int:type_id>", methods=["DELETE"])
 def api_vehicle_types_delete(type_id):
+    conn = None
     try:
         conn = sqlite3.connect(config.DB_PATH)
         c = conn.cursor()
         c.execute("DELETE FROM vehicle_types WHERE id = ?", (type_id,))
         if c.rowcount == 0:
-            conn.close()
             return jsonify({"success": False, "message": "Type not found"}), 404
         conn.commit()
-        conn.close()
         return jsonify({"success": True, "message": "Type deleted"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()

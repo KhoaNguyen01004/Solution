@@ -388,6 +388,30 @@ already passed full backend validation.
 
 ---
 
+### Escaping — every operator-supplied string goes through `UI.escapeHtml()`
+
+`static/js/truck-load-planner.js` builds most of its UI with `innerHTML` and template
+literals. Package names, customer names, reference numbers, plate numbers, container
+names, driver names and plan names are all operator-entered and all reach a sink, so
+each is wrapped:
+
+```js
+`<div class="tlp-pkg-name">${UI.escapeHtml(pkg.name)} ${stackingLabel}</div>`
+```
+
+The `||` default goes **inside** the call, so a `null` never reaches `escapeHtml`.
+Numeric and boolean interpolations (`${pkg.length}`, `${item.quantity}`, `${p.id}`) are
+deliberately left bare — escaping them would be noise.
+
+This file had **zero** escaping until 2026-08-06; the 2026-07-29 refactor that moved
+every other page onto `UI.escapeHtml()` missed it. With no authentication on any
+endpoint (deliberate — see `CLAUDE.md`), anything that could reach the network could
+persist a payload via a package name and have it run in every dispatcher's browser.
+`tests/js/tlp-escaping.test.js` guards against it being dropped again and is
+deliberately dependency-free so it runs without `node_modules`.
+
+---
+
 ## 12. 2D Canvas View Coordinates
 
 The frontend renders three orthogonal views of the container using Konva.js. Each view maps two container axes onto the canvas:
@@ -407,6 +431,8 @@ Coordinate flips are applied consistently across rendering (`_drawPackages`, `_f
 ---
 
 ## 13. Engine Architecture (`truck_load_planner/engine/`)
+
+21 modules plus `__init__.py`.
 
 | Module | Responsibility |
 |--------|---------------|
@@ -430,6 +456,15 @@ Coordinate flips are applied consistently across rendering (`_drawPackages`, `_f
 | `package.py` | Package dataclass (dimensions, stackable, rotation, clearance) + `EnginePackage.from_legacy()` factory (converts legacy dict/object shapes) |
 | `placement.py` | Placement dataclass (position, rotation, sequence, door_used) |
 | `profile.py` | Solver profile configuration (name, candidate_limit, tighten_step) |
+| `trace_mutations.py` | Debug-only placement mutation tracer. Assigns every `Placement` a `_uid` and logs every change to x/y/z/rotation plus insertion and removal; provides `M.check_integrity()` and `M.dump_for()`. Written for support-integrity bugs — disable with `M.enabled = False` |
+
+### Related packages outside `engine/`
+
+| Package | Responsibility |
+|---------|---------------|
+| `geometry/` | `aabb.py` — the single canonical AABB class (`engine/geometry.py` re-exports it); `grid.py`, `transform.py` |
+| `optimization/vehicle_cost.py` | Estimated transport cost per vehicle — fuel, empty-volume and empty-floor penalties, fixed cost. Deliberately outside `engine/` so business factors stay independent of packing geometry |
+| `logistics/` | Legacy validation helpers. `adapters.py` delegates `check_boundary` / `calculate_total_weight` / `check_weight` to `engine/`; `volume.py` and `constraints.py::get_door_status` have no engine equivalent and remain the live implementation |
 
 ### Experimental: py3dbp Packing Engine
 
@@ -456,6 +491,28 @@ adapter that just wraps `distribute_across_vehicles()`. Both implement the
 | `tlp_placements` | Individual placements | `id`, `load_plan_id` (FK), `package_id` (FK), `x`, `y`, `z`, `rotation`, `load_sequence` |
 | `container_configs` | Container/trailer dimensions | `id`, `name`, `cargo_length_mm`, `cargo_width_mm`, `cargo_height_mm`, `payload_kg` |
 | `container_features` | Doors, lift gates | `id`, `container_config_id` (FK), `feature_type`, `geometry_json` |
+
+### Delete semantics — the cascade is manual
+
+`truck_load_planner/routes.py` connects with `enable_fk=False` and the TLP schema uses
+plain `REFERENCES` with no `ON DELETE CASCADE`. **Both are deliberate**, and the
+consequence is that every delete route must clean up its own children:
+
+| route | also deletes |
+|---|---|
+| `DELETE /packages/<id>` | `tlp_placements`, `tlp_shipment_items` for that package |
+| `DELETE /packages/clear` | all `tlp_placements`, all `tlp_shipment_items` |
+| `DELETE /shipments/<id>` | `tlp_shipment_items` for that shipment |
+| `DELETE /container-configs/<id>` | `container_features` for that config |
+
+`delete_package` did not do this until 2026-08-06 — it removed only the package row,
+leaving placements pointing at an id that no longer existed. Those reload through the
+`LEFT JOIN` in `list_plans` with a null name and zero dimensions, i.e. as invisible
+boxes in a saved load plan. If you add a delete route here, add its cascade with it;
+turning FK enforcement on instead would break the other three.
+
+Note the children are deleted **before** the parent, so the `rowcount` deciding the 404
+is still the parent row's own.
 
 ### Feature Geometry Schema
 
@@ -487,6 +544,28 @@ POST /api/tlp/auto-arrange
   "debug": false
 }
 ```
+
+**Cargo arrives one of two ways, and the frontend picks between them.**
+`truck-load-planner.js:1403` sends `shipment_id` when a shipment is selected, and an
+inline `packages` array otherwise. Both go through `_get_packages_from_request`:
+
+| field | source | shape |
+|---|---|---|
+| `shipment_id` | `tlp_shipment_items` joined to `tlp_packages`, expanded by `quantity` | server-side |
+| `packages` | array of `{package_id, name, length, width, height, weight_kg, color, allow_stacking}` | client-side, already expanded |
+
+`shipment_id` wins if both are present. A shipment item whose package has been deleted
+is **skipped with a warning**, not arranged — the `LEFT JOIN` is kept so the orphan
+surfaces, but a package with a null name and 0 mm sides would otherwise be packed as an
+invisible box.
+
+> **Fixed 2026-08-06.** The `shipment_id` path returned an unhandled 500 for the whole
+> life of the endpoint: the query aliased `p.name AS package_name` while
+> `Package.from_row` reads `row["name"]`, so it raised `KeyError: 'name'`. Behind that,
+> `si.*` exposed the *shipment item's* id as `row["id"]`, which would have given every
+> placement the wrong `package_id` once the crash was fixed. Both were corrected
+> together — see `docs/AUDIT_2026-08-06.md` §1. `tests/test_tlp_routes.py` pins the two
+> payload shapes to produce identical placements, so they cannot drift apart again.
 
 **Response** (single-vehicle shape; multi-vehicle adds `per_vehicle`):
 ```json

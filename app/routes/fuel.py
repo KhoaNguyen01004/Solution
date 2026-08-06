@@ -4,6 +4,7 @@ Fuel efficiency / refuel log CRUD, profiles, CSV export, and Google Sheet sync.
 Extracted from app.py (Section 6.4.1, Phase 10).
 """
 import sqlite3
+from contextlib import contextmanager
 
 from flask import Blueprint, jsonify, render_template, request
 
@@ -14,7 +15,31 @@ from services import vehicle_identity
 bp = Blueprint("fuel", __name__)
 
 
-def _compute_fuel_entry(row: dict) -> dict:
+@contextmanager
+def _db(conn=None):
+    """Yield a connection, opening one only when the caller has none.
+
+    The helpers below are called once per fuel_log row. Each used to open its
+    own connection, so `GET /api/fuel-log` over the 323 rows in this fleet's
+    database opened on the order of 1,300 of them for a single request —
+    which, behind render.yaml's single synchronous Gunicorn worker, blocks
+    every other request for the duration (2026-08-06 audit).
+
+    The `conn` parameter is optional so the standalone call sites (the create
+    and update handlers, which compute one entry) keep working untouched; only
+    the loops pass a connection down.
+    """
+    if conn is not None:
+        yield conn
+        return
+    own = sqlite3.connect(config.DB_PATH)
+    try:
+        yield own
+    finally:
+        own.close()
+
+
+def _compute_fuel_entry(row: dict, conn=None) -> dict:
     """Add computed fields to a fuel_log row.
 
     Individual fields (distance_km, liters) always stay as the entry's own values.
@@ -46,9 +71,8 @@ def _compute_fuel_entry(row: dict) -> dict:
     # Full tank – compute accumulated distance & liters since last full tank
     plate = entry["license_plate"]
     entry_id = entry["id"]
-    conn = sqlite3.connect(config.DB_PATH)
-    c = conn.cursor()
-    try:
+    with _db(conn) as db:
+        c = db.cursor()
         c.execute(
             "SELECT COALESCE(MAX(id), 0) FROM fuel_log "
             "WHERE license_plate = ? AND is_full_tank = 1 AND id < ?",
@@ -68,8 +92,6 @@ def _compute_fuel_entry(row: dict) -> dict:
                 (plate, entry_id)
             )
         total_km, total_l = c.fetchone()
-    finally:
-        conn.close()
 
     total_km = total_km or 0
     total_l = total_l or 0
@@ -80,39 +102,37 @@ def _compute_fuel_entry(row: dict) -> dict:
     return entry
 
 
-def _get_normal_l_per_100km(plate: str) -> float:
+def _get_normal_l_per_100km(plate: str, conn=None) -> float:
     """Look up the user-defined normal L/100km for a vehicle."""
     try:
-        conn = sqlite3.connect(config.DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT normal_l_per_100km FROM fuel_vehicle_profile WHERE license_plate = ?", (plate,))
-        row = c.fetchone()
-        conn.close()
+        with _db(conn) as db:
+            c = db.cursor()
+            c.execute("SELECT normal_l_per_100km FROM fuel_vehicle_profile WHERE license_plate = ?", (plate,))
+            row = c.fetchone()
         return float(row[0]) if row else 0
     except Exception:
         return 0
 
 
-def _compute_baseline(plate: str, exclude_id: int = None) -> float:
+def _compute_baseline(plate: str, exclude_id: int = None, conn=None) -> float:
     """Compute moving average of l_per_100km of last 5 entries for a plate.
     If a manual normal_l_per_100km is set for this vehicle, returns that instead."""
-    manual = _get_normal_l_per_100km(plate)
+    manual = _get_normal_l_per_100km(plate, conn)
     if manual > 0:
         return manual
-    conn = sqlite3.connect(config.DB_PATH)
-    c = conn.cursor()
-    if exclude_id:
-        c.execute(
-            "SELECT old_km, new_km, liters FROM fuel_log WHERE license_plate = ? AND id != ? AND is_full_tank = 1 ORDER BY id DESC LIMIT 5",
-            (plate, exclude_id)
-        )
-    else:
-        c.execute(
-            "SELECT old_km, new_km, liters FROM fuel_log WHERE license_plate = ? AND is_full_tank = 1 ORDER BY id DESC LIMIT 5",
-            (plate,)
-        )
-    rows = c.fetchall()
-    conn.close()
+    with _db(conn) as db:
+        c = db.cursor()
+        if exclude_id:
+            c.execute(
+                "SELECT old_km, new_km, liters FROM fuel_log WHERE license_plate = ? AND id != ? AND is_full_tank = 1 ORDER BY id DESC LIMIT 5",
+                (plate, exclude_id)
+            )
+        else:
+            c.execute(
+                "SELECT old_km, new_km, liters FROM fuel_log WHERE license_plate = ? AND is_full_tank = 1 ORDER BY id DESC LIMIT 5",
+                (plate,)
+            )
+        rows = c.fetchall()
     ratios = []
     for old_km, new_km, liters in rows:
         d = (new_km or 0) - (old_km or 0)
@@ -120,20 +140,19 @@ def _compute_baseline(plate: str, exclude_id: int = None) -> float:
             ratios.append(liters / d * 100)
     # Fallback: if no full-tank entries, include all entries
     if not ratios:
-        conn = sqlite3.connect(config.DB_PATH)
-        c = conn.cursor()
-        if exclude_id:
-            c.execute(
-                "SELECT old_km, new_km, liters FROM fuel_log WHERE license_plate = ? AND id != ? ORDER BY id DESC LIMIT 5",
-                (plate, exclude_id)
-            )
-        else:
-            c.execute(
-                "SELECT old_km, new_km, liters FROM fuel_log WHERE license_plate = ? ORDER BY id DESC LIMIT 5",
-                (plate,)
-            )
-        rows = c.fetchall()
-        conn.close()
+        with _db(conn) as db:
+            c = db.cursor()
+            if exclude_id:
+                c.execute(
+                    "SELECT old_km, new_km, liters FROM fuel_log WHERE license_plate = ? AND id != ? ORDER BY id DESC LIMIT 5",
+                    (plate, exclude_id)
+                )
+            else:
+                c.execute(
+                    "SELECT old_km, new_km, liters FROM fuel_log WHERE license_plate = ? ORDER BY id DESC LIMIT 5",
+                    (plate,)
+                )
+            rows = c.fetchall()
         for old_km, new_km, liters in rows:
             d = (new_km or 0) - (old_km or 0)
             if d > 0 and (liters or 0) > 0:
@@ -141,21 +160,20 @@ def _compute_baseline(plate: str, exclude_id: int = None) -> float:
     return sum(ratios) / len(ratios) if ratios else 0
 
 
-def _get_anomaly_multiplier(plate: str) -> float:
+def _get_anomaly_multiplier(plate: str, conn=None) -> float:
     """Return the anomaly threshold multiplier for a vehicle.
     Default: 1.50 if vehicle type contains 'Container', else 1.20.
     User can override via fuel_vehicle_profile.anomaly_multiplier."""
     try:
         vtype = ""
-        conn = sqlite3.connect(config.DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT vehicle_type FROM vehicles WHERE plate_number = ?", (plate,))
-        row = c.fetchone()
-        if row:
-            vtype = row[0] or ""
-        c.execute("SELECT anomaly_multiplier FROM fuel_vehicle_profile WHERE license_plate = ?", (plate,))
-        row = c.fetchone()
-        conn.close()
+        with _db(conn) as db:
+            c = db.cursor()
+            c.execute("SELECT vehicle_type FROM vehicles WHERE plate_number = ?", (plate,))
+            row = c.fetchone()
+            if row:
+                vtype = row[0] or ""
+            c.execute("SELECT anomaly_multiplier FROM fuel_vehicle_profile WHERE license_plate = ?", (plate,))
+            row = c.fetchone()
         if row and row[0] is not None:
             return float(row[0])
         return 1.50 if "container" in vtype.lower() else 1.20
@@ -163,7 +181,7 @@ def _get_anomaly_multiplier(plate: str) -> float:
         return 1.20
 
 
-def _apply_anomaly_flag(entry: dict, baseline: float) -> dict:
+def _apply_anomaly_flag(entry: dict, baseline: float, conn=None) -> dict:
     """Mark entry as anomaly if l_per_100km is outside expected range.
 
     Anomalies include:
@@ -174,8 +192,8 @@ def _apply_anomaly_flag(entry: dict, baseline: float) -> dict:
     from charts and averages while remaining visible in the table as flagged.
     """
     entry["baseline"] = round(baseline, 2)
-    entry["normal_l_per_100km"] = round(_get_normal_l_per_100km(entry["license_plate"]), 2)
-    entry["anomaly_multiplier"] = _get_anomaly_multiplier(entry["license_plate"])
+    entry["normal_l_per_100km"] = round(_get_normal_l_per_100km(entry["license_plate"], conn), 2)
+    entry["anomaly_multiplier"] = _get_anomaly_multiplier(entry["license_plate"], conn)
 
     # Unrealistically low consumption (< 8 L/100km) — data error
     if 0 < entry["l_per_100km"] < 8:
@@ -201,15 +219,14 @@ def fuel_container_page():
     return render_template("fuel-efficiency.html", mode="container")
 
 
-def _enrich_fuel_entry(entry: dict) -> dict:
+def _enrich_fuel_entry(entry: dict, conn=None) -> dict:
     """Add vehicle_type from vehicles table to a fuel entry."""
     if entry.get("vehicle_id"):
         try:
-            conn = sqlite3.connect(config.DB_PATH)
-            c = conn.cursor()
-            c.execute("SELECT vehicle_type, current_driver FROM vehicles WHERE id = ?", (entry["vehicle_id"],))
-            row = c.fetchone()
-            conn.close()
+            with _db(conn) as db:
+                c = db.cursor()
+                c.execute("SELECT vehicle_type, current_driver FROM vehicles WHERE id = ?", (entry["vehicle_id"],))
+                row = c.fetchone()
             if row:
                 entry["vehicle_type"] = row[0] or ""
                 if not entry.get("driver_name"):
@@ -221,6 +238,7 @@ def _enrich_fuel_entry(entry: dict) -> dict:
 
 @bp.route("/api/fuel-log", methods=["GET"])
 def api_fuel_log_list():
+    conn = None
     try:
         conn = sqlite3.connect(config.DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -247,14 +265,18 @@ def api_fuel_log_list():
         where = "WHERE " + " AND ".join(conditions) if conditions else ""
         c.execute(f"SELECT * FROM fuel_log {where} ORDER BY log_date DESC, log_time DESC", params)
         rows = [dict(r) for r in c.fetchall()]
-        conn.close()
 
+        # The connection stays open for the loop and is handed to each helper.
+        # Previously each of the four opened its own per row, so this endpoint
+        # opened ~6 connections × N rows — over 1,300 for the 323 rows in this
+        # fleet's database, all of them serialised behind the single Gunicorn
+        # worker (2026-08-06 audit).
         results = []
         for r in rows:
-            entry = _compute_fuel_entry(r)
-            entry = _enrich_fuel_entry(entry)
-            baseline = _compute_baseline(entry["license_plate"], entry["id"])
-            entry = _apply_anomaly_flag(entry, baseline)
+            entry = _compute_fuel_entry(r, conn)
+            entry = _enrich_fuel_entry(entry, conn)
+            baseline = _compute_baseline(entry["license_plate"], entry["id"], conn)
+            entry = _apply_anomaly_flag(entry, baseline, conn)
             if mode:
                 is_container = (entry.get("vehicle_type") or "").lower().find("container") >= 0
                 if (mode == "container" and not is_container) or (mode == "regular" and is_container):
@@ -264,6 +286,9 @@ def api_fuel_log_list():
         return jsonify({"success": True, "data": results})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/fuel-log/months", methods=["GET"])
@@ -360,6 +385,7 @@ def api_fuel_log_stats():
 
 @bp.route("/api/fuel-log", methods=["POST"])
 def api_fuel_log_create():
+    conn = None
     try:
         data = request.json or {}
         vehicle_id = data.get("vehicle_id")
@@ -383,10 +409,13 @@ def api_fuel_log_create():
         # If vehicle_id is provided, look up plate and driver from vehicles table
         if vehicle_id:
             conn = sqlite3.connect(config.DB_PATH)
-            c = conn.cursor()
-            c.execute("SELECT plate_number, current_driver FROM vehicles WHERE id = ?", (vehicle_id,))
-            row = c.fetchone()
-            conn.close()
+            try:
+                c = conn.cursor()
+                c.execute("SELECT plate_number, current_driver FROM vehicles WHERE id = ?", (vehicle_id,))
+                row = c.fetchone()
+            finally:
+                conn.close()
+                conn = None
             if row:
                 if not plate:
                     plate = row[0]
@@ -427,7 +456,6 @@ def api_fuel_log_create():
         # in the fleet, not for a formatting difference.
         vehicle_ref = vehicle_identity.resolve(conn, plate)
         if vehicle_ref is None:
-            conn.close()
             return jsonify(
                 vehicle_identity.unknown_vehicle_response(plate, driver_name)
             ), 409
@@ -444,7 +472,11 @@ def api_fuel_log_create():
         )
         conn.commit()
         new_id = c.lastrowid
+        # Closed here rather than left to the finally: the helpers below open
+        # their own connections, and holding this one across them serves no
+        # purpose. The finally is the guarantee, not the mechanism.
         conn.close()
+        conn = None
 
         entry = _compute_fuel_entry({
             "id": new_id, "license_plate": plate, "log_date": log_date, "log_time": log_time,
@@ -462,10 +494,14 @@ def api_fuel_log_create():
         return jsonify(resp)
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/fuel-log/<int:entry_id>", methods=["PUT"])
 def api_fuel_log_update(entry_id):
+    conn = None
     try:
         data = request.json or {}
         conn = sqlite3.connect(config.DB_PATH)
@@ -475,7 +511,6 @@ def api_fuel_log_update(entry_id):
         c.execute("SELECT * FROM fuel_log WHERE id = ?", (entry_id,))
         existing = c.fetchone()
         if not existing:
-            conn.close()
             return jsonify({"success": False, "message": "Entry not found"}), 404
 
         vehicle_id = data.get("vehicle_id", existing["vehicle_id"])
@@ -485,7 +520,6 @@ def api_fuel_log_update(entry_id):
         # isn't a real vehicle, and may not create one to make itself valid.
         vehicle_ref = vehicle_identity.resolve(conn, plate)
         if vehicle_ref is None:
-            conn.close()
             return jsonify(
                 vehicle_identity.unknown_vehicle_response(
                     plate, (data.get("driver_name") or existing["driver_name"] or "").strip()
@@ -511,10 +545,8 @@ def api_fuel_log_update(entry_id):
         is_full_tank = 1 if is_full_tank else 0
 
         if new_km < old_km:
-            conn.close()
             return jsonify({"success": False, "message": "New KM must be >= Old KM"}), 400
         if liters <= 0:
-            conn.close()
             return jsonify({"success": False, "message": "Liters must be > 0"}), 400
 
         distance_km = new_km - old_km
@@ -533,6 +565,7 @@ def api_fuel_log_update(entry_id):
         c.execute("SELECT * FROM fuel_log WHERE id = ?", (entry_id,))
         updated = dict(c.fetchone())
         conn.close()
+        conn = None
 
         entry = _compute_fuel_entry(updated)
         entry = _enrich_fuel_entry(entry)
@@ -545,22 +578,27 @@ def api_fuel_log_update(entry_id):
         return jsonify(resp)
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/fuel-log/<int:entry_id>", methods=["DELETE"])
 def api_fuel_log_delete(entry_id):
+    conn = None
     try:
         conn = sqlite3.connect(config.DB_PATH)
         c = conn.cursor()
         c.execute("DELETE FROM fuel_log WHERE id = ?", (entry_id,))
         if c.rowcount == 0:
-            conn.close()
             return jsonify({"success": False, "message": "Entry not found"}), 404
         conn.commit()
-        conn.close()
         return jsonify({"success": True, "message": "Entry deleted"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/fuel-log/last-km")
@@ -643,6 +681,7 @@ def api_fuel_log_summary():
 
 @bp.route("/api/fuel-log/export")
 def api_fuel_log_export():
+    conn = None
     try:
         conn = sqlite3.connect(config.DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -665,7 +704,6 @@ def api_fuel_log_export():
         where = "WHERE " + " AND ".join(conditions) if conditions else ""
         c.execute(f"SELECT f.* FROM fuel_log f LEFT JOIN vehicles v ON f.vehicle_id = v.id {where} ORDER BY f.log_date DESC, f.log_time DESC", params)
         rows = [dict(r) for r in c.fetchall()]
-        conn.close()
 
         headers = [
             "ID", "License Plate", "Date", "Time", "Gas Store",
@@ -674,11 +712,13 @@ def api_fuel_log_export():
             "Driver Name", "Notes", "Anomaly",
             "Full Tank", "Accum Distance KM", "Accum Liters"
         ]
+        # Same connection reuse as api_fuel_log_list — this loop runs over the
+        # whole unfiltered table when no month is selected.
         csv_rows = []
         for r in rows:
-            entry = _compute_fuel_entry(r)
-            baseline = _compute_baseline(entry["license_plate"], entry["id"])
-            entry = _apply_anomaly_flag(entry, baseline)
+            entry = _compute_fuel_entry(r, conn)
+            baseline = _compute_baseline(entry["license_plate"], entry["id"], conn)
+            entry = _apply_anomaly_flag(entry, baseline, conn)
             csv_rows.append([
                 entry["id"], "\t" + entry["license_plate"], entry["log_date"], entry["log_time"],
                 entry["gas_store"], entry["old_km"], entry["new_km"],
@@ -694,6 +734,9 @@ def api_fuel_log_export():
         return csv_response(headers, csv_rows, "fuel_efficiency_report.csv")
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/fuel-log/profiles", methods=["GET"])
@@ -732,6 +775,7 @@ def api_fuel_log_profiles_list():
 @bp.route("/api/fuel-log/profiles/<path:plate>", methods=["PUT"])
 def api_fuel_log_profile_update(plate):
     """Create or update a vehicle's normal L/100km and/or anomaly multiplier."""
+    conn = None
     try:
         plate = plate.strip().upper()
         data = request.json or {}
@@ -748,12 +792,10 @@ def api_fuel_log_profile_update(plate):
         if normal is not None:
             normal = float(normal)
             if normal <= 0:
-                conn.close()
                 return jsonify({"success": False, "message": "normal_l_per_100km must be > 0"}), 400
         if anomaly_mult is not None:
             anomaly_mult = float(anomaly_mult)
             if anomaly_mult < 1.0:
-                conn.close()
                 return jsonify({"success": False, "message": "anomaly_multiplier must be >= 1.0"}), 400
 
         if exists:
@@ -775,7 +817,6 @@ def api_fuel_log_profile_update(plate):
             )
 
         conn.commit()
-        conn.close()
         parts = []
         if normal is not None:
             parts.append(f"Normal L/100km = {normal}")
@@ -784,21 +825,27 @@ def api_fuel_log_profile_update(plate):
         return jsonify({"success": True, "message": f"Profile for {plate}: {', '.join(parts)}"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/fuel-log/profiles/<path:plate>", methods=["DELETE"])
 def api_fuel_log_profile_delete(plate):
     """Remove a vehicle's manual normal L/100km (revert to computed baseline)."""
+    conn = None
     try:
         plate = plate.strip().upper()
         conn = sqlite3.connect(config.DB_PATH)
         c = conn.cursor()
         c.execute("DELETE FROM fuel_vehicle_profile WHERE license_plate = ?", (plate,))
         conn.commit()
-        conn.close()
         return jsonify({"success": True, "message": f"Normal L/100km for {plate} cleared"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------

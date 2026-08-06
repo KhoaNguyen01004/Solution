@@ -1,8 +1,21 @@
 # Dispatch Dashboard — UX Improvement Plan
 
 Status: **Phase 0 shipped 2026-07-31** (see `docs/CHANGELOG.md` for what landed and
-why). Phases 1–2 remain proposed and unapproved; they are sketched here to the
-level needed to judge whether Phase 0's choices boxed them in — they did not.
+why). Phases 1–2 remain proposed and unapproved as of **2026-08-06**; they are
+sketched here to the level needed to judge whether Phase 0's choices boxed them in —
+they did not.
+
+**Verified still-unshipped (2026-08-06):** `planned_arrival_at` and `service_minutes`
+appear nowhere in `app/database/migrations.py`, `services/` or `static/`, and the right
+panel's empty state is still `Select a vehicle to view stops` (`timeline.js`). Phase 1's
+derived schedule and Phase 2's exception queue have not been started.
+
+**The dashboard did keep moving, outside this plan.** Since Phase 0 it has gained undo
+(`/api/execution/revert`), per-stop phase history, photo-proof gating, batch photo
+upload, `MTH` lost-signal detection in the No GPS filter, and the end-of-day export
+page. None of that is Phase 1 or Phase 2 work — it came from operator reports and the
+delivery audit. Read this document as the *time-dimension* roadmap specifically, not as
+a general record of dashboard progress; `docs/CHANGELOG.md` is that record.
 
 Scope: `templates/delivery-dashboard.html`, `static/js/dashboard/*.js`,
 `static/css/delivery-dashboard.css`. Phase 1 additionally touches
@@ -94,10 +107,13 @@ The right panel reads "Select a vehicle to view stops" until a vehicle is clicke
 There is no view answering "what needs me right now" across the fleet. The
 attention strip is close, but it is a chip row above the list, not a work queue.
 
-**G4 — 40 vehicles, roughly 8 visible.**
-36 box trucks plus 4 containers. `.vehicle-card` is a ~5-line block in a 280px
-column. The dispatcher can never see the fleet at once, which is the reason a
-dispatch board exists.
+**G4 — 36 vehicles, roughly 8 visible.**
+32 box trucks plus 4 containers, per `routing_system.db` on 2026-08-06. (This gap
+was written as "40 vehicles / 36 box trucks plus 4 containers" — the box-truck count
+had been read as the fleet total. The argument is unaffected: 36 cards at ~5 lines
+each in a 280px column still cannot be seen at once.) `.vehicle-card` is a ~5-line
+block in that column. The dispatcher can never see the fleet at once, which is the
+reason a dispatch board exists.
 
 **G5 — Severity is binary, and the sort ranks the wrong thing.**
 All three proxies render as the same dot. A 21-minute stuck and a 3-hour stuck are

@@ -1046,11 +1046,11 @@
 
     container.innerHTML = statsHtml + planHtml + assignmentsHtml;
 
-    // Button states
+    // Button states — confirmed plans remain editable, so always show Save/Confirm
     const isConfirmed = state.planInfo.status === 'confirmed';
     if (isConfirmed) {
-      $('step4SaveDraft').style.display = 'none';
-      $('step4Confirm').style.display = 'none';
+      $('step4SaveDraft').style.display = '';
+      $('step4Confirm').style.display = '';
       $('step4ConfirmedInfo').style.display = '';
     } else {
       $('step4SaveDraft').style.display = '';
@@ -1158,9 +1158,11 @@
       }
 
       markClean();
-      state.planInfo.status = 'draft';
+      // Preserve confirmed status when editing an existing plan; only a
+      // brand-new plan (no backend record yet) starts as a draft.
+      if (!state._confirmedStatus) state.planInfo.status = 'draft';
       if (!isAuto) {
-        showToast('Draft saved successfully');
+        showToast(state._confirmedStatus ? 'Changes saved' : 'Draft saved successfully');
       }
     } catch (e) {
       if (!isAuto) alert('Error saving draft: ' + e.message);
@@ -1263,12 +1265,10 @@
     try {
       const plan = await fetchJSON(`/api/plans/${planId}`);
       state.planId = plan.id;
-      state.readOnly = plan.status === 'confirmed';
-      if (state.readOnly) {
-        const banner = $('readOnlyBanner');
-        if (banner) banner.style.display = '';
-        stopAutoSave();
-      }
+      state.readOnly = false;
+      state._confirmedStatus = plan.status === 'confirmed';
+      const banner = $('readOnlyBanner');
+      if (banner) banner.style.display = 'none';
       state.planInfo = {
         plan_name: plan.plan_name || '',
         plan_date: plan.plan_date || '',

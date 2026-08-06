@@ -25,6 +25,7 @@ def _store_km_log(entries: list):
     """
     if not entries:
         return
+    conn = None
     try:
         conn = sqlite3.connect(config.DB_PATH, timeout=10)
         c = conn.cursor()
@@ -39,11 +40,13 @@ def _store_km_log(entries: list):
                 (entry["license_plate"], entry["log_date"], entry["daily_km"])
             )
         conn.commit()
-        conn.close()
         print(f"[OilTracker] Stored {len(entries)} entries: {entries[0]['license_plate']} log_date={entries[0]['log_date']} km={entries[0]['daily_km']}")
     except Exception as e:
         print(f"[OilTracker] DB write error: {e}")
         raise
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _compute_oil_metrics(vehicle_row: dict, km_log_rows: list) -> dict:
@@ -141,6 +144,7 @@ def api_oil_maintenance_export():
 @bp.route("/api/oil-maintenance", methods=["POST"])
 def api_oil_maintenance_create():
     """Create a new vehicle oil maintenance record."""
+    conn = None
     try:
         data = request.json or {}
         plate    = (data.get("license_plate") or "").strip().upper()
@@ -159,17 +163,20 @@ def api_oil_maintenance_create():
             (plate, dt, interval)
         )
         conn.commit()
-        conn.close()
         return jsonify({"success": True, "message": "Vehicle added"})
     except sqlite3.IntegrityError:
         return jsonify({"success": False, "message": "Vehicle with that license plate already exists"}), 409
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/oil-maintenance/<plate>", methods=["PUT"])
 def api_oil_maintenance_update(plate):
     """Update an existing vehicle oil maintenance record."""
+    conn = None
     try:
         data     = request.json or {}
         plate    = plate.strip().upper()
@@ -186,20 +193,22 @@ def api_oil_maintenance_update(plate):
             (dt, interval, plate)
         )
         if c.rowcount == 0:
-            conn.close()
             return jsonify({"success": False, "message": "Vehicle not found"}), 404
         # When oil change date is updated, clear all KM logs (they were computed from old date)
         c.execute("DELETE FROM oil_km_log WHERE license_plate=?", (plate,))
         conn.commit()
-        conn.close()
         return jsonify({"success": True, "message": "Vehicle updated"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/oil-maintenance/<plate>", methods=["DELETE"])
 def api_oil_maintenance_delete(plate):
     """Delete a vehicle oil maintenance record and its KM log."""
+    conn = None
     try:
         plate = plate.strip().upper()
         conn = sqlite3.connect(config.DB_PATH)
@@ -207,15 +216,18 @@ def api_oil_maintenance_delete(plate):
         c.execute("DELETE FROM oil_maintenance WHERE license_plate=?", (plate,))
         c.execute("DELETE FROM oil_km_log WHERE license_plate=?", (plate,))
         conn.commit()
-        conn.close()
         return jsonify({"success": True, "message": "Vehicle deleted"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/oil-maintenance/<plate>/maintenance", methods=["POST"])
 def api_oil_maintenance_mark_done(plate):
     """Mark oil change as done: set last_oil_change_date to today and clear KM logs."""
+    conn = None
     try:
         plate = plate.strip().upper()
         today = _date.today().strftime("%Y-%m-%d")
@@ -226,28 +238,38 @@ def api_oil_maintenance_mark_done(plate):
             (today, plate)
         )
         if c.rowcount == 0:
-            conn.close()
             return jsonify({"success": False, "message": "Vehicle not found"}), 404
         # Clear all KM logs since they were computed from the old oil change date
         c.execute("DELETE FROM oil_km_log WHERE license_plate=?", (plate,))
         conn.commit()
-        conn.close()
         return jsonify({"success": True, "message": f"Oil change marked as done for {plate}"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @bp.route("/api/oil-maintenance/fetch-km", methods=["POST"])
 def api_oil_maintenance_fetch_km():
     """Scrape the TTAS report for all vehicles from their last oil change date to yesterday."""
+    # Scoped tightly and closed before the scrape below, which is slow: this
+    # handler goes on to drive Playwright once per vehicle, and holding a
+    # connection open across that would keep a handle on the DB file for the
+    # whole run. The try/finally only guards the read.
+    conn = None
     try:
         conn = sqlite3.connect(config.DB_PATH)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
         c.execute("SELECT license_plate, last_oil_change_date FROM oil_maintenance")
         vehicles = [dict(row) for row in c.fetchall()]
-        conn.close()
+    finally:
+        if conn is not None:
+            conn.close()
+            conn = None
 
+    try:
         if not vehicles:
             return jsonify({"success": True, "message": "No vehicles to update", "vehicles_fetched": 0})
 

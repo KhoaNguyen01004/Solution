@@ -897,7 +897,7 @@ window.DASH = window.DASH || {};
       html += `
         <label class="manage-plans-item">
           <input type="checkbox" value="${p.id}" ${checked}>
-          <span class="plan-item-name">${escapeHtml(p.plan_name || 'Plan #' + p.id)}</span>
+          <a class="plan-item-name" href="/delivery/edit/${p.id}" title="Edit plan">${escapeHtml(p.plan_name || 'Plan #' + p.id)}</a>
           <span class="plan-item-date">${escapeHtml(p.plan_date || '')}</span>
           <span class="plan-item-status ${statusClass}">${escapeHtml(rawStatus)}</span>
         </label>
