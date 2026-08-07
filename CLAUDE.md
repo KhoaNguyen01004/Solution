@@ -14,15 +14,23 @@ an `.xlsx`) — unrelated to the Flask app; ignore them for code changes.
 
 ## Architecture
 
-- **Entry points**: `app.py` (dev, `python app.py`) calls `app.create_app()` then adds
-  routes not yet extracted into a blueprint (`/`, `/api/vehicles`, manual-location
-  management, `/api/geocode`, delivery page routes). `wsgi.py` is the Gunicorn entry
-  (`gunicorn wsgi:app`) — required because `app.py` (file) and `app/` (package) share the
-  name `app`, and `import app` always resolves to the package, so Gunicorn's `app:app`
-  target can't reach `app.py`'s Flask instance. `python app.py` is unaffected.
-- **6 Flask blueprints**: `fleet`, `fuel`, `oil`, `trips` (no shared prefix — each route
-  keeps its original full path, e.g. `/api/fleet/vehicles`, `/api/fuel-log`,
-  `/oil-change`), `tlp_bp` (`/api/tlp`), `delivery_bp` (`/api`).
+- **Entry points**: `app.py` (dev, `python app.py`) and `wsgi.py` (prod,
+  `gunicorn wsgi:app`) both build the app with `app.create_app()` and nothing else.
+  `wsgi.py` exists because `app.py` (file) and `app/` (package) share the name `app`, and
+  `import app` always resolves to the package, so Gunicorn's `app:app` target can't reach
+  `app.py`'s Flask instance. **Every route must be registered inside `create_app()`.**
+  Until 2026-08-07 `app.py` attached ~15 of them to the app object *after* the factory
+  returned, and Gunicorn — which never executes `app.py` — served an application 404ing on
+  `/`, `/locations`, `/delivery/*`, `/api/vehicles` and `/api/geocode` while dev worked
+  fine. They now live in `app/routes/core.py`; `tests/test_wsgi_routes.py` fails if
+  anything is attached outside the factory again. `app.py`'s only remaining prod/dev
+  difference is `start_route_refresh_thread()` under `if __name__ == "__main__"`.
+- **7 Flask blueprints**: `core` (`/`, `/locations`, `/delivery/*` page shells,
+  `/api/vehicles`, manual-location CRUD, `/api/geocode`), `fleet`, `fuel`, `oil`, `trips`
+  (no shared prefix — each route keeps its original full path, e.g.
+  `/api/fleet/vehicles`, `/api/fuel-log`, `/oil-change`), `tlp_bp` (`/api/tlp`),
+  `delivery_bp` (`/api`). Note `core` renders the `/delivery/*` **pages** while
+  `delivery_bp` owns the delivery **API** — same word, different layer.
 - **Database**: SQLite at `routing_system.db`, no ORM — raw SQL throughout. Two access
   patterns coexist and both are intentional (docs/CODEBASE_ANALYSIS_REPORT.md items 9-12):
   - `DatabaseManager` (`app/db.py`, context-manager, `PRAGMA foreign_keys=ON` by default)
@@ -98,7 +106,8 @@ app/utils/            geo.py (distance/polygon math), export.py (csv_response he
 app/services/         ttas_client.py, routing.py (ORS), locations.py (manual-location I/O),
                       vehicle_specs.py (envelope validation, per-type defaults, ORS
                       restriction options — see docs/VEHICLE_ROUTING_PLAN.md)
-app/routes/           fleet.py, fuel.py, oil.py, trips.py — the 4 domain Blueprints
+app/routes/           fleet.py, fuel.py, oil.py, trips.py — the 4 domain Blueprints;
+                      core.py — pages + the leftovers with no domain of their own
 truck_load_planner/   3D bin-packing engine; geometry/aabb.py is the single canonical
                       AABB class; logistics/volume.py + constraints.py::get_door_status
                       are self-contained with no engine equivalent — don't fork them.
@@ -131,7 +140,8 @@ static/js/dashboard/  The dispatch dashboard, and the ONLY multi-file page. Name
 **Where to look**: vehicle CRUD → `app/routes/fleet.py`; fuel → `app/routes/fuel.py`;
 oil/TTAS scraping → `app/routes/oil.py`; trips/background refresh → `app/routes/trips.py`;
 core routes (index, `/api/vehicles`, locations, geocoding, delivery page routes) →
-`app.py`; TLP algorithm → `truck_load_planner/engine/` + `geometry/`; delivery logic →
+`app/routes/core.py` (**not** `app.py` — moved 2026-08-07); TLP algorithm →
+`truck_load_planner/engine/` + `geometry/`; delivery logic →
 `services/delivery/*.py`; end-of-day export → `services/delivery/export_service.py`;
 plate → vehicle resolution → `services/vehicle_identity.py`.
 
@@ -308,6 +318,11 @@ A task is done only when:
   `tests/test_fuel_routes.py` (6) is the first for `app/routes/fuel.py`;
   `tests/test_write_handler_connections.py` (36) covers write handlers across all four
   route modules. The pattern to copy for a new one is `test_delivery_routes.py`.
+- **`tests/test_wsgi_routes.py` (8), added 2026-08-07**, asserts that what
+  `gunicorn wsgi:app` serves matches what `python app.py` serves. Every other route suite
+  builds its client from `create_app()`, so all 548 were structurally blind to a route
+  registered outside the factory — which is how production ran without `/`. Suite total
+  is now **556**.
 - Frontend-only changes get no pytest coverage at all. Check syntax with `node --check`,
   and drive the actual module under jsdom rather than reasoning about it — the 2026-07-31
   dashboard work and the 2026-08-02 plan-builder work each found bugs that way that

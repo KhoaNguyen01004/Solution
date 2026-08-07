@@ -1,5 +1,65 @@
 # Changelog
 
+## 2026-08-07 — Production served no core routes: app.py's handlers extracted to a blueprint
+
+> **Uncommitted at the time of writing.** This entry documents the working tree, not
+> `HEAD`.
+
+### Fixed — `gunicorn wsgi:app` 404'd on `/` and 13 other routes
+
+The deployed service returned 404 for `/`, `/locations`, all four `/delivery/*` pages,
+`/api/vehicles`, `/api/geocode` and the whole manual-location CRUD, while every blueprint
+route answered 200 and `python app.py` worked correctly in development.
+
+The cause was structural. `app.py` called `create_app()` and then registered ~15 routes on
+the returned object with `@app.route`. `wsgi.py` — the Gunicorn target, and the only thing
+production runs — calls `create_app()` and returns. Python never executes `app.py` on that
+path, so those decorators never ran. Dev and prod were serving two different applications.
+
+`wsgi.py` was introduced (2026-07-29) to solve the `app.py`-vs-`app/` name collision, and
+it does solve it; what it could not do was pick up routes attached to the app *after* the
+factory returned. The comment at the end of `create_app()` recorded the arrangement as
+intentional ("registered by app.py itself"), which is presumably why it survived — it read
+as a documented split rather than a production gap.
+
+Fix: the handlers moved verbatim into `app/routes/core.py` as a `core` Blueprint,
+registered inside `create_app()` alongside the other six. `app.py` is now a dev runner
+that defines no routes; its only remaining difference from `wsgi.py` is
+`start_route_refresh_thread()` under `if __name__ == "__main__"`, which stays
+dev-only for the reasons already documented there. `wsgi.py` is unchanged.
+
+This completes the `docs/CODEBASE_ANALYSIS_REPORT.md` §6.4.1 extraction, which had left
+these routes as the last un-extracted group.
+
+**Endpoint names changed** from `index` to `core.index`, and so on for all 14. Nothing in
+the repository calls `url_for` — templates use hardcoded paths — so no call site needed
+updating. Worth knowing before adding one.
+
+The `/delivery/*` routes here render templates only. The delivery **API** stays in
+`services/delivery/routes.py` under its `/api` prefix; the split is unchanged.
+
+### Added — `tests/test_wsgi_routes.py` (8)
+
+No existing test could see this bug: every route suite builds its client from
+`create_app()`, so all 548 shared the blind spot precisely. The new file pins the 14 routes
+by rule and endpoint, smoke-tests the six page routes for 200, and — the general guard —
+loads `app.py` by file path and diffs its URL map against `create_app()`, so the *next*
+`@app.route` added to `app.py` fails a test instead of going missing in production. Suite
+total is now 556.
+
+Mutation-checked: with `register_blueprint(core_bp)` removed and a probe route added to
+`app.py`, all 8 fail; restored, all 8 pass.
+
+### Still open — Render is not applying `render.yaml`
+
+Separate from the above, and not fixed here. The deploy logs show `gunicorn app:app` and
+Python 3.14, against a `render.yaml` specifying `gunicorn wsgi:app` and 3.12, so the
+service was created manually in the dashboard rather than as a Blueprint and the YAML is
+ignored in full. That includes the `fleetfuel-data` disk and `DB_PATH`, so
+`routing_system.db` is being recreated empty on ephemeral storage at every boot —
+`/api/fleet/vehicles` returned `{"data": []}` against a fleet of 36. Operator action:
+create the service from the Blueprint, or replicate the disk and env vars by hand.
+
 ## 2026-08-06 — Audit fixes: TLP shipment arrange, geofence transactions, TLP escaping
 
 > **Uncommitted at the time of writing.** This entry documents the working tree, not

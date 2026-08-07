@@ -77,7 +77,16 @@ def create_app():
     app.register_blueprint(oil_bp)
     app.register_blueprint(trips_bp)
 
-    # Remaining core routes (index, /api/vehicles, locations management,
-    # geocoding, delivery page routes) are registered by app.py itself,
-    # directly on the returned app object — see app.py.
+    # Core routes: index, /api/vehicles, manual-location management,
+    # geocoding, delivery page shells.
+    #
+    # These lived in app.py until 2026-08-07, registered on the app object
+    # *after* create_app() returned. That worked for `python app.py` and
+    # silently did not for `gunicorn wsgi:app`, which imports wsgi.py and
+    # never executes app.py — so production 404'd on "/" and everything
+    # else in that file. Anything registered here is served by both entry
+    # points; nothing should be attached to the app outside this function.
+    from app.routes.core import bp as core_bp
+    app.register_blueprint(core_bp)
+
     return app
